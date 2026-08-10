@@ -1,3 +1,11 @@
+---
+name: 작업 이슈
+about: 기능 개발 / 버그 수정 / 문서 / 설정 작업용 기본 템플릿
+title: "[TYPE] "
+labels: ''
+assignees: ''
+---
+
 ## Type
 
 - [ ] feat
