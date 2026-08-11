@@ -44,6 +44,7 @@ _SUCCESS
 
 # Docker
 docker-compose.override.yml
+localstack/volume/
 
 # 로컬 데이터 (원본/중간 산출물은 커밋하지 않음, 경로는 폴더 구조 확정 후 조정)
 data/
