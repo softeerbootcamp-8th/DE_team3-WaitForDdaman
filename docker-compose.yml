@@ -85,7 +85,7 @@ services:
       - DEBUG=0
       - PERSISTENCE=1      # 컨테이너 재시작해도 데이터 유지
     volumes:
-      - "./volume:/var/lib/localstack"
+      - "./localstack/volume:/var/lib/localstack"
       - "/var/run/docker.sock:/var/run/docker.sock"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
