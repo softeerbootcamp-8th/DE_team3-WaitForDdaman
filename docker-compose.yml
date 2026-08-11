@@ -82,6 +82,7 @@ services:
     environment:
       - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN}
       - SERVICES=s3
+      - DEFAULT_REGION=ap-northeast-2
       - DEBUG=0
       - PERSISTENCE=1      # 컨테이너 재시작해도 데이터 유지
     volumes:
