@@ -1,11 +1,14 @@
-export type Tier = "Normal" | "Risk" | "Critical";
+export type Tier = "Normal" | "Warning" | "Critical";
 export type Urgency = "여유있음" | "부족함" | "정보없음";
-export type ListName = "source" | "dest";
+
+export type Side = "강남" | "강북";
+export type RegionFilter = { kind: "all" } | { kind: "side"; side: Side } | { kind: "gu"; name: string };
 
 export interface Bike {
   id: string;
   station: string;
   gu: string;
+  region: Side;
   stationUrgency: Urgency;
   healthyRatio: number | null;
   tier: Tier;
@@ -13,29 +16,17 @@ export interface Bike {
   reason: string;
   distKm: number;
   durH: number;
-  priorFailCount: number;
-  daysSinceLastFail: number;
+  aging: number;
   history: string[];
 }
 
 export interface Capacity {
-  used: number;
   max: number;
-}
-
-export interface Kpi {
-  today: number | null;
-  yesterday: number | null;
-  monthly: number | null;
 }
 
 export interface SnapshotMeta {
   generatedAt: string;
   capacity: Capacity;
-  kpi: Kpi;
-  poolSize: number;
-  tierCounts: Record<string, number>;
-  actionCounts: Record<string, number>;
 }
 
 export interface District {
@@ -49,8 +40,10 @@ export interface MapStation {
   id: number;
   name: string;
   gu: string;
+  region: Side;
   x: number;
   y: number;
+  holdNum: number;
   bikeCount: number;
   riskCount: number;
   healthyRatio: number;
@@ -66,20 +59,4 @@ export interface MapData {
 export interface BikeLists {
   source: Bike[];
   dest: Bike[];
-}
-
-export interface ConfirmResult {
-  recorded: number;
-  destCount: number;
-  sourceCount: number;
-}
-
-export interface WorklogEntry {
-  date: string;
-  bikeId: string;
-  station: string;
-  action: string;
-  tier: string;
-  score: number;
-  confirmedAt: string;
 }

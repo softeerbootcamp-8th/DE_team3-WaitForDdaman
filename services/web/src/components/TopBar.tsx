@@ -1,4 +1,4 @@
-export function TopBar() {
+export function TopBar({ generatedAt }: { generatedAt?: string }) {
   return (
     <div className="topbar">
       <div className="brand">
@@ -13,13 +13,6 @@ export function TopBar() {
           <b>재배치 운영 콘솔</b>
           <span>Fleet Rebalancing Console · WaitForDdaman</span>
         </div>
-      </div>
-      <div className="topbar-right">
-        <span>
-          <span className="dot-live" />
-          스냅샷 데이터 (2026-06-30 기준)
-        </span>
-        <span>운영자 · 배차 담당자</span>
       </div>
     </div>
   );

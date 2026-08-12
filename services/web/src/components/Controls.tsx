@@ -79,12 +79,12 @@ export function Controls({
           <label>
             <input
               type="checkbox"
-              checked={tiers.has("Risk")}
-              onChange={() => onTiersChange(toggleValue(tiers, "Risk"))}
+              checked={tiers.has("Warning")}
+              onChange={() => onTiersChange(toggleValue(tiers, "Warning"))}
             />{" "}
-            Risk
+            Warning
           </label>
-          <div className="grp-title">대여소 시급도</div>
+          <div className="grp-title">정상 자전거 거치율</div>
           <label>
             <input
               type="checkbox"
