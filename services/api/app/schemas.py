@@ -2,20 +2,23 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel
 
+Region = Literal["강남", "강북"]
+Tier = Literal["Normal", "Warning", "Critical"]
+
 
 class Bike(BaseModel):
     id: str
     station: str
     gu: str
+    region: Region
     stationUrgency: str
     healthyRatio: Optional[float]
-    tier: str
+    tier: Tier
     score: float
     reason: str
     distKm: float
     durH: float
-    priorFailCount: int
-    daysSinceLastFail: int
+    aging: float
     history: list[str]
 
 
@@ -25,23 +28,12 @@ class BikeLists(BaseModel):
 
 
 class Capacity(BaseModel):
-    used: int
     max: int
-
-
-class Kpi(BaseModel):
-    today: Optional[float]
-    yesterday: Optional[float]
-    monthly: Optional[float]
 
 
 class SnapshotMeta(BaseModel):
     generatedAt: str
     capacity: Capacity
-    kpi: Kpi
-    poolSize: int
-    tierCounts: dict[str, int]
-    actionCounts: dict[str, int]
 
 
 class District(BaseModel):
@@ -55,8 +47,10 @@ class Station(BaseModel):
     id: int
     name: str
     gu: str
+    region: Region
     x: float
     y: float
+    holdNum: int
     bikeCount: int
     riskCount: int
     healthyRatio: float
@@ -67,28 +61,3 @@ class MapData(BaseModel):
     viewBox: list[float]
     districts: list[District]
     stations: list[Station]
-
-
-class TransferRequest(BaseModel):
-    ids: list[str]
-    fromList: Literal["source", "dest"]
-
-
-class CapacityUpdateRequest(BaseModel):
-    max: int
-
-
-class WorklogEntry(BaseModel):
-    date: str
-    bikeId: str
-    station: str
-    action: str
-    tier: str
-    score: float
-    confirmedAt: str
-
-
-class ConfirmResponse(BaseModel):
-    recorded: int
-    destCount: int
-    sourceCount: int

@@ -1,27 +1,22 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "./api";
-import { DetailTab } from "./components/DetailTab";
-import { MainMapTab } from "./components/MainMapTab";
-import { Toast } from "./components/Toast";
+import { SummaryRow } from "./components/SummaryRow";
 import { TopBar } from "./components/TopBar";
-import type { BikeLists, ListName, MapData, SnapshotMeta } from "./types";
+import { useCapacity } from "./hooks/useCapacity";
+import { useClassifiedPool } from "./hooks/useClassifiedPool";
+import { DetailPage } from "./pages/DetailPage";
+import { MainPage } from "./pages/MainPage";
+import type { Bike, BikeLists, MapData, RegionFilter, SnapshotMeta } from "./types";
+import { buildGuSideMap, totalBikeCount } from "./utils/regions";
 
-type Tab = "main" | "detail";
+type View = "main" | "detail";
+const ALL_FILTER: RegionFilter = { kind: "all" };
 
-export default function App() {
-  const [tab, setTab] = useState<Tab>("main");
+function useSnapshotData() {
   const [meta, setMeta] = useState<SnapshotMeta | null>(null);
   const [mapData, setMapData] = useState<MapData | null>(null);
   const [bikes, setBikes] = useState<BikeLists>({ source: [], dest: [] });
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [toast, setToast] = useState<ReactNode | null>(null);
-  const toastTimer = useRef<number | undefined>(undefined);
-
-  const showToast = useCallback((node: ReactNode) => {
-    setToast(node);
-    window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(null), 3200);
-  }, []);
 
   useEffect(() => {
     (async () => {
@@ -36,78 +31,83 @@ export default function App() {
     })();
   }, []);
 
-  const handleTransfer = useCallback(async (ids: string[], fromList: ListName) => {
-    const updated = await api.transfer(ids, fromList);
-    setBikes(updated);
-    setMeta((prev) => (prev ? { ...prev, capacity: { ...prev.capacity, used: updated.dest.length } } : prev));
-  }, []);
+  const pool = useMemo(() => [...bikes.source, ...bikes.dest], [bikes]);
 
-  const handleCapacityChange = useCallback(async (max: number) => {
-    const updatedMeta = await api.setCapacity(max);
-    const updatedBikes = await api.getBikes();
-    setMeta(updatedMeta);
-    setBikes(updatedBikes);
-  }, []);
+  return { meta, mapData, pool, loadError };
+}
 
-  const handleExport = useCallback(async () => {
-    const log = await api.getWorklog();
-    const blob = new Blob([JSON.stringify(log, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "따맨_작업이력.json";
-    a.click();
-    URL.revokeObjectURL(url);
-  }, []);
-
-  const handleConfirm = useCallback(async () => {
-    const result = await api.confirm();
-    showToast(
-      <>
-        오늘 작업이력 {result.recorded.toLocaleString()}건 기록됨 (수거 {result.destCount.toLocaleString()}건){" "}
-        <a onClick={handleExport}>내보내기</a>
-      </>,
-    );
-  }, [showToast, handleExport]);
+export default function App() {
+  const { meta, mapData, pool, loadError } = useSnapshotData();
 
   return (
     <>
-      <TopBar />
+      <TopBar generatedAt={meta?.generatedAt} />
       <div className="page">
-        <div className="tab-bar">
-          <button className={`tab-btn${tab === "main" ? " active" : ""}`} onClick={() => setTab("main")}>
-            메인
-          </button>
-          <button className={`tab-btn${tab === "detail" ? " active" : ""}`} onClick={() => setTab("detail")}>
-            상세
-          </button>
-        </div>
-
-        <div className={`tab-panel${tab === "main" ? " active" : ""}`}>
-          {mapData ? <MainMapTab mapData={mapData} generatedAt={meta?.generatedAt} /> : <div className="updated">로딩 중…</div>}
-        </div>
-
-        <div className={`tab-panel${tab === "detail" ? " active" : ""}`}>
-          {meta ? (
-            <DetailTab
-              meta={meta}
-              bikes={bikes}
-              onTransfer={handleTransfer}
-              onCapacityChange={handleCapacityChange}
-              onConfirm={handleConfirm}
-            />
-          ) : (
-            <div className="updated">로딩 중…</div>
-          )}
-        </div>
+        {meta && mapData ? <Dashboard meta={meta} mapData={mapData} pool={pool} /> : <div className="updated">로딩 중…</div>}
       </div>
-
-      <Toast message={toast} visible={toast !== null} />
-
       {loadError && (
         <div style={{ position: "fixed", bottom: 8, left: 8, color: "var(--danger)", fontSize: 12 }}>
           데이터를 불러오지 못했습니다: {loadError}
         </div>
+      )}
+    </>
+  );
+}
+
+interface DashboardProps {
+  meta: SnapshotMeta;
+  mapData: MapData;
+  pool: Bike[];
+}
+
+function Dashboard({ meta, mapData, pool }: DashboardProps) {
+  const [view, setView] = useState<View>("main");
+  const [regionFilter, setRegionFilter] = useState<RegionFilter>({ kind: "all" });
+  const districtNames = useMemo(() => mapData.districts.map((d) => d.name), [mapData]);
+  const guToSide = useMemo(() => buildGuSideMap(mapData.stations), [mapData]);
+  const capacity = useCapacity(districtNames, guToSide, meta.capacity.max);
+
+  const { dest, source } = useClassifiedPool(pool, ALL_FILTER, capacity);
+  const totalBikes = useMemo(() => totalBikeCount(mapData.stations, ALL_FILTER), [mapData]);
+
+  return (
+    <>
+      <div className="summary-row">
+        <SummaryRow totalBikes={totalBikes} totalDest={dest.length} totalSource={source.length} overallCapacity={capacity.overall} />
+      </div>
+
+      <div className="tab-bar">
+        <button className={`tab-btn${view === "main" ? " active" : ""}`} onClick={() => setView("main")}>
+          메인
+        </button>
+        <button className={`tab-btn${view === "detail" ? " active" : ""}`} onClick={() => setView("detail")}>
+          상세
+        </button>
+      </div>
+
+      {view === "main" ? (
+        <MainPage
+          mapData={mapData}
+          districtNames={districtNames}
+          guToSide={guToSide}
+          pool={pool}
+          generatedAt={meta.generatedAt}
+          regionFilter={regionFilter}
+          onRegionFilterChange={setRegionFilter}
+          onOpenDetail={() => setView("detail")}
+          capacity={capacity}
+        />
+      ) : (
+        <DetailPage
+          meta={meta}
+          mapData={mapData}
+          districtNames={districtNames}
+          guToSide={guToSide}
+          pool={pool}
+          regionFilter={regionFilter}
+          onRegionFilterChange={setRegionFilter}
+          capacity={capacity}
+        />
       )}
     </>
   );

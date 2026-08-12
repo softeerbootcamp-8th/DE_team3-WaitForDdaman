@@ -1,11 +1,4 @@
-import type {
-  BikeLists,
-  ConfirmResult,
-  ListName,
-  MapData,
-  SnapshotMeta,
-  WorklogEntry,
-} from "./types";
+import type { BikeLists, MapData, SnapshotMeta } from "./types";
 
 const BASE = "/api";
 
@@ -24,16 +17,4 @@ export const api = {
   getMeta: () => request<SnapshotMeta>("/meta"),
   getMap: () => request<MapData>("/map"),
   getBikes: () => request<BikeLists>("/bikes"),
-  transfer: (ids: string[], fromList: ListName) =>
-    request<BikeLists>("/bikes/transfer", {
-      method: "POST",
-      body: JSON.stringify({ ids, fromList }),
-    }),
-  setCapacity: (max: number) =>
-    request<SnapshotMeta>("/capacity", {
-      method: "PATCH",
-      body: JSON.stringify({ max }),
-    }),
-  confirm: () => request<ConfirmResult>("/worklog/confirm", { method: "POST" }),
-  getWorklog: () => request<WorklogEntry[]>("/worklog"),
 };

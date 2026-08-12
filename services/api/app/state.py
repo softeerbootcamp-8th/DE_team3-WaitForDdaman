@@ -1,107 +1,135 @@
-"""오늘 하루치 수거 우선순위 콘솔 상태를 메모리에 들고 있는 단일 진실 소스.
+"""오늘자 콘솔 데이터 조회 계층.
 
-원본 프로토타입(index.html)은 fetch한 snapshot.json을 브라우저 전역 변수에 두고
-확정 로그만 localStorage에 남겼다. 이제 그 상태를 백엔드가 갖고,
-프론트는 API를 통해서만 읽고 바꾼다.
+Airflow 파이프라인이 매일 dim_district / station_daily / bike_risk_daily를 UPSERT해두고,
+여기서는 그중 최신 snapshot_date만 읽어 API 응답 모양으로 옮긴다. 상태를 메모리에 들고
+바꾸던 예전 방식(OperationState의 mutable 리스트)은 없다 — 매 요청이 그 시점의 DB를 그대로 본다.
 """
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
-from pathlib import Path
-from threading import Lock
-from typing import Literal
+from sqlalchemy import text
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-SNAPSHOT_PATH = DATA_DIR / "snapshot.json"
-WORKLOG_PATH = DATA_DIR / "worklog.json"
+from services.api.app.db import engine
+
+# 정비소 하루 처리 capacity 기본값. 실제 배차 여력은 운영자가 프론트에서 구/지역별로
+# 조정하는 값이라 DB에는 저장하지 않는다 — 이 값은 그 조정의 초기 기준값일 뿐이다.
+DEFAULT_CAPACITY = 700
+
+NO_ACTION = "조치없음"
+
+
+def _latest_snapshot_date():
+    with engine.connect() as conn:
+        return conn.execute(text("SELECT MAX(snapshot_date) FROM station_daily")).scalar()
+
+
+def get_meta() -> dict:
+    snapshot_date = _latest_snapshot_date()
+    return {
+        "generatedAt": snapshot_date.isoformat() if snapshot_date else "",
+        "capacity": {"max": DEFAULT_CAPACITY},
+    }
+
+
+def get_map_data() -> dict:
+    snapshot_date = _latest_snapshot_date()
+    with engine.connect() as conn:
+        districts = conn.execute(
+            text("SELECT name, path, cx, cy, view_box_w, view_box_h FROM dim_district WHERE snapshot_date = :d"),
+            {"d": snapshot_date},
+        ).mappings().all()
+        stations = conn.execute(
+            text(
+                """
+                SELECT station_id, station_name, region, gu, x, y, hold_num,
+                       bike_count, risk_count, healthy_ratio, urgency
+                FROM station_daily
+                WHERE snapshot_date = :d
+                """
+            ),
+            {"d": snapshot_date},
+        ).mappings().all()
+
+    # view_box_w/h는 지도 전체 크기라 모든 구 행에 동일하게 중복 저장되어 있다 — 한 행에서만 읽는다.
+    view_box = [districts[0]["view_box_w"], districts[0]["view_box_h"]] if districts else [0, 0]
+    return {
+        "viewBox": view_box,
+        "districts": [{"name": d["name"], "path": d["path"], "cx": d["cx"], "cy": d["cy"]} for d in districts],
+        "stations": [
+            {
+                "id": s["station_id"],
+                "name": s["station_name"],
+                "gu": s["gu"],
+                "region": s["region"],
+                "x": s["x"],
+                "y": s["y"],
+                "holdNum": s["hold_num"],
+                "bikeCount": s["bike_count"],
+                "riskCount": s["risk_count"],
+                "healthyRatio": s["healthy_ratio"],
+                "urgency": s["urgency"],
+            }
+            for s in stations
+        ],
+    }
+
+
+def get_bikes() -> tuple[list[dict], list[dict]]:
+    """수거 후보 Pool(조치없음이 아닌 자전거)을 파이프라인이 정한 action 기준으로
+    source(대여중단) / dest(수거) 두 묶음으로 나눠 돌려준다.
+    프론트는 이 둘을 다시 합쳐(`pool`) capacity 슬라이더로 직접 재분류하므로,
+    여기서의 source/dest 나눔은 파이프라인이 정한 초기값 역할만 한다.
+    """
+    snapshot_date = _latest_snapshot_date()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT b.bike_id, b.station_name, b.gu, b.region, b.healthy_ratio,
+                       b.risk_grade, b.risk_score, b.dist_km, b.dur_h, b.aging,
+                       b.fail_history, b.reason, b.action, s.urgency AS station_urgency
+                FROM bike_risk_daily b
+                LEFT JOIN station_daily s
+                  ON s.station_id = b.station_id AND s.snapshot_date = b.snapshot_date
+                WHERE b.snapshot_date = :d AND b.action != :no_action
+                ORDER BY b.risk_score DESC
+                """
+            ),
+            {"d": snapshot_date, "no_action": NO_ACTION},
+        ).mappings().all()
+
+    def to_bike(r) -> dict:
+        return {
+            "id": r["bike_id"],
+            "station": r["station_name"],
+            "gu": r["gu"],
+            "region": r["region"],
+            "stationUrgency": r["station_urgency"] or "정보없음",
+            "healthyRatio": r["healthy_ratio"],
+            "tier": r["risk_grade"],
+            "score": r["risk_score"],
+            "reason": r["reason"],
+            "distKm": r["dist_km"],
+            "durH": r["dur_h"],
+            "aging": r["aging"],
+            "history": r["fail_history"] or [],
+        }
+
+    dest = [to_bike(r) for r in rows if r["action"] == "수거"]
+    source = [to_bike(r) for r in rows if r["action"] == "대여중단"]
+    return source, dest
 
 
 class OperationState:
-    def __init__(self, snapshot_path: Path = SNAPSHOT_PATH):
-        self._lock = Lock()
-        self._raw = json.loads(snapshot_path.read_text(encoding="utf-8"))
-        self._by_id: dict[str, dict] = {
-            b["id"]: b for b in self._raw["source"] + self._raw["dest"]
-        }
-        self._source_ids: list[str] = [b["id"] for b in self._raw["source"]]
-        self._dest_ids: list[str] = [b["id"] for b in self._raw["dest"]]
-        self._capacity_max: int = self._raw["capacity"]["max"]
-
     @property
     def meta(self) -> dict:
-        return {
-            "generatedAt": self._raw["generatedAt"],
-            "capacity": {"used": len(self._dest_ids), "max": self._capacity_max},
-            "kpi": self._raw["kpi"],
-            "poolSize": self._raw["poolSize"],
-            "tierCounts": self._raw["tierCounts"],
-            "actionCounts": self._raw["actionCounts"],
-        }
+        return get_meta()
 
     @property
     def map_data(self) -> dict:
-        return self._raw["map"]
+        return get_map_data()
 
     def bikes(self) -> tuple[list[dict], list[dict]]:
-        return (
-            [self._by_id[i] for i in self._source_ids],
-            [self._by_id[i] for i in self._dest_ids],
-        )
-
-    def transfer(self, ids: list[str], from_list: Literal["source", "dest"]) -> tuple[list[dict], list[dict]]:
-        with self._lock:
-            src = self._source_ids if from_list == "source" else self._dest_ids
-            dst = self._dest_ids if from_list == "source" else self._source_ids
-            moving = set(ids) & set(src)
-            if moving:
-                src[:] = [i for i in src if i not in moving]
-                # 원래 순서(점수 내림차순)를 최대한 보존하며 이동분을 뒤에 붙인다
-                dst.extend(i for i in ids if i in moving)
-            return self.bikes()
-
-    def set_capacity(self, max_capacity: int) -> None:
-        with self._lock:
-            self._capacity_max = max(0, max_capacity)
-            pool = sorted(
-                self._source_ids + self._dest_ids,
-                key=lambda i: self._by_id[i]["score"],
-                reverse=True,
-            )
-            self._dest_ids = pool[: self._capacity_max]
-            self._source_ids = pool[self._capacity_max:]
-
-    def confirm_today(self) -> dict:
-        with self._lock:
-            today = self._raw["generatedAt"][:10]
-            stamp = datetime.now(timezone.utc).isoformat()
-            entries = []
-            for bike_id in self._dest_ids:
-                b = self._by_id[bike_id]
-                entries.append({
-                    "date": today, "bikeId": b["id"], "station": b["station"],
-                    "action": "수거", "tier": b["tier"], "score": b["score"], "confirmedAt": stamp,
-                })
-            for bike_id in self._source_ids:
-                b = self._by_id[bike_id]
-                entries.append({
-                    "date": today, "bikeId": b["id"], "station": b["station"],
-                    "action": "대여중단_유지", "tier": b["tier"], "score": b["score"], "confirmedAt": stamp,
-                })
-
-            log = self.worklog()
-            log.extend(entries)
-            WORKLOG_PATH.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
-            return {
-                "recorded": len(entries),
-                "destCount": len(self._dest_ids),
-                "sourceCount": len(self._source_ids),
-            }
-
-    def worklog(self) -> list[dict]:
-        if not WORKLOG_PATH.exists():
-            return []
-        return json.loads(WORKLOG_PATH.read_text(encoding="utf-8"))
+        return get_bikes()
 
 
 state = OperationState()
