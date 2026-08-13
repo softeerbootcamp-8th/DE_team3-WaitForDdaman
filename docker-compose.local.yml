@@ -2,7 +2,7 @@ x-airflow-common:
   &airflow-common
   build:
     context: .
-    dockerfile: airflow/Dockerfile
+    dockerfile: airflow/Dockerfile.local
     args:
       AIRFLOW_VERSION: "3.3.0"
       PYTHON_VERSION: "3.11"
@@ -26,6 +26,7 @@ x-airflow-common:
     - ./airflow/logs:/opt/airflow/logs
     - ./airflow/plugins:/opt/airflow/plugins
     - ./airflow/config:/opt/airflow/config
+    - ./ingestion:/opt/airflow/ingestion
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -73,18 +74,18 @@ services:
       interval: 5s
       retries: 5
     restart: always
-  
+
   localstack:
     image: localstack/localstack:2026.06.0
     container_name: localstack
     ports:
-      - "4566:4566"       # 모든 AWS 서비스가 이 포트로 통합 접근
+      - "4566:4566"
     environment:
       - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN}
       - SERVICES=s3
       - DEFAULT_REGION=ap-northeast-2
       - DEBUG=0
-      - PERSISTENCE=1      # 컨테이너 재시작해도 데이터 유지
+      - PERSISTENCE=1
     volumes:
       - "./localstack/volume:/var/lib/localstack"
       - "/var/run/docker.sock:/var/run/docker.sock"

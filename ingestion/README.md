@@ -1,109 +1,270 @@
-# Bronze 적재 - 서울시 공공자전거 대여이력 (OA-15182)
+# Bronze 적재 파이프라인
 
-메인 데이터셋의 Bronze 계층 적재 파이프라인. **Backfill(1회)** 과 **일 배치(증분)**
-두 개의 잡으로 구성되며, 로컬(LocalStack)에서 개발한 뒤 AWS로 그대로 옮길 수 있도록
-설계했다.
+서울시 공공자전거 원천 데이터를 Bronze 계층으로 적재하는 ingestion 프로젝트다.
+파일 기반 **Backfill(1회성)** 과 API 기반 **일 배치**를 모두 지원한다.
+
+대상 데이터셋:
+
+| 데이터셋 | 원천 | Bronze 테이블 | 적재 방식 |
+|---|---|---|---|
+| 대여이력 | OA-15182 / `tbCycleRentData` | `bronze.rental_history` | 파일 백필 + API 증분 |
+| 고장신고 | OA-15644 / `tbCycleFailureReport` | `bronze.failure_report` | 파일 백필 + API 증분 |
+| 대여소정보 | OA-13252 / `tbCycleStationInfo` | `bronze.station_master` | 파일 백필 + API 스냅샷 |
 
 ## 핵심 설계 결정
 
 | 항목 | 결정 | 이유 |
 |---|---|---|
-| 로컬↔AWS 전환 | 환경변수만 교체, 코드 수정 없음 | `.env.example` 참고 |
-| Iceberg 카탈로그 | local=Hadoop / aws=Glue | Glue는 LocalStack 무료 버전에서 에뮬레이션 안 됨 |
-| 멱등성 | `overwritePartitions()` | 재실행 시 같은 날짜 파티션만 덮어씀 (중복/누락 방지) |
-| 스키마 대응 | 컬럼 "이름" 기준 select+cast | 2025년 17컬럼 vs 2026년 16컬럼 통보없는 변경 대응 |
-| Bronze 원칙 | 전부 STRING, 캐스팅 안 함 | "원본 그대로" 보존. 타입 캐스팅은 Silver 책임 |
-| 인코딩 | EUC-KR→UTF-8 사전변환, 손상바이트는 폐기 후 계속 진행 | Spark 4.x charset 제약 + 실제 손상 바이트 존재 확인됨 |
-| 워터마크 | 날짜 단위로 하루씩 전진, 성공한 날만 커밋 | 부분 실패 시 데이터 누락 방지 |
+| 로컬 저장소 | LocalStack S3 + Iceberg Hadoop catalog | AWS 없이 S3/Iceberg 적재 흐름 검증 |
+| AWS 전환 | 환경변수 교체 중심 | 코드 수정 없이 Glue/S3로 이전 가능 |
+| Bronze 원칙 | 원본 필드는 전부 STRING | 타입 캐스팅/품질 규칙은 Silver 책임 |
+| 멱등성 | `overwritePartitions()` | 재실행 시 같은 날짜/스냅샷 파티션만 덮어씀 |
+| 워터마크 | 대여이력/고장신고만 사용 | 대여소정보 API는 날짜 파라미터 없이 전체 스냅샷만 반환 |
+| 대여소정보 파티션 | `snapshot_date` | 이벤트 발생일이 아니라 스냅샷 기준일 |
 
-## 로컬 개발 환경 준비
+## 로컬 Airflow 실행
 
-### 1. LocalStack 실행
+Spark/PySpark ingestion 잡을 Airflow 컨테이너 안에서 실행하려면 루트의 로컬 전용 compose 파일을 사용한다.
+
+기본 `docker-compose.yml`과 `airflow/Dockerfile`은 건드리지 않는다. Spark 실행에 필요한 Java와
+ingestion 의존성은 아래 파일에만 들어있다.
+
+- `../docker-compose.local.yml`
+- `../airflow/Dockerfile.local`
+
+### 1. 환경변수 확인
+
+루트 `.env`는 Airflow/Postgres/LocalStack 컨테이너 설정에 사용된다.
+
+`ingestion/.env`는 DAG가 실행하는 ingestion 잡에서 읽는다. Airflow DAG의 bash command가
+컨테이너 안에서 `/opt/airflow/ingestion/.env`를 `source` 하므로, 로컬에서는 기본값이
+LocalStack 기준인지 확인한다.
+
+필수 확인값:
 
 ```bash
-docker compose -f docker-compose.localstack.yml up -d
+# ingestion/.env
+APP_ENV=local
+S3_ENDPOINT=http://localstack:4566
+RAW_BUCKET=ttareungyi-raw
+WAREHOUSE_BUCKET=ttareungyi-warehouse
+ICEBERG_CATALOG_TYPE=hadoop
+ICEBERG_CATALOG_NAME=bike_catalog
+ICEBERG_WAREHOUSE_PATH=s3a://ttareungyi-warehouse/warehouse
+SEOUL_API_KEY=<서울 열린데이터광장 API 키>
 ```
 
-### 2. 의존성 설치
+### 2. 컨테이너 실행
+
+프로젝트 루트에서 실행한다.
 
 ```bash
-pip install -r requirements.txt --break-system-packages   # 또는 venv 사용 권장
+docker compose -f docker-compose.local.yml up --build
 ```
 
-### 3. 환경변수 설정
+백그라운드 실행:
 
 ```bash
-cp .env.example .env
-# .env 값 확인 (기본값이 LocalStack 기준으로 이미 맞춰져 있음)
+docker compose -f docker-compose.local.yml up --build -d
+```
+
+Airflow UI:
+
+```text
+http://localhost:8080
+```
+
+로그인 계정은 루트 `.env`의 `_AIRFLOW_WWW_USER_USERNAME`,
+`_AIRFLOW_WWW_USER_PASSWORD` 값을 사용한다.
+
+### 3. 컨테이너 상태 확인
+
+```bash
+docker compose -f docker-compose.local.yml ps
+docker compose -f docker-compose.local.yml logs -f airflow-scheduler
+```
+
+compose 파일 문법만 확인하고 싶으면:
+
+```bash
+docker compose -f docker-compose.local.yml config --quiet
+```
+
+## Airflow DAG 실행 방법
+
+Airflow UI에서 DAG를 unpause한 뒤 실행한다.
+
+### Bronze 백필
+
+DAG ID:
+
+```text
+bronze_backfill_all_sources
+```
+
+실행 용도:
+
+- 다운로드해 둔 파일 데이터를 Bronze로 최초 적재
+- 대여소정보를 먼저 적재한 뒤, 대여이력과 고장신고를 병렬로 적재
+
+기본 입력 경로:
+
+| 파라미터 | 기본값 |
+|---|---|
+| `station_master_dir` | `/opt/airflow/ingestion/data/station_master` |
+| `station_master_pattern` | `*` |
+| `rental_history_dir` | `/opt/airflow/ingestion/data/rental_history` |
+| `rental_history_pattern` | `*` |
+| `failure_report_dir` | `/opt/airflow/ingestion/data/failure_report` |
+| `failure_report_pattern` | `*` |
+
+실행 전 파일 배치 예시:
+
+```text
+ingestion/data/station_master/
+ingestion/data/rental_history/
+ingestion/data/failure_report/
+```
+
+Airflow UI에서 `Trigger DAG w/ config`를 사용할 경우 예시:
+
+```json
+{
+  "station_master_pattern": "*.xlsx",
+  "rental_history_pattern": "*2601*",
+  "failure_report_pattern": "*"
+}
+```
+
+### 워터마크 수동 설정
+
+DAG ID:
+
+```text
+set_watermark
+```
+
+실행 용도:
+
+- 파일 백필 완료 후 API 일 배치가 백필 다음 날짜부터 이어서 돌도록 워터마크를 찍는다.
+- `station_master`는 워터마크 대상이 아니다. 매일 전체 스냅샷을 적재한다.
+
+`Trigger DAG w/ config` 예시:
+
+```json
+{
+  "dataset": "rental_history",
+  "watermark_date": "2026-06-30"
+}
+```
+
+고장신고도 필요하면 dataset만 바꿔 한 번 더 실행한다.
+
+```json
+{
+  "dataset": "failure_report",
+  "watermark_date": "2026-06-30"
+}
+```
+
+### Bronze 일 배치
+
+DAG ID:
+
+```text
+bronze_daily_batch_all_sources
+```
+
+스케줄:
+
+```text
+매일 06:00 KST
+```
+
+실행 용도:
+
+- 대여소정보: 실행일 기준 전체 스냅샷 적재
+- 대여이력: 워터마크 다음날부터 어제까지 API 증분 적재
+- 고장신고: 워터마크 다음날부터 어제까지 API 증분 적재
+
+로컬 검증에서 한 번에 처리할 날짜 수를 제한하고 싶으면 `max_days_per_run`을 지정한다.
+
+```json
+{
+  "max_days_per_run": "1"
+}
+```
+
+빈 문자열이면 잡 내부 워터마크 로직이 처리 가능한 날짜를 순차 처리한다.
+
+## 로컬에서 잡 직접 실행
+
+Airflow 없이 ingestion 잡만 직접 실행할 수도 있다.
+
+```bash
+cd ingestion
 export $(grep -v '^#' .env | xargs)
 ```
 
-### 4. Backfill 실행
-
-열린데이터광장에서 반기/월별로 다운로드한 원본 CSV(.zip 포함)를 한 디렉토리에 모은다.
+백필:
 
 ```bash
-# data/ 에 다운로드한 파일들 배치
-INPUT_DIR=../data python -m jobs.backfill_rental_history
+INPUT_DIR=./data/rental_history python -m jobs.backfill_rental_history
+INPUT_DIR=./data/failure_report python -m jobs.backfill_failure_report
+INPUT_DIR=./data/station_master python -m jobs.backfill_station_master
 ```
 
-재실행해도 안전하다 — 같은 날짜 파티션은 덮어써지고 다른 파티션은 그대로 유지된다.
-
-### 5. 일 배치 실행
+일 배치:
 
 ```bash
 python -m jobs.daily_batch_rental_history
+python -m jobs.daily_batch_failure_report
+python -m jobs.daily_batch_station_master
 ```
 
-워터마크가 없으면 `BACKFILL_START_DATE`부터, 있으면 그 다음날부터 어제까지 순차 처리한다.
-Airflow에 태울 때는 이 스크립트를 하나의 Task로 등록하면 된다 (내부에서 날짜별로 반복 처리).
+워터마크 수동 설정:
+
+```bash
+WATERMARK_DATE=2026-06-30 DATASET=rental_history python -m jobs.set_watermark
+WATERMARK_DATE=2026-06-30 DATASET=failure_report python -m jobs.set_watermark
+```
+
+대여소정보 파일명이 기준일을 포함하지 않으면 `SNAPSHOT_DATE`를 직접 지정한다.
+
+```bash
+INPUT_DIR=./data/station_master SNAPSHOT_DATE=2026-06-30 python -m jobs.backfill_station_master
+```
 
 ## 테스트
 
-Spark/Iceberg 세션이 필요 없는 순수 로직(인코딩 변환, 스키마 검증, 워터마크, API
-페이징/재시도)은 실제로 테스트가 통과하는 상태다.
-
 ```bash
+cd ingestion
 pytest tests/ -v
 ```
 
-컬럼 매핑(`build_select_exprs`)이나 날짜 파티션 정규화처럼 Spark DataFrame이
-필요한 로직은 로컬 `local[*]` 모드로 직접 검증했다(별도 pytest에는 포함 안 함,
-Iceberg 확장 없이 순수 Spark로도 검증 가능하기 때문).
+특정 테스트만 실행:
+
+```bash
+pytest tests/test_station_master_schema.py -v
+```
 
 ## AWS 배포 시 바꿔야 하는 것
 
-`.env`에서 아래 값만 교체하면 코드는 그대로 동작한다.
+`ingestion/.env`에서 아래 값들을 AWS 기준으로 교체한다.
 
 ```bash
 APP_ENV=aws
 ICEBERG_CATALOG_TYPE=glue
 ICEBERG_WAREHOUSE_PATH=s3://ttareungyi-warehouse-prod/warehouse
-# AWS_ACCESS_KEY_ID / SECRET은 EC2 IAM Role 사용 시 생략
 ```
 
-그 외에 실제로 확인이 필요한 것들:
+EC2/EMR에서 IAM Role을 사용하면 `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`는 생략할 수 있다.
 
-- **EMR Step으로 실행 시** `spark.jars.packages`가 Maven Central에 접근해야 하므로,
-  EMR 클러스터가 인터넷 아웃바운드(또는 VPC endpoint/NAT)를 가지고 있는지 확인
-- **CloudWatch 커스텀 메트릭** 연동은 로컬에서 테스트 불가 — AWS에서 별도 확인
-- **PyDeequ 대용량 성능**은 로컬 리소스로는 의미 있는 측정이 안 됨 — EMR에서 실측
+## Silver 계층에서 할 일
 
-## 반드시 확인해야 할 TODO
+Bronze는 원본 보존과 적재 안정성만 책임진다. 아래 작업은 Silver에서 처리한다.
 
-`common/api_client.py`의 API 호출 URL 패턴과 응답 JSON의 root key 이름은
-**서울 열린데이터광장 데이터셋 상세 페이지의 "Open API" 탭에서 실제 값으로 재확인**
-해야 한다. 지금 코드는 일반적인 URL 패턴(`/{인증키}/json/{서비스명}/{시작}/{종료}/{조건}`)과
-알려진 응답 코드(`INFO-000`, `ERROR-300`, `ERROR-336`)만 신뢰하고, root key는
-`RESULT`/`row`를 가진 노드를 방어적으로 탐색하도록 만들어 놨다 — 실제 응답을
-한 번 받아본 뒤 `.env`의 `SEOUL_OPENDATA_SERVICE_NAME` 등을 맞추면 된다.
-
-## 다음 단계 (Silver 계층에서 할 일)
-
-Bronze는 "원본 그대로"만 책임진다. 아래는 이 파이프라인이 넘기지 않는 것들이며
-Silver 계층(PyDeequ 품질 검증 + 타입 캐스팅 + 조인)에서 처리해야 한다:
-
-- `use_min`, `use_distance_m` 등을 실제 숫자형으로 캐스팅
-- `sex_cd` 대소문자 정규화(M/m), 24% 결측 처리
-- `birth_year` 더미값(1901, 2098 등) 필터링/플래그
-- 대여소 정보(OA-13252)와의 조인
+- 숫자/날짜 타입 캐스팅
+- 성별/연령/결측/이상값 정규화
+- 대여소정보와 대여이력/고장신고 조인
+- 대여소정보 스냅샷 기반 SCD Type 2 이력화
