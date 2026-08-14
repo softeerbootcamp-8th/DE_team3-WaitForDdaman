@@ -1,65 +1,72 @@
 """
-Silver check - bronze.failure_report에 처리 대상 구간 데이터가 있는지 확인한다.
+Silver check - 전체 재처리 전, 브론즈가 부분 적재 상태가 아닌지 확인한다.
 
-daily는 TARGET_DS(={{ ds }}) 하루치, backfill은 START_DATE~END_DATE 기간을 본다.
-bronze.failure_report.reg_date_partition은 적재일이 아니라 reg_dttm 값에서 뽑아낸
-날짜다(ingestion/jobs/backfill_failure_report.py:_derive_date_partition 참고) -
-그래서 이 컬럼으로 필터링하면 "그 날짜에 실제로 신고된 데이터"를 정확히 골라낼 수 있다.
+단일 DAG(매일 브론즈 전체 재처리 + INSERT OVERWRITE)에서는 이 검증이 실버를 지키는
+첫 번째 방어선이다(두 번째는 validate). ingestion/jobs/backfill_failure_report.py의
+브론즈 적재는 파일 단위로 개별 커밋되고 배치 전체를 감싸는 트랜잭션이 없어서, 배치
+도중 실패하면 브론즈가 부분 적재 상태로 남을 수 있다. 이 상태로 그대로 재처리하면
+INSERT OVERWRITE가 멀쩡하던 실버를 부분 데이터로 통째로 교체해버린다(신규 키만
+추가하는 MERGE와 달리 기존 데이터를 지운다).
+
+방어 로직: 브론즈 현재 행수가 직전 실버 행수의 MIN_BRONZE_TO_PREV_SILVER_RATIO
+미만이면 실패. 직전 실버가 없거나(최초 실행) 0행이면 비교 기준이 없으므로 통과시킨다.
 
 사용법:
-    TARGET_DS=2026-08-13 python -m jobs.silver_failure_report_check
-    START_DATE=2026-01-01 END_DATE=2026-06-30 python -m jobs.silver_failure_report_check
+    python -m jobs.silver_failure_report_check
 """
 import logging
-import os
 import sys
-from datetime import date
 
-from pyspark.sql import functions as F
-
-from common import config
+import config
 from common.spark_session import build_spark_session
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-BRONZE_TABLE = f"{config.SETTINGS.iceberg_catalog_name}.bronze.failure_report"
+CATALOG = config.SETTINGS.iceberg_catalog_name
+BRONZE_TABLE = f"{CATALOG}.bronze.failure_report"
+SILVER_TABLE = f"{CATALOG}.silver.failure_report"
+
+MIN_BRONZE_TO_PREV_SILVER_RATIO = 0.95  # 잠정치 - 실측 후 조정
 
 
-class ScopeError(Exception):
-    """TARGET_DS도 START_DATE/END_DATE도 없을 때 - 잡을 즉시 실패시켜야 한다."""
+def evaluate_partial_load(
+    bronze_count: int,
+    prev_silver_count: int,
+    threshold: float = MIN_BRONZE_TO_PREV_SILVER_RATIO,
+) -> tuple[bool, str]:
+    """브론즈가 직전 실버 대비 threshold 미만으로 줄었으면 (True, 사유)를 반환한다."""
+    if prev_silver_count == 0:
+        return False, "직전 silver 데이터 없음 - 비율 체크 스킵"
+
+    ratio = bronze_count / prev_silver_count
+    reason = f"브론즈 {bronze_count}행 / 직전 실버 {prev_silver_count}행 = {ratio:.1%}"
+    if ratio < threshold:
+        return True, f"{reason} (임계값 {threshold:.0%} 미만 - 브론즈 부분 적재 의심)"
+    return False, reason
 
 
-def _resolve_date_range() -> tuple[date, date]:
-    target_ds = os.getenv("TARGET_DS", "").strip()
-    if target_ds:
-        d = date.fromisoformat(target_ds)
-        return d, d
-
-    start_str = os.getenv("START_DATE", "").strip()
-    end_str = os.getenv("END_DATE", "").strip()
-    if start_str and end_str:
-        start, end = date.fromisoformat(start_str), date.fromisoformat(end_str)
-        if start > end:
-            raise ScopeError(f"START_DATE({start})가 END_DATE({end})보다 뒤에 있음")
-        return start, end
-
-    raise ScopeError("TARGET_DS 또는 START_DATE/END_DATE 중 하나는 반드시 필요함")
+def _silver_row_count(spark) -> int:
+    if not spark.catalog.tableExists(SILVER_TABLE):
+        return 0
+    return spark.table(SILVER_TABLE).count()
 
 
 def run() -> None:
-    start, end = _resolve_date_range()
     spark = build_spark_session("silver-check-failure-report")
 
-    count = (
-        spark.table(BRONZE_TABLE)
-        .where((F.col("reg_date_partition") >= str(start)) & (F.col("reg_date_partition") <= str(end)))
-        .count()
-    )
-    logger.info("bronze.failure_report %s~%s: %d행", start, end, count)
+    bronze_count = spark.table(BRONZE_TABLE).count()
+    logger.info("bronze.failure_report: %d행", bronze_count)
 
-    if count == 0:
-        logger.error("해당 구간에 bronze 데이터가 없음 - bronze 적재 완료 여부 확인 필요")
+    if bronze_count == 0:
+        logger.error("브론즈에 데이터가 없음 - 브론즈 적재 완료 여부 확인 필요")
+        sys.exit(1)
+
+    prev_silver_count = _silver_row_count(spark)
+    is_partial, reason = evaluate_partial_load(bronze_count, prev_silver_count)
+    logger.info(reason)
+    if is_partial:
+        logger.error("파이프라인 중단: %s", reason)
         sys.exit(1)
 
 
