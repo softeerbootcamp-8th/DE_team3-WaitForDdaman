@@ -31,7 +31,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from pyspark.sql import functions as F
 
-from common import config
+import config
 from common.db_client import BikemanDbError, fetch_events_by_date
 from common.s3_utils import ensure_bucket, put_json
 from common.spark_session import build_spark_session

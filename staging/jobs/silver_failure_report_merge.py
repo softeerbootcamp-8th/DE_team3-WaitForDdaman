@@ -10,7 +10,7 @@ Silver merge (daily 전용) - staging -> silver.failure_report MERGE INTO.
 """
 import logging
 
-from common import config
+import config
 from common.spark_session import build_spark_session
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

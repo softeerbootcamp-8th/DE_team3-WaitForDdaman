@@ -11,7 +11,7 @@ days(reg_dttm) 파티션만 덮어쓰고 나머지 기존 파티션은 그대로
 """
 import logging
 
-from common import config
+import config
 from common.spark_session import build_spark_session
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

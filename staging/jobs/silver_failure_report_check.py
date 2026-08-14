@@ -17,7 +17,7 @@ from datetime import date
 
 from pyspark.sql import functions as F
 
-from common import config
+import config
 from common.spark_session import build_spark_session
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
