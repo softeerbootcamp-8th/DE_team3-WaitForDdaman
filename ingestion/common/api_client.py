@@ -24,7 +24,7 @@ from typing import Iterator, Optional
 import requests
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from common import config
+import config
 
 logger = logging.getLogger(__name__)
 

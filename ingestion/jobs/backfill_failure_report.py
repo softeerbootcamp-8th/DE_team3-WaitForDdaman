@@ -23,7 +23,7 @@ from pathlib import Path
 
 from pyspark.sql import functions as F
 
-from common import config
+import config
 from common.encoding_utils import convert_euckr_file_to_utf8
 from common.file_utils import NotThisDatasetError, convert_xlsx_to_utf8_csv, unzip_if_needed
 from common.s3_utils import ensure_bucket, upload_file

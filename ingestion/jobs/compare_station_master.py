@@ -20,7 +20,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from common import config
+import config
 from common.api_client import fetch_station_info
 from common.s3_utils import ensure_bucket, put_json, put_text, upload_file
 

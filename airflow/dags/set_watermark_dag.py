@@ -6,8 +6,10 @@
 파일로 이미 채운 기간을 중복 처리하게 된다.
 
 ### 대상 데이터셋
-- rental_history : 워터마크 있음 (증분 기준 = RENT_DT)
-- failure_report : 워터마크 있음 (증분 기준 = REGDTTM)
+- rental_history : Bronze 워터마크 (증분 기준 = RENT_DT)
+- failure_report : Bronze 워터마크 (증분 기준 = REGDTTM)
+- silver_rental_history : Silver 워터마크 (staging/jobs/transform_silver_rental_history.py)
+- gold_dim_bike : Gold 워터마크 (pipeline/risk_model/jobs/build_dim_bike.py)
 - station_master : **해당 없음** - tbCycleStationInfo는 날짜 파라미터가 없고 매번 전체
                    스냅샷만 주므로 증분 기준이 될 컬럼 자체가 없다. 그래서 이 DAG의
                    선택지에 없다.
@@ -32,7 +34,7 @@ INGESTION_PYTHON = "python"
     tags=["utility", "watermark", "bronze"],
     params={
         "watermark_date": "2026-06-30",
-        "dataset": "rental_history",  # rental_history | failure_report
+        "dataset": "rental_history",  # rental_history | failure_report | silver_rental_history | gold_dim_bike
     },
     doc_md=__doc__,
 )
