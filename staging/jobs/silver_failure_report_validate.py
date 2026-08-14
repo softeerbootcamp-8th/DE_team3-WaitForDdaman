@@ -1,7 +1,7 @@
 """
 Silver validate - staging(silver.failure_report_staging)이 확정 스키마의 유일키/
-그레인 규칙을 지키는지 검증한다. 여기서 실패하면 merge/overwrite로 넘어가지 않는다
-(태스크 체인상 validate가 적재 앞).
+그레인 규칙을 지키는지 검증한다. 여기서 실패하면 overwrite로 넘어가지 않는다
+(태스크 체인상 validate가 적재 앞) - check와 함께 실버를 지키는 방어선이다.
 
 검증 항목:
 - 필수 컬럼(bike_no, reg_dttm, failure_type) null 없음 (실패 시 파이프라인 중단)

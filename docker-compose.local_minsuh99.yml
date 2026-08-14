@@ -21,6 +21,7 @@ x-airflow-common:
     AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
     AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
     AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+    PYTHONPATH: /opt/airflow/pylib
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs
@@ -28,6 +29,7 @@ x-airflow-common:
     - ./airflow/config:/opt/airflow/config
     - ./ingestion:/opt/airflow/ingestion
     - ./staging:/opt/airflow/staging
+    - ./config:/opt/airflow/pylib/config
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on

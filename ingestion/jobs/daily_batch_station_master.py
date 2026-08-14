@@ -1,19 +1,27 @@
 """
-Bronze 일 배치 잡 - 서울시 공공자전거 대여소 정보 (OA-13252)
+Bronze 일 배치 - 대여소 정보 (OA-13252 / tbCycleStationInfo)
 
-앞선 두 데이터셋과 다른 점: tbCycleStationInfo API는 날짜 파라미터를 받지 않고
-호출 시점의 "전체 대여소 스냅샷"을 반환한다. 그래서:
+이 원천은 파일 백필이 없다. API 일일 전체 스냅샷 하나로만 적재한다.
+(반기 파일에만 있는 컬럼 - 설치시기/LCD·QR거치대수/운영방식 - 은 골드·프론트·백엔드
+ 어디에서도 쓰지 않고, 파일에는 골드 조인 키인 station_id가 없다. 2026-08-13 확인)
+
+tbCycleStationInfo는 날짜 파라미터를 받지 않고 호출 시점의 "전체 대여소 스냅샷"만
+반환한다. 그래서:
     - 워터마크가 필요 없다 (증분 기준이 될 컬럼 자체가 없음)
-    - 매일 실행하면 그 날짜의 스냅샷이 하나씩 쌓인다 → snapshot_date 파티션
+    - 매일 실행하면 그 날짜의 스냅샷이 하나씩 쌓인다 -> snapshot_date 파티션
     - 재실행하면 같은 날짜 파티션을 덮어쓴다 (멱등성)
 
-이렇게 매일 스냅샷을 축적해두는 게 Silver의 SCD Type 2(유효기간 부여)의 입력이 된다.
-원천이 반기 단위로만 파일을 공개하는 것과 달리, API를 매일 찍어두면 신설/폐쇄를
-하루 단위로 포착할 수 있다.
+⚠️ 과거를 소급 조회할 수 없다. 오늘 스냅샷을 놓치면 오늘의 대여소 상태는 영구히 사라진다.
+   대여이력·고장신고는 워터마크로 며칠 밀려도 따라잡히지만 이 원천은 불가능하므로,
+   실패 시 반드시 사람이 인지해야 한다.
+
+   실제로 하루 사이 변화가 관측된다 (2026-08-13 -> 08-14 실측):
+       신설 1곳 (ST-3440 롯데몰김포), 거치대수 변경 1곳 (ST-2008 20 -> 19)
+   이 변화가 Silver SCD Type 2의 입력이 된다.
 
 사용법:
     python -m jobs.daily_batch_station_master
-    SNAPSHOT_DATE=2026-08-11 python -m jobs.daily_batch_station_master   # 특정 날짜로 적재
+    SNAPSHOT_DATE=2026-08-14 python -m jobs.daily_batch_station_master   # 재처리 전용
 """
 import logging
 import os
@@ -34,6 +42,7 @@ from common.spark_session import build_spark_session
 from schema.station_master_schema import (
     SchemaValidationError,
     build_select_exprs,
+    collect_response_fields,
     validate_and_report,
 )
 
@@ -46,15 +55,46 @@ def _table_name() -> str:
 
 
 def _ensure_bronze_table(spark) -> None:
-    """백필 잡과 동일한 테이블을 공유한다 (백필=파일 소스, 일배치=API 소스)."""
-    from jobs.backfill_station_master import _ensure_bronze_table as ensure_table
-
-    ensure_table(spark)
+    """
+    Bronze 원칙대로 원본 필드를 전부 STRING으로 보존한다.
+    타입 캐스팅은 Silver 책임 - 여기서 캐스팅하면 실패한 값이 조용히 null이 되어
+    원천에 무엇이 왔는지 알 수 없게 된다.
+    """
+    spark.sql(f"CREATE DATABASE IF NOT EXISTS {config.SETTINGS.iceberg_catalog_name}.bronze")
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {_table_name()} (
+            station_no      STRING COMMENT '대여소번호, API zero-padding 제거 (108)',
+            station_id      STRING COMMENT '대여소 ID (ST-10), 골드 조인 키',
+            station_name    STRING COMMENT '대여소명',
+            station_id_name STRING COMMENT '대여소번호 + 대여소명',
+            district        STRING COMMENT '자치구',
+            hold_num        STRING COMMENT '거치대 수',
+            address1        STRING COMMENT '주소',
+            address2        STRING COMMENT '상세주소',
+            latitude        STRING COMMENT '위도',
+            longitude       STRING COMMENT '경도',
+            snapshot_date   STRING COMMENT '스냅샷 기준일 (YYYY-MM-DD), 파티션 키',
+            source_file     STRING COMMENT '출처 (api:YYYY-MM-DD)',
+            ingested_at     TIMESTAMP COMMENT '적재 시각'
+        )
+        USING iceberg
+        PARTITIONED BY (snapshot_date)
+        """
+    )
+    # Iceberg가 직접 분산/정렬하게 해서 FanoutWriter의 높은 메모리 사용
+    # (파티션별 파일 동시 오픈)을 피한다.
+    spark.sql(
+        f"ALTER TABLE {_table_name()} SET TBLPROPERTIES ('write.distribution-mode'='hash')"
+    )
 
 
 def _process_snapshot(spark, snapshot_date: str) -> int:
     raw_rows = list(fetch_station_info())
 
+    # 변환 전 원본 응답을 그대로 보존한다 (lineage).
+    # 나중에 "이 값이 왜 이렇지?"를 원천 재호출 없이 확인할 수 있고,
+    # API가 현행화되어 응답이 바뀌면 그 시점의 원본이 근거가 된다.
     ensure_bucket(config.SETTINGS.raw_bucket)
     put_json(
         config.SETTINGS.raw_bucket,
@@ -66,9 +106,11 @@ def _process_snapshot(spark, snapshot_date: str) -> int:
         logger.warning("%s: API 응답이 비어있음 (0건) - 적재 생략", snapshot_date)
         return 0
 
-    # START_INDEX/END_INDEX/RNUM은 페이징 메타데이터라 실제 데이터 컬럼이 아니므로 제거
+    # START_INDEX/END_INDEX/RNUM은 페이징 메타라 실제 데이터 컬럼이 아니므로 제거
     rows = [strip_pagination_meta(r) for r in raw_rows]
-    actual_columns = list(rows[0].keys())
+    # 첫 행이 아니라 전체 행의 키 합집합을 본다. 행마다 필드 구성이 다르다
+    # (실측: 13행은 HOLD_NUM 키가 없음) - 자세한 이유는 함수 docstring 참고
+    actual_columns = collect_response_fields(rows)
     logger.info("API 응답 필드: %s", actual_columns)
     validate_and_report(actual_columns)
 
@@ -90,11 +132,13 @@ def _process_snapshot(spark, snapshot_date: str) -> int:
 
 
 def run() -> None:
-    if config.SETTINGS.seoul_api_key == "sample":
-        logger.warning(
-            "SEOUL_API_KEY가 'sample'(데모 키)입니다. data.seoul.go.kr에서 발급받은 "
-            "실제 인증키로 .env를 교체하지 않으면 API 호출이 계속 실패합니다."
+    if config.SETTINGS.seoul_api_key in ("", "sample"):
+        logger.error(
+            "SEOUL_API_KEY가 비어있거나 'sample'(데모 키)입니다. "
+            "data.seoul.go.kr에서 발급받은 실제 인증키로 ingestion/.env를 채우세요. "
+            "(루트 .env가 아니라 ingestion/.env여야 잡이 읽습니다)"
         )
+        sys.exit(1)
 
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
@@ -103,7 +147,8 @@ def run() -> None:
     _ensure_bronze_table(spark)
 
     # 이 API는 "지금 시점의 전체 스냅샷"만 주므로 과거 날짜를 소급 조회할 수 없다.
-    # 따라서 기본값은 오늘이며, 재처리 목적으로만 SNAPSHOT_DATE를 명시한다.
+    # 따라서 기본값은 오늘이며, SNAPSHOT_DATE는 재처리 목적으로만 쓴다.
+    # ⚠️ 과거 날짜를 지정하면 "오늘 데이터에 과거 날짜 도장을 찍는" 결과가 되므로 주의.
     snapshot_date = os.getenv("SNAPSHOT_DATE") or date.today().strftime("%Y-%m-%d")
 
     try:
