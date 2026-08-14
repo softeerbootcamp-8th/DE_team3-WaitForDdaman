@@ -25,7 +25,7 @@ from pyspark.sql import functions as F
 
 from common import config
 from common.encoding_utils import convert_euckr_file_to_utf8
-from common.file_utils import NotThisDatasetError, convert_xlsx_to_utf8_csv, unzip_if_needed
+from common.file_utils import NotThisDatasetError, convert_xlsx_to_utf8_csv, is_xlsx, unzip_if_needed
 from common.s3_utils import ensure_bucket, upload_file
 from common.spark_session import build_spark_session
 from schema.failure_report_schema import (
@@ -83,7 +83,7 @@ def _stage_as_utf8_csv(raw_path: Path, workdir: Path) -> Path:
     - .xlsx: pandas로 읽어 바로 UTF-8 CSV로 변환 (이미 텍스트라 EUC-KR 변환 불필요)
     - .csv(EUC-KR): iconv -c와 동일한 방식으로 UTF-8 변환
     """
-    if raw_path.suffix.lower() == ".xlsx":
+    if is_xlsx(raw_path):
         return convert_xlsx_to_utf8_csv(raw_path, workdir)
 
     utf8_path = workdir / f"{raw_path.stem}.utf8.csv"
