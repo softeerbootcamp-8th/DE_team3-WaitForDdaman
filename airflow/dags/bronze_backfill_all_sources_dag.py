@@ -1,16 +1,19 @@
 """
-Bronze 백필 DAG (3개 원천 통합) - 1회성, 수동 트리거
+Bronze 백필 DAG (2개 원천) - 1회성, 수동 트리거
 
-대여이력 / 고장신고 / 대여소정보 3개 원천의 파일 기반 백필을 한 DAG에서 실행한다.
+대여이력 / 고장신고 두 원천의 파일 기반 백필을 한 DAG에서 실행한다.
+
+### 대여소정보(station_master)가 여기 없는 이유
+이 원천은 파일 백필 대상이 아니다. tbCycleStationInfo는 날짜 파라미터를 받지 않고
+호출 시점의 전체 스냅샷만 주므로 과거를 소급 적재할 수 없고, 반기 파일에는 골드
+조인 키인 station_id가 없다 (jobs/daily_batch_station_master.py 참고).
+대여소정보 적재는 bronze_daily_batch_all_sources DAG가 매일 스냅샷으로 담당한다.
 
 ### 태스크 의존성 설계
-대여소정보(station_master)를 **먼저** 적재하고, 그 다음 대여이력/고장신고를 병렬로 처리한다.
-이유: 대여소정보는 다른 두 소스가 조인해야 하는 마스터(참조) 데이터이므로, 마스터가
-먼저 있어야 Silver 단계에서 고아(orphan) 레코드를 판별할 수 있다. 대여이력과 고장신고는
-서로 의존관계가 없어서 병렬로 둔다.
+대여이력과 고장신고는 서로 의존관계가 없어서 병렬로 둔다.
 
-    station_master ─┬─> rental_history
-                    └─> failure_report
+    rental_history
+    failure_report
 
 ### 왜 병렬을 2개로 제한하는가
 로컬(LocalStack) 환경에서 여러 Spark 잡이 동시에 대량 PutObject를 보내면
@@ -63,23 +66,10 @@ def _bash(job_module: str, extra_env: str = "") -> str:
         "rental_history_pattern": "*",
         "failure_report_dir": f"{INGESTION_DIR}/data/failure_report",
         "failure_report_pattern": "*",
-        "station_master_dir": f"{INGESTION_DIR}/data/station_master",
-        "station_master_pattern": "*",
     },
     doc_md=__doc__,
 )
 def bronze_backfill_all_sources():
-    # 마스터(참조) 데이터 - 다른 두 소스가 조인 대상으로 삼으므로 먼저 적재
-    station_master = BashOperator(
-        task_id="backfill_station_master",
-        bash_command=_bash(
-            "backfill_station_master",
-            "INPUT_DIR='{{ params.station_master_dir }}' "
-            "INPUT_FILE_PATTERN='{{ params.station_master_pattern }}' ",
-        ),
-        execution_timeout=timedelta(minutes=30),
-    )
-
     # 대여이력: 반기 파일이 최대 700MB대라 가장 오래 걸림
     rental_history = BashOperator(
         task_id="backfill_rental_history",
@@ -102,7 +92,8 @@ def bronze_backfill_all_sources():
         execution_timeout=timedelta(hours=1),
     )
 
-    station_master >> [rental_history, failure_report]
+    # 두 태스크 사이에 의존관계를 걸지 않는다.
+    # 서로 참조하지 않는 원천이고, 동시 실행 부하는 max_active_tasks=2가 제한한다.
 
 
 bronze_backfill_all_sources()
