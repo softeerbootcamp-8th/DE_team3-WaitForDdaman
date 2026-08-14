@@ -15,7 +15,7 @@ import os
 
 from pyspark.sql import SparkSession
 
-from common import config
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -24,16 +24,21 @@ ICEBERG_AWS_BUNDLE_PACKAGE = "org.apache.iceberg:iceberg-aws-bundle:1.5.2"
 HADOOP_AWS_PACKAGE = "org.apache.hadoop:hadoop-aws:3.3.4"
 
 
-def build_spark_session(app_name: str) -> SparkSession:
+def build_spark_session(
+    app_name: str,
+    extra_packages: list[str] | None = None,
+    extra_excludes: list[str] | None = None,
+) -> SparkSession:
     settings = config.SETTINGS
     catalog = settings.iceberg_catalog_name
 
+    packages = [ICEBERG_SPARK_RUNTIME_PACKAGE, ICEBERG_AWS_BUNDLE_PACKAGE, HADOOP_AWS_PACKAGE]
+    if extra_packages:
+        packages.extend(extra_packages)
+
     builder = (
         SparkSession.builder.appName(app_name)
-        .config(
-            "spark.jars.packages",
-            ",".join([ICEBERG_SPARK_RUNTIME_PACKAGE, ICEBERG_AWS_BUNDLE_PACKAGE, HADOOP_AWS_PACKAGE]),
-        )
+        .config("spark.jars.packages", ",".join(packages))
         .config(
             "spark.sql.extensions",
             "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
@@ -47,6 +52,9 @@ def build_spark_session(app_name: str) -> SparkSession:
         # 백필 시 재실행이 곧 "동일 날짜 파티션 덮어쓰기"가 되도록 dynamic overwrite 사용
         .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
     )
+
+    if extra_excludes:
+        builder = builder.config("spark.jars.excludes", ",".join(extra_excludes))
 
     if settings.iceberg_catalog_type == "hadoop":
         # 로컬 개발: Hadoop Catalog (LocalStack S3 경로 기반, Glue 불필요)
@@ -94,3 +102,37 @@ def build_spark_session(app_name: str) -> SparkSession:
     spark.sparkContext.setLogLevel("WARN")
     logger.info("SparkSession 생성 완료 (catalog_type=%s)", settings.iceberg_catalog_type)
     return spark
+
+
+def build_spark_session_with_deequ(app_name: str) -> SparkSession:
+    """
+    PyDeequ(데이터 품질 검증) 사용하는 잡 전용 세션 빌더.
+
+    PyDeequ는 SPARK_VERSION 환경변수를 보고 맞는 Deequ jar 좌표(Scala)를 고른다 -
+    반드시 `import pydeequ`보다 먼저 이 환경변수를 설정해야 한다.
+    NOTE: pydeequ가 현재 Spark 버전(3.5.1)의 Deequ 빌드를 지원하는지는
+          requirements.txt의 pydeequ 버전에 따라 달라질 수 있으니, 실행 시
+          "Deequ jar를 찾을 수 없음" 류 에러가 나면 pydeequ 버전을 먼저 확인할 것.
+    """
+    os.environ.setdefault("SPARK_VERSION", "3.5")
+    import pydeequ
+
+    return build_spark_session(
+        app_name,
+        extra_packages=[pydeequ.deequ_maven_coord],
+        extra_excludes=[pydeequ.f2j_maven_coord],
+    )
+
+
+def stop_spark_session_with_deequ(spark: SparkSession) -> None:
+    """
+    PyDeequ가 VerificationSuite 실행 시 열어두는 py4j 콜백 서버(non-daemon 스레드)를
+    먼저 내려야 한다. 이걸 안 하면 spark.stop()이나 sys.exit()을 호출해도 그 스레드가
+    프로세스를 계속 붙잡고 있어 잡이 "성공/실패 판정과 무관하게 영원히 안 끝나는" 상태가
+    된다 (실측: transform_silver_rental_history가 sys.exit(1) 이후에도 13분+ 살아있었음).
+    """
+    try:
+        spark.sparkContext._gateway.shutdown_callback_server()
+    except Exception:
+        logger.warning("PyDeequ 콜백 서버 종료 중 오류 (무시하고 계속)", exc_info=True)
+    spark.stop()

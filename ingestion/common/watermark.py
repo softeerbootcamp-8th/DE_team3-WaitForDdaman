@@ -11,7 +11,7 @@
 import logging
 from datetime import date, datetime, timezone
 
-from common import config
+import config
 from common.s3_utils import get_json, put_json
 
 logger = logging.getLogger(__name__)

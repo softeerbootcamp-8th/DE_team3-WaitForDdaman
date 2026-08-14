@@ -12,6 +12,8 @@ DATASET으로 지정한다.
 사용법:
     WATERMARK_DATE=2026-06-30 DATASET=rental_history python -m jobs.set_watermark
     WATERMARK_DATE=2026-06-30 DATASET=failure_report python -m jobs.set_watermark
+    WATERMARK_DATE=2026-06-30 DATASET=silver_rental_history python -m jobs.set_watermark
+    WATERMARK_DATE=2026-06-30 DATASET=gold_dim_bike python -m jobs.set_watermark
 """
 import logging
 import os
@@ -19,14 +21,23 @@ import sys
 from datetime import datetime, timedelta
 
 from common.watermark import write_watermark
+from config.watermark_keys import (
+    BRONZE_FAILURE_REPORT,
+    BRONZE_RENTAL_HISTORY,
+    GOLD_DIM_BIKE,
+    SILVER_RENTAL_HISTORY,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# 데이터셋명 -> 워터마크 키 (각 daily_batch_*.py 모듈에 정의된 것과 동일해야 함)
+# 데이터셋명 -> 워터마크 키. 실제 키 문자열은 config/watermark_keys.py 한 곳에서만
+# 관리한다 (각 daily_batch_*.py / staging / pipeline 잡과 반드시 같은 값을 참조해야 함).
 WATERMARK_KEYS = {
-    "rental_history": "_meta/watermark/rental_history.json",
-    "failure_report": "_meta/watermark/failure_report.json",
+    "rental_history": BRONZE_RENTAL_HISTORY,
+    "failure_report": BRONZE_FAILURE_REPORT,
+    "silver_rental_history": SILVER_RENTAL_HISTORY,
+    "gold_dim_bike": GOLD_DIM_BIKE,
 }
 
 

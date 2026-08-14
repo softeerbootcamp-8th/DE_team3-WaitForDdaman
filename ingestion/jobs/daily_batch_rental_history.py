@@ -19,7 +19,7 @@ from datetime import date, timedelta
 
 from pyspark.sql import functions as F
 
-from common import config
+import config
 from common.api_client import (
     SeoulApiError,
     SeoulApiTransientError,
