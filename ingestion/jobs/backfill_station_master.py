@@ -24,7 +24,7 @@ from pathlib import Path
 
 from pyspark.sql import functions as F
 
-from common import config
+import config
 from common.file_utils import NotThisDatasetError
 from common.s3_utils import ensure_bucket, upload_file
 from common.spark_session import build_spark_session

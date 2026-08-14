@@ -167,6 +167,23 @@ set_watermark
 }
 ```
 
+Silver/Gold(대여이력 전용, `silver_gold_daily_batch_rental_history` DAG)도 같은 방식으로 찍는다.
+Bronze 워터마크보다 뒤 날짜를 찍으면 그 사이 날짜는 영영 처리되지 않으니 주의한다.
+
+```json
+{
+  "dataset": "silver_rental_history",
+  "watermark_date": "2026-06-30"
+}
+```
+
+```json
+{
+  "dataset": "gold_dim_bike",
+  "watermark_date": "2026-06-30"
+}
+```
+
 ### Bronze 일 배치
 
 DAG ID:
@@ -204,6 +221,7 @@ Airflow 없이 ingestion 잡만 직접 실행할 수도 있다.
 ```bash
 cd ingestion
 export $(grep -v '^#' .env | xargs)
+export PYTHONPATH=..:$PYTHONPATH  # ingestion/staging/pipeline이 공유하는 최상위 config/ 패키지를 찾기 위함
 ```
 
 백필:
@@ -227,6 +245,8 @@ python -m jobs.daily_batch_station_master
 ```bash
 WATERMARK_DATE=2026-06-30 DATASET=rental_history python -m jobs.set_watermark
 WATERMARK_DATE=2026-06-30 DATASET=failure_report python -m jobs.set_watermark
+WATERMARK_DATE=2026-06-30 DATASET=silver_rental_history python -m jobs.set_watermark
+WATERMARK_DATE=2026-06-30 DATASET=gold_dim_bike python -m jobs.set_watermark
 ```
 
 대여소정보 파일명이 기준일을 포함하지 않으면 `SNAPSHOT_DATE`를 직접 지정한다.
@@ -239,6 +259,7 @@ INPUT_DIR=./data/station_master SNAPSHOT_DATE=2026-06-30 python -m jobs.backfill
 
 ```bash
 cd ingestion
+export PYTHONPATH=..:$PYTHONPATH  # 최상위 config/ 패키지를 찾기 위함
 pytest tests/ -v
 ```
 

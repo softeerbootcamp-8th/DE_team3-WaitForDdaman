@@ -61,3 +61,7 @@ Thumbs.db
 
 # 로그
 *.log
+
+*.csv
+__init__.py
+*.ini

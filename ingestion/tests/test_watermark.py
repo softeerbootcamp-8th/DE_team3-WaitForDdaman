@@ -4,8 +4,8 @@ config.SETTINGS.env = "aws" 로 교체해 moto의 가상 AWS로 로직만 검증
 실제 LocalStack 컨테이너 연동(엔드포인트 스위칭 자체)은 docker-compose.localstack.yml로
 띄운 뒤 수동/통합 테스트로 별도 확인할 것.
 
-config.SETTINGS를 직접 교체하는 이유: common 모듈들은 `from common import config`로
-모듈을 참조하고 호출 시점에 config.SETTINGS를 조회하므로, 여기서 교체하면
+config.SETTINGS를 직접 교체하는 이유: common 모듈들은 최상위 `config` 패키지를
+`import config`로 참조하고 호출 시점에 config.SETTINGS를 조회하므로, 여기서 교체하면
 이미 import된 s3_utils/watermark 모듈에도 즉시 반영된다.
 """
 from datetime import date
@@ -13,7 +13,7 @@ from datetime import date
 import pytest
 from moto import mock_aws
 
-from common import config as config_module
+import config as config_module
 
 
 @pytest.fixture
@@ -55,5 +55,5 @@ def test_watermark_persisted_payload_shape(s3_env):
     s3 = get_s3_client()
     obj = s3.get_object(Bucket="test-raw-bucket", Key="_meta/watermark/rental_history.json")
     body = json.loads(obj["Body"].read())
-    assert body["last_rent_dt"] == "2026-08-05"
+    assert body["last_processed_date"] == "2026-08-05"
     assert "updated_at" in body

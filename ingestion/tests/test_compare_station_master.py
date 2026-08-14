@@ -7,7 +7,7 @@ import openpyxl
 import pytest
 from moto import mock_aws
 
-from common import config as config_module
+import config as config_module
 
 
 def _make_test_xlsx(path: Path, data_rows: list[list[str]]) -> None:
