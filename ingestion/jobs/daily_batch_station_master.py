@@ -42,6 +42,7 @@ from common.spark_session import build_spark_session
 from schema.station_master_schema import (
     SchemaValidationError,
     build_select_exprs,
+    collect_response_fields,
     validate_and_report,
 )
 
@@ -107,7 +108,9 @@ def _process_snapshot(spark, snapshot_date: str) -> int:
 
     # START_INDEX/END_INDEX/RNUM은 페이징 메타라 실제 데이터 컬럼이 아니므로 제거
     rows = [strip_pagination_meta(r) for r in raw_rows]
-    actual_columns = list(rows[0].keys())
+    # 첫 행이 아니라 전체 행의 키 합집합을 본다. 행마다 필드 구성이 다르다
+    # (실측: 13행은 HOLD_NUM 키가 없음) - 자세한 이유는 함수 docstring 참고
+    actual_columns = collect_response_fields(rows)
     logger.info("API 응답 필드: %s", actual_columns)
     validate_and_report(actual_columns)
 

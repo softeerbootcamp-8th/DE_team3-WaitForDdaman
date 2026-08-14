@@ -4,6 +4,7 @@ from schema.station_master_schema import (
     OPTIONAL_STANDARD_COLUMNS,
     REQUIRED_STANDARD_COLUMNS,
     SchemaValidationError,
+    collect_response_fields,
     is_station_master_response,
     normalize_station_no,
     validate_and_report,
@@ -80,3 +81,40 @@ def test_normalize_station_no(raw, expected):
     정규화 없이 조인하면 같은 대여소가 전부 다른 것으로 잡힌다.
     """
     assert normalize_station_no(raw) == expected
+
+
+# ------------------------------------------------------------ 응답 필드 수집
+#
+# 이 API는 행마다 필드 구성이 다르다 (2026-08-14 실측):
+#   3,227행은 필드 10개, 13행은 HOLD_NUM 키가 아예 없어 9개.
+# 첫 행만 보고 스키마를 판단하면, HOLD_NUM 없는 행이 응답의 첫 번째로 오는 날
+# 필수 컬럼 누락으로 잡 전체가 실패한다. 응답 순서는 보장되지 않는다.
+
+
+def test_collect_response_fields_merges_all_rows():
+    rows = [
+        {"RENT_ID": "ST-10", "RENT_NM": "가"},  # HOLD_NUM 없음
+        {"RENT_ID": "ST-11", "RENT_NM": "나", "HOLD_NUM": "12"},
+    ]
+    assert collect_response_fields(rows) == ["HOLD_NUM", "RENT_ID", "RENT_NM"]
+
+
+def test_collect_response_fields_handles_empty():
+    assert collect_response_fields([]) == []
+
+
+def test_validation_passes_when_only_first_row_lacks_hold_num():
+    """실측 13건에 해당하는 상황 - 일부 대여소만 HOLD_NUM이 없다."""
+    rows = [
+        {c: "x" for c in API_COLUMNS if c != "HOLD_NUM"},
+        {c: "x" for c in API_COLUMNS},
+    ]
+    result = validate_and_report(collect_response_fields(rows))
+    assert result["column_count"] == len(API_COLUMNS)
+
+
+def test_validation_fails_when_no_row_has_hold_num():
+    """원천이 필드를 완전히 없앤 경우는 여전히 실패해야 한다."""
+    rows = [{c: "x" for c in API_COLUMNS if c != "HOLD_NUM"} for _ in range(3)]
+    with pytest.raises(SchemaValidationError, match="hold_num"):
+        validate_and_report(collect_response_fields(rows))

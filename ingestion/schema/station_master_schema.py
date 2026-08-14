@@ -92,6 +92,26 @@ def normalize_station_no(raw_id: str) -> str:
     return str(int(stripped)) if stripped.isdigit() else stripped
 
 
+def collect_response_fields(rows: list[dict]) -> list[str]:
+    """
+    응답 전체 행의 키 합집합을 돌려준다.
+
+    ⚠️ 첫 행만 보면 안 되는 이유 (2026-08-14 실측):
+    이 API는 행마다 필드 구성이 다르다. 3,227행은 필드 10개인데 13행은
+    HOLD_NUM 키가 아예 없어 9개다 (거치대 수가 등록되지 않은 미개통 대여소).
+    첫 행만 보고 스키마를 판단하면 HOLD_NUM 없는 행이 응답 첫 번째로 오는 날
+    필수 컬럼 누락으로 잡 전체가 실패한다. 응답 순서는 보장되지 않으며,
+    서울시가 하반기 API 현행화를 예고했으므로 순서가 바뀔 가능성이 있다.
+
+    합집합을 쓰면 어느 행에든 필드가 있으면 인식하고, 원천이 그 필드를
+    완전히 없앤 경우에만 실패한다.
+    """
+    fields: set[str] = set()
+    for row in rows:
+        fields.update(row)
+    return sorted(fields)
+
+
 def is_station_master_response(actual_columns: list[str]) -> bool:
     """다른 서비스의 응답이 섞여 들어왔을 때 조용히 걸러내기 위한 판별."""
     return len(set(actual_columns) & set(COLUMN_ALIAS_MAP)) >= 3
