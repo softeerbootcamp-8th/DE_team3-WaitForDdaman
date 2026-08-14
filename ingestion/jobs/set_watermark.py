@@ -9,17 +9,25 @@
 다음날부터만 이어서 처리하도록 만든다. 데이터셋마다 워터마크가 분리되어 있으므로
 DATASET으로 지정한다.
 
+bikeman_event는 "백필"이 아니라 "서비스 시작일"이 기준이다 - 따맨(bikeman)은 파일
+백필이 없고 6/30부터 Postgres에 데이터가 이미 존재하므로, 최초 실행 전에 이 스크립트로
+2026-06-29(서비스 시작 전날)를 워터마크로 찍어야 daily_batch가 6/30부터 정확히
+처리한다.
+
 사용법:
     WATERMARK_DATE=2026-06-30 DATASET=rental_history python -m jobs.set_watermark
     WATERMARK_DATE=2026-06-30 DATASET=failure_report python -m jobs.set_watermark
     WATERMARK_DATE=2026-06-30 DATASET=silver_rental_history python -m jobs.set_watermark
     WATERMARK_DATE=2026-06-30 DATASET=gold_dim_bike python -m jobs.set_watermark
+    WATERMARK_DATE=2026-06-29 DATASET=bikeman_event python -m jobs.set_watermark
 """
 import logging
 import os
 import sys
 from datetime import datetime, timedelta
 
+from common import config
+from common.s3_utils import ensure_bucket
 from common.watermark import write_watermark
 from config.watermark_keys import (
     BRONZE_FAILURE_REPORT,
@@ -38,6 +46,7 @@ WATERMARK_KEYS = {
     "failure_report": BRONZE_FAILURE_REPORT,
     "silver_rental_history": SILVER_RENTAL_HISTORY,
     "gold_dim_bike": GOLD_DIM_BIKE,
+    "bikeman_event": "_meta/watermark/bikeman_event.json",
 }
 
 
@@ -45,6 +54,11 @@ def run(date_str: str, dataset: str) -> None:
     if dataset not in WATERMARK_KEYS:
         print(f"알 수 없는 DATASET: {dataset} (가능한 값: {list(WATERMARK_KEYS.keys())})")
         sys.exit(1)
+
+    # 다른 잡들은 backfill 단계에서 버킷을 먼저 만들어두지만, 이 스크립트가
+    # 가장 먼저(backfill 없이) 실행되는 데이터셋(예: bikeman_event)도 있으므로
+    # 여기서도 명시적으로 버킷 존재를 보장한다. (NoSuchBucket 방지)
+    ensure_bucket(config.SETTINGS.raw_bucket)
 
     target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     watermark_key = WATERMARK_KEYS[dataset]
