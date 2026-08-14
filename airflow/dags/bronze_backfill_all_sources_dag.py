@@ -10,10 +10,22 @@ Bronze 백필 DAG (2개 원천) - 1회성, 수동 트리거
 대여소정보 적재는 bronze_daily_batch_all_sources DAG가 매일 스냅샷으로 담당한다.
 
 ### 태스크 의존성 설계
-대여이력과 고장신고는 서로 의존관계가 없어서 병렬로 둔다.
+대여이력과 고장신고는 서로 의존관계가 없어서 병렬로 둔다. 각 소스는 백필 성공 직후
+자기 워터마크를 찍는다.
 
-    rental_history
-    failure_report
+    rental_history ─> set_watermark_rental_history
+    failure_report ─> set_watermark_failure_report
+
+### 왜 워터마크 태스크가 DAG 안에 있는가
+워터마크가 없으면 daily_batch가 .env의 BACKFILL_START_DATE(기본 2015-01-01)부터 API로
+다시 긁는다. 파일로 방금 채운 기간을 중복 처리하게 되므로, 백필과 워터마크는 한 DAG에서
+이어져야 한다. 별도 set_watermark DAG를 손으로 트리거하는 방식은 빠뜨리기 쉽다.
+
+업스트림 성공에만 걸어두는 게 중요하다. 워터마크는 "성공적으로 커밋된 마지막 날짜"만
+기록해야 하고 부분 실패 시 갱신하면 데이터 누락이 생긴다 (common/watermark.py 참고).
+
+⚠️ *_pattern으로 백필 범위를 좁히면 *_watermark_date도 그 범위의 마지막 날짜로 같이
+   바꿔야 한다. 안 그러면 실제로 적재하지 않은 기간을 처리 완료로 표시한다.
 
 ### 왜 병렬을 2개로 제한하는가
 로컬(LocalStack) 환경에서 여러 Spark 잡이 동시에 대량 PutObject를 보내면
@@ -64,8 +76,10 @@ def _bash(job_module: str, extra_env: str = "") -> str:
     params={
         "rental_history_dir": f"{INGESTION_DIR}/data/rental_history",
         "rental_history_pattern": "*",
+        "rental_history_watermark_date": "2026-06-30",
         "failure_report_dir": f"{INGESTION_DIR}/data/failure_report",
         "failure_report_pattern": "*",
+        "failure_report_watermark_date": "2026-06-30",
     },
     doc_md=__doc__,
 )
@@ -92,8 +106,33 @@ def bronze_backfill_all_sources():
         execution_timeout=timedelta(hours=1),
     )
 
-    # 두 태스크 사이에 의존관계를 걸지 않는다.
-    # 서로 참조하지 않는 원천이고, 동시 실행 부하는 max_active_tasks=2가 제한한다.
+    # 워터마크는 해당 소스의 백필이 성공했을 때만 찍힌다 (재시도 소진 후 실패면 안 찍힘).
+    set_watermark_rental_history = BashOperator(
+        task_id="set_watermark_rental_history",
+        bash_command=_bash(
+            "set_watermark",
+            "DATASET=rental_history "
+            "WATERMARK_DATE='{{ params.rental_history_watermark_date }}' ",
+        ),
+        retries=0,  # S3에 JSON 한 개 쓰는 작업 - 실패하면 원인을 봐야 한다
+        execution_timeout=timedelta(minutes=5),
+    )
+
+    set_watermark_failure_report = BashOperator(
+        task_id="set_watermark_failure_report",
+        bash_command=_bash(
+            "set_watermark",
+            "DATASET=failure_report "
+            "WATERMARK_DATE='{{ params.failure_report_watermark_date }}' ",
+        ),
+        retries=0,
+        execution_timeout=timedelta(minutes=5),
+    )
+
+    # 두 소스 사이에는 의존관계를 걸지 않는다. 서로 참조하지 않는 원천이고,
+    # 동시 실행 부하는 max_active_tasks=2가 제한한다.
+    rental_history >> set_watermark_rental_history
+    failure_report >> set_watermark_failure_report
 
 
 bronze_backfill_all_sources()
