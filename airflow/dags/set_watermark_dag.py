@@ -18,6 +18,7 @@
 ### 실행 방법
 Airflow UI에서 "Trigger DAG w/ config"로 watermark_date / dataset을 지정해 실행한다.
 데이터셋별로 워터마크를 다 찍어야 하면 dataset을 바꿔서 여러 번 트리거하면 된다.
+데이터셋별로 워터마크를 다 찍어야 하면 dataset을 바꿔서 여러 번 트리거하면 된다.
 """
 import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
