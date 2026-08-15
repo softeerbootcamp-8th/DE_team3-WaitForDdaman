@@ -72,6 +72,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-airflow}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
       POSTGRES_DB: ${POSTGRES_DB:-airflow}
+    ports:
+      - "5432:5432"          # ← 이 줄 추가
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
     healthcheck:
