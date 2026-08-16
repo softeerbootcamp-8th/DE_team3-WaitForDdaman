@@ -10,6 +10,7 @@
 | 대여이력 | OA-15182 / `tbCycleRentData` | `bronze.rental_history` | 파일 백필 + API 증분 |
 | 고장신고 | OA-15644 / `tbCycleFailureReport` | `bronze.failure_report` | 파일 백필 + API 증분 |
 | 대여소정보 | OA-13252 / `tbCycleStationInfo` | `bronze.station_master` | 파일 백필 + API 스냅샷 |
+| 실시간 대여정보 | OA-15493 / `bikeList` | `bronze.station_active` | API 스냅샷 (파일 백필 없음) |
 
 ## 핵심 설계 결정
 
@@ -21,6 +22,7 @@
 | 멱등성 | `overwritePartitions()` | 재실행 시 같은 날짜/스냅샷 파티션만 덮어씀 |
 | 워터마크 | 대여이력/고장신고만 사용 | 대여소정보 API는 날짜 파라미터 없이 전체 스냅샷만 반환 |
 | 대여소정보 파티션 | `snapshot_date` | 이벤트 발생일이 아니라 스냅샷 기준일 |
+| 실시간 대여정보 파티션 | `snapshot_date` | 대여소정보와 동일한 이유 - 워터마크 대상 아님 |
 
 ## 로컬 Airflow 실행
 
@@ -238,6 +240,7 @@ INPUT_DIR=./data/station_master python -m jobs.backfill_station_master
 python -m jobs.daily_batch_rental_history
 python -m jobs.daily_batch_failure_report
 python -m jobs.daily_batch_station_master
+python -m jobs.daily_batch_station_active
 ```
 
 워터마크 수동 설정:
