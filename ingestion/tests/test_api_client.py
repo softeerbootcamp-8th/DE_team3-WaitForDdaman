@@ -8,6 +8,7 @@ from common.api_client import (
     SeoulApiTransientError,
     fetch_failure_reports_by_date,
     fetch_rent_history_by_date,
+    fetch_station_active,
     strip_pagination_meta,
 )
 
@@ -181,3 +182,34 @@ def test_html_error_page_response_included_in_error_message():
             assert False, "SeoulApiTransientError가 발생해야 함"
         except SeoulApiTransientError as e:
             assert "인증키" in str(e)
+
+
+# 사용자가 실제로 확인한 bikeList(rentBikeStatus) 응답 샘플 (2026-08-16 실측,
+# 전수 페이징 2,735건 중 1건 발췌 - 필드 7개가 매 행 빠짐없이 존재함을 확인함)
+REAL_BIKE_LIST_SAMPLE = {
+    "rentBikeStatus": {
+        "list_total_count": 1,
+        "RESULT": {"CODE": "INFO-000", "MESSAGE": "정상 처리되었습니다."},
+        "row": [
+            {
+                "rackTotCnt": "15",
+                "stationName": "102. 망원역 1번출구 앞",
+                "parkingBikeTotCnt": "5",
+                "shared": "33",
+                "stationLatitude": "37.55564880",
+                "stationLongitude": "126.91062927",
+                "stationId": "ST-4",
+            }
+        ],
+    }
+}
+
+
+def test_station_active_uses_rentBikeStatus_root_key():
+    """bikeList는 root key가 'rentBikeStatus'이고 페이징 메타 필드가 없다 (실측 2026-08-16)."""
+    with patch("requests.get", return_value=_FakeResp(200, REAL_BIKE_LIST_SAMPLE)):
+        rows = list(fetch_station_active())
+
+    assert len(rows) == 1
+    assert rows[0]["stationId"] == "ST-4"
+    assert rows[0]["shared"] == "33"
