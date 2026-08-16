@@ -2,9 +2,10 @@
 실시간 대여정보(OA-15493 / bikeList) 스키마 정의 및 검증
 
 이 원천의 성격이 station_master(tbCycleStationInfo)와 다르다:
-    - station_master는 자치구·주소 등 마스터 속성을 준다. bikeList는 대여소별
-      "지금 이 순간의" 거치대 수/주차된 자전거 수/거치율만 준다 -> 운영 여부·재고 판정용
-      (station_master로 못 쓰는 이유는 station_master_schema.py 참고)
+    - station_master는 자치구·주소 등 마스터 속성을 준다. bikeList를 쓰는 목적은
+      재고 수치 자체가 아니라 "지금 실제로 운영 중인 대여소가 어디인지" 판별하는 것
+      (2026-08-16 사용자 확인). 거치대 수/주차된 자전거 수/거치율은 그 부산물로 같이
+      온다 (station_master로 못 쓰는 이유는 station_master_schema.py 참고)
     - 날짜 파라미터를 받지 않아 과거 소급 조회가 불가능 -> 워터마크 없음,
       파티션 키가 "발생일"이 아니라 "스냅샷 기준일(snapshot_date)"
 
