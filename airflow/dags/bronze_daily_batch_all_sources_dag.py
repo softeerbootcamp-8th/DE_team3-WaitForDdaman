@@ -1,12 +1,12 @@
 """
-Bronze 일 배치 DAG (4개 원천 통합) - 매일 실행
+Bronze 일 배치 DAG (5개 원천 통합) - 매일 실행
 
-대여소정보 / 대여이력 / 고장신고 / 따맨(bikeman) 이벤트를 한 DAG에서 **전부 병렬로**
-실행한다. 원천 사이에 태스크 의존성을 두지 않는다.
+대여소정보 / 대여이력 / 고장신고 / 따맨(bikeman) 이벤트 / 실시간 대여정보를 한 DAG에서
+**전부 병렬로** 실행한다. 원천 사이에 태스크 의존성을 두지 않는다.
 
 ### 왜 의존성을 두지 않는가
-Bronze는 원천을 가공 없이 그대로 적재하는 단계라, 대여이력·고장신고·bikeman 잡은
-station_master를 **읽지 않는다**. 실제 데이터 의존이 없다.
+Bronze는 원천을 가공 없이 그대로 적재하는 단계라, 대여이력·고장신고·bikeman·실시간
+대여정보 잡은 station_master를 **읽지 않는다**. 실제 데이터 의존이 없다.
 
 예전에는 `station_master >> [나머지 3개]` 체인이 걸려 있었는데, 근거였던
 "마스터가 먼저 있어야 고아(orphan) 레코드를 판별할 수 있다"는 Silver 조인 단계의
@@ -18,7 +18,7 @@ station_master를 **읽지 않는다**. 실제 데이터 의존이 없다.
 나면 먼저 잡지만, 실패해도 나머지로 전파되지 않는다.
 
 ### ⚠️ max_active_runs=1과 station_master 스냅샷
-한 DAG로 묶으면 `max_active_runs`를 4개 원천이 공유한다. 이전 run이 안 끝나면 다음 날
+한 DAG로 묶으면 `max_active_runs`를 5개 원천이 공유한다. 이전 run이 안 끝나면 다음 날
 run이 큐에서 대기하는데, 이게 24시간을 넘기면 그날 station_master 스냅샷이 통째로 빈다.
 tbCycleStationInfo는 과거를 소급 조회할 수 없어서 **영구 손실**이다 (대여이력·고장신고·
 bikeman은 워터마크로 며칠 밀려도 따라잡는다).
@@ -34,6 +34,7 @@ bikeman은 워터마크로 며칠 밀려도 따라잡는다).
 | 소스 | 조회 방식 | 증분 기준 | 재처리 |
 |---|---|---|---|
 | 대여소정보 | 공공 API | 없음(전체 스냅샷) | 없음, 소급 불가 |
+| 실시간 대여정보 | 공공 API | 없음(전체 스냅샷) | 없음, 소급 불가 |
 | 대여이력 | 공공 API | RENT_DT | 없음 |
 | 고장신고 | 공공 API | REGDTTM | 없음 |
 | bikeman_event | 우리 Postgres 직접 조회 | occurred_at | 3일 lookback |
@@ -47,6 +48,7 @@ bikeman만 lookback이 있는 이유: 오프라인 작업 후 몰아서 제출�
 - bikeman_event: 파일 백필이 없으므로 set_watermark DAG로 서비스 시작 전날을 1회 찍는다
       dataset=bikeman_event, watermark_date=2026-06-29
 - 대여소정보: 워터마크 자체가 없다 (증분 기준이 될 컬럼이 없음)
+- 실시간 대여정보: 대여소정보와 동일하게 워터마크가 없다
 
 ### catchup=False인 이유
 밀린 날짜는 각 잡의 워터마크 로직이 알아서 이어서 처리한다. Airflow의 catchup에
@@ -125,6 +127,15 @@ def bronze_daily_batch_all_sources():
         ),
         execution_timeout=timedelta(minutes=30),
         outlets=[BIKEMAN_EVENT_BRONZE],
+        pool=BRONZE_POOL,
+    )
+
+    # 실시간 대여정보: 워터마크 없음, station_master와 동일하게 매일 전체 스냅샷을
+    # 그날 파티션으로 적재. gold.fact_station_inventory가 이 데이터를 필요로 한다.
+    BashOperator(
+        task_id="daily_batch_station_active",
+        bash_command=bash_job("daily_batch_station_active"),
+        execution_timeout=timedelta(minutes=30),
         pool=BRONZE_POOL,
     )
 
