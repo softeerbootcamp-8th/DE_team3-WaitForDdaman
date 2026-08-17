@@ -22,11 +22,14 @@ SCD Type 2 이력화는 이번 범위가 아니다. 브론즈가 일일 스냅�
 import logging
 import os
 import sys
+from datetime import date
 
 from pyspark.sql import functions as F
 
 import config
 from common.spark_session import build_spark_session
+from common.watermark import write_watermark
+from config.watermark_keys import SILVER_STATION_MASTER
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -180,6 +183,11 @@ def run() -> None:
     except UnknownDistrictError as e:
         logger.error("정제 실패: %s", e)
         sys.exit(1)
+
+    # dag_gold_dim_fact가 이 워터마크로 "오늘 치 실버가 준비됐는지" 확인한다
+    # (Asset 트리거 DagRun은 logical_date가 없어 ExternalTaskSensor를 못 씀).
+    processed_date = snapshot_date if isinstance(snapshot_date, date) else date.fromisoformat(snapshot_date)
+    write_watermark(processed_date, watermark_key=SILVER_STATION_MASTER)
 
     logger.info("%s: 실버 적재 완료", snapshot_date)
 

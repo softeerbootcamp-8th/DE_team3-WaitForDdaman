@@ -32,12 +32,17 @@ station_active / bike_man_action, 총 4개다(failure_report는 bike_features
 잠시 cron으로 되돌아가 있어 문제가 없었지만, Asset 트리거가 다시 적용되며
 드러남).
 
-대신 두 가지 방식으로 "오늘(ds) 치가 준비됐는가"를 직접 확인한다.
-    - rental_history / station_master / station_active: 오늘(ds, KST) 하루
-      안에 해당 Silver DAG가 성공한 DagRun이 있는지 DagRun.find()로 직접
-      조회한다(_silver_succeeded_today, PythonSensor).
-    - bike_man_action: 실제 워터마크 파일을 직접 확인하는 BashSensor를 쓴다
-      (ingestion/jobs/check_silver_bike_man_action_watermark.py) - 그대로 유지.
+`DagRun.find()`로 메타데이터 DB를 직접 조회하는 방식도 시도했으나, Airflow 3의
+Task SDK가 태스크 코드의 ORM 직접 접근을 막아 `RuntimeError: Direct database
+access via the ORM is not allowed in Airflow 3.0`로 실패한다(2026-08-17 실측).
+
+대신 네 소스 모두 실제 워터마크 파일(S3)을 직접 확인하는 BashSensor로 통일한다
+(ingestion/jobs/check_silver_watermark.py, WATERMARK_KEY_NAME으로 대상만 다르게
+지정). station_master/station_active는 이번에 해당 워터마크 쓰기를 새로
+추가했고(staging/jobs/silver_station_master.py, silver_station_active.py),
+rental_history/bike_man_action은 기존에 이미 쓰던 워터마크를 그대로 재사용한다.
+bike_man_action은 스크립트가 이미 있어 그대로 둔다
+(ingestion/jobs/check_silver_bike_man_action_watermark.py).
 
 ### silver.station_active (2026-08-17, 담당 팀원 작업 반영)
 더 이상 더미가 아니다 - `silver_station_active_daily` DAG(`staging/jobs/
@@ -49,12 +54,9 @@ station_id만 쓰므로 이 잡의 실제 컬럼 스키마(snapshot_date, statio
 from datetime import timedelta
 
 import pendulum
-from airflow.models import DagRun
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.sensors.bash import BashSensor
-from airflow.providers.standard.sensors.python import PythonSensor
 from airflow.sdk import dag
-from airflow.utils.state import DagRunState
 
 INGESTION_DIR = "/opt/airflow/ingestion"
 COLLECTION_PRIORITY_DIR = "/opt/airflow/pipeline/collection_priority"
@@ -92,22 +94,6 @@ def _collection_priority_bash(job_module: str, extra_env: str = "") -> str:
     )
 
 
-def _silver_succeeded_today(dag_id: str, ds: str) -> bool:
-    """
-    dag_id의 DagRun 중 오늘(ds, KST) 안에 성공(SUCCESS)한 것이 있는지 직접 조회한다.
-    Asset 트리거 DagRun은 logical_date가 null이라 ExternalTaskSensor의
-    execution_delta 매칭이 불가능해서, 대신 queued_at 시각이 오늘 KST 범위에
-    들어오는지로 판단한다.
-    """
-    day_start = pendulum.parse(ds, tz="Asia/Seoul").start_of("day")
-    day_end = day_start.add(days=1)
-    for run in DagRun.find(dag_id=dag_id, state=DagRunState.SUCCESS):
-        queued_at = run.queued_at or run.start_date
-        if queued_at and day_start <= pendulum.instance(queued_at).in_tz("Asia/Seoul") < day_end:
-            return True
-    return False
-
-
 @dag(
     dag_id="dag_gold_dim_fact",
     schedule="0 8 * * *",  # 매일 08:00 KST - 상류 Silver DAG(07:00~07:30)가 보통 끝난 뒤
@@ -122,26 +108,32 @@ def _silver_succeeded_today(dag_id: str, ds: str) -> bool:
     doc_md=__doc__,
 )
 def dag_gold_dim_fact():
-    wait_rental_history = PythonSensor(
+    wait_rental_history = BashSensor(
         task_id="wait_for_silver_rental_history",
-        python_callable=_silver_succeeded_today,
-        op_kwargs={"dag_id": "silver_gold_daily_batch_rental_history", "ds": "{{ ds }}"},
+        bash_command=_ingestion_bash(
+            "check_silver_watermark",
+            "TARGET_DATE='{{ ds }}' WATERMARK_KEY_NAME=SILVER_RENTAL_HISTORY ",
+        ),
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,
     )
-    wait_station_master = PythonSensor(
+    wait_station_master = BashSensor(
         task_id="wait_for_silver_station_master",
-        python_callable=_silver_succeeded_today,
-        op_kwargs={"dag_id": "silver_station_master_daily", "ds": "{{ ds }}"},
+        bash_command=_ingestion_bash(
+            "check_silver_watermark",
+            "TARGET_DATE='{{ ds }}' WATERMARK_KEY_NAME=SILVER_STATION_MASTER ",
+        ),
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,
     )
-    wait_station_active = PythonSensor(
+    wait_station_active = BashSensor(
         task_id="wait_for_silver_station_active",
-        python_callable=_silver_succeeded_today,
-        op_kwargs={"dag_id": "silver_station_active_daily", "ds": "{{ ds }}"},
+        bash_command=_ingestion_bash(
+            "check_silver_watermark",
+            "TARGET_DATE='{{ ds }}' WATERMARK_KEY_NAME=SILVER_STATION_ACTIVE ",
+        ),
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,

@@ -17,11 +17,14 @@ silver.station_master가 이미 갖고 있으므로, 여기서는 그 날 API �
 import logging
 import os
 import sys
+from datetime import date
 
 from pyspark.sql import functions as F
 
 import config
 from common.spark_session import build_spark_session
+from common.watermark import write_watermark
+from config.watermark_keys import SILVER_STATION_ACTIVE
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -116,6 +119,11 @@ def run() -> None:
     silver_df.writeTo(_table_name("silver")).overwritePartitions()
     bronze_df.unpersist()
     silver_df.unpersist()
+
+    # dag_gold_dim_fact가 이 워터마크로 "오늘 치 실버가 준비됐는지" 확인한다
+    # (Asset 트리거 DagRun은 logical_date가 없어 ExternalTaskSensor를 못 씀).
+    processed_date = snapshot_date if isinstance(snapshot_date, date) else date.fromisoformat(snapshot_date)
+    write_watermark(processed_date, watermark_key=SILVER_STATION_ACTIVE)
 
     logger.info("%s: 실버 적재 완료", snapshot_date)
 
