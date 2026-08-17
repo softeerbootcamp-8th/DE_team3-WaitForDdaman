@@ -19,27 +19,25 @@ station_active/fact_station_inventory)를 만들어 S3(LocalStack)에 적재한�
     wait_station_active ──┘                                 │
     wait_bike_man_action ────────────────────────────────────┘
 
-### wait_for_silver가 4개인 이유와 방식이 갈리는 이유
+### wait_for_silver가 4개인 이유와 왜 ExternalTaskSensor를 안 쓰는가
 이 DAG가 필요로 하는 Silver 소스는 rental_history / station_master /
 station_active / bike_man_action, 총 4개다(failure_report는 bike_features
-전용이라 이 DAG 범위에서 제외됨). 이 4개는 서로 다른 3개 DAG + 1개 Asset
-트리거 DAG에서 나온다.
+전용이라 이 DAG 범위에서 제외됨).
 
-    - rental_history / station_master / station_active: 고정 cron DAG라
-      ExternalTaskSensor(execution_delta)로 정확히 매칭 가능
-    - bike_man_action: silver_bike_man_action_daily가 Asset(bikeman_event_bronze)
-      트리거라 logical_date가 매일 정해진 시각으로 정렬되지 않는다.
-      ExternalTaskSensor의 execution_delta 매칭 전제(고정 스케줄)가 깨지므로,
-      대신 실제 워터마크 파일을 직접 확인하는 BashSensor를 쓴다
-      (ingestion/jobs/check_silver_bike_man_action_watermark.py).
+네 소스 모두 Bronze 완료 Asset으로 트리거되는 DAG라(2026-08-17, #43 Asset
+트리거 전환), DagRun의 logical_date가 null이다. ExternalTaskSensor는
+`external_execution_date = logical_date - execution_delta`로 상류 DagRun을
+찾는데, logical_date가 없으면 이 계산 자체가 불가능해 대상을 못 찾고 매번
+타임아웃난다(고정 cron이라 가능했던 예전 방식 - #44 병합 당시엔 Silver가
+잠시 cron으로 되돌아가 있어 문제가 없었지만, Asset 트리거가 다시 적용되며
+드러남).
 
-### execution_delta 계산 (ExternalTaskSensor)
-이 DAG는 08:00 KST에 스케줄된다. `external_execution_date = logical_date -
-execution_delta` 공식이므로, "같은 날짜의 데이터"를 가리키는 상류 DAG의
-logical_date와 맞추려면 두 DAG의 스케줄 시각 차이를 그대로 execution_delta로
-넣어야 한다.
-    - rental_history(30 7 * * *): 08:00 - 07:30 = 30분
-    - station_master(0 7 * * *) / station_active(0 7 * * *): 08:00 - 07:00 = 1시간
+대신 두 가지 방식으로 "오늘(ds) 치가 준비됐는가"를 직접 확인한다.
+    - rental_history / station_master / station_active: 오늘(ds, KST) 하루
+      안에 해당 Silver DAG가 성공한 DagRun이 있는지 DagRun.find()로 직접
+      조회한다(_silver_succeeded_today, PythonSensor).
+    - bike_man_action: 실제 워터마크 파일을 직접 확인하는 BashSensor를 쓴다
+      (ingestion/jobs/check_silver_bike_man_action_watermark.py) - 그대로 유지.
 
 ### silver.station_active (2026-08-17, 담당 팀원 작업 반영)
 더 이상 더미가 아니다 - `silver_station_active_daily` DAG(`staging/jobs/
@@ -51,10 +49,12 @@ station_id만 쓰므로 이 잡의 실제 컬럼 스키마(snapshot_date, statio
 from datetime import timedelta
 
 import pendulum
+from airflow.models import DagRun
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.sensors.bash import BashSensor
-from airflow.providers.standard.sensors.external_task import ExternalTaskSensor
+from airflow.providers.standard.sensors.python import PythonSensor
 from airflow.sdk import dag
+from airflow.utils.state import DagRunState
 
 INGESTION_DIR = "/opt/airflow/ingestion"
 COLLECTION_PRIORITY_DIR = "/opt/airflow/pipeline/collection_priority"
@@ -92,6 +92,22 @@ def _collection_priority_bash(job_module: str, extra_env: str = "") -> str:
     )
 
 
+def _silver_succeeded_today(dag_id: str, ds: str) -> bool:
+    """
+    dag_id의 DagRun 중 오늘(ds, KST) 안에 성공(SUCCESS)한 것이 있는지 직접 조회한다.
+    Asset 트리거 DagRun은 logical_date가 null이라 ExternalTaskSensor의
+    execution_delta 매칭이 불가능해서, 대신 queued_at 시각이 오늘 KST 범위에
+    들어오는지로 판단한다.
+    """
+    day_start = pendulum.parse(ds, tz="Asia/Seoul").start_of("day")
+    day_end = day_start.add(days=1)
+    for run in DagRun.find(dag_id=dag_id, state=DagRunState.SUCCESS):
+        queued_at = run.queued_at or run.start_date
+        if queued_at and day_start <= pendulum.instance(queued_at).in_tz("Asia/Seoul") < day_end:
+            return True
+    return False
+
+
 @dag(
     dag_id="dag_gold_dim_fact",
     schedule="0 8 * * *",  # 매일 08:00 KST - 상류 Silver DAG(07:00~07:30)가 보통 끝난 뒤
@@ -106,29 +122,26 @@ def _collection_priority_bash(job_module: str, extra_env: str = "") -> str:
     doc_md=__doc__,
 )
 def dag_gold_dim_fact():
-    wait_rental_history = ExternalTaskSensor(
+    wait_rental_history = PythonSensor(
         task_id="wait_for_silver_rental_history",
-        external_dag_id="silver_gold_daily_batch_rental_history",
-        external_task_id="transform_silver_rental_history",
-        execution_delta=timedelta(minutes=30),
+        python_callable=_silver_succeeded_today,
+        op_kwargs={"dag_id": "silver_gold_daily_batch_rental_history", "ds": "{{ ds }}"},
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,
     )
-    wait_station_master = ExternalTaskSensor(
+    wait_station_master = PythonSensor(
         task_id="wait_for_silver_station_master",
-        external_dag_id="silver_station_master_daily",
-        external_task_id="silver_station_master",
-        execution_delta=timedelta(hours=1),
+        python_callable=_silver_succeeded_today,
+        op_kwargs={"dag_id": "silver_station_master_daily", "ds": "{{ ds }}"},
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,
     )
-    wait_station_active = ExternalTaskSensor(
+    wait_station_active = PythonSensor(
         task_id="wait_for_silver_station_active",
-        external_dag_id="silver_station_active_daily",
-        external_task_id="silver_station_active",
-        execution_delta=timedelta(hours=1),
+        python_callable=_silver_succeeded_today,
+        op_kwargs={"dag_id": "silver_station_active_daily", "ds": "{{ ds }}"},
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,
