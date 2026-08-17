@@ -47,6 +47,20 @@ BashSensor)으로 통일한다.
     - station_master / station_active: 워터마크가 없는 스냅샷 소스라
       check_silver_snapshot_date.py로 테이블의 MAX(snapshot_date)를 직접 확인
       (T-0 구조라 오프셋 없음)
+### TARGET_DATE를 어제로 넘기는 이유 (2026-08-17 수정, #52)
+daily_batch_bikeman_event.py는 항상 "어제까지"만 처리하므로(오늘 데이터는
+작업자가 몰아서 제출하는 경우가 많아 항상 미확정) silver_bike_man_action의
+워터마크는 구조적으로 실행일보다 하루 늦다. 예전엔 TARGET_DATE에 오늘({{ ds }})을
+그대로 넘겨서 이 센서가 워터마크를 영원히 못 따라잡고 매번 타임아웃났다
+(팀원 리뷰로 발견). `macros.ds_add(ds, -1)`로 하루 전 날짜를 넘겨서 고쳤다.
+
+### execution_delta 계산 (ExternalTaskSensor)
+이 DAG는 08:00 KST에 스케줄된다. `external_execution_date = logical_date -
+execution_delta` 공식이므로, "같은 날짜의 데이터"를 가리키는 상류 DAG의
+logical_date와 맞추려면 두 DAG의 스케줄 시각 차이를 그대로 execution_delta로
+넣어야 한다.
+    - rental_history(30 7 * * *): 08:00 - 07:30 = 30분
+    - station_master(0 7 * * *) / station_active(0 7 * * *): 08:00 - 07:00 = 1시간
 
 ### silver.station_active (2026-08-17, 담당 팀원 작업 반영)
 더 이상 더미가 아니다 - `silver_station_active_daily` DAG(`staging/jobs/
@@ -145,7 +159,7 @@ def dag_gold_dim_fact():
         task_id="wait_for_silver_bike_man_action",
         bash_command=_ingestion_bash(
             "check_silver_bike_man_action_watermark",
-            "TARGET_DATE='{{ ds }}' ",
+            "TARGET_DATE='{{ macros.ds_add(ds, -1) }}' ",
         ),
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
