@@ -38,6 +38,7 @@ SERVICE_ROOT_KEYS = {
     "tbCycleRentData": "rentData",
     "tbCycleFailureReport": "failureReport",
     "tbCycleStationInfo": None,  # 응답 샘플 미확인 - 방어적 탐색으로 처리
+    "bikeList": "rentBikeStatus",  # 실측 확인 (2026-08-16)
 }
 
 # API 페이징 메타데이터 - 실제 데이터 컬럼이 아니므로 스키마 검증 전에 제거해야 함
@@ -175,3 +176,14 @@ def fetch_station_info() -> Iterator[dict]:
     """
     logger.info("대여소정보 API 호출 (전체 스냅샷)")
     yield from _paginate("tbCycleStationInfo", [])
+
+
+def fetch_station_active() -> Iterator[dict]:
+    """
+    bikeList: 날짜 파라미터 없이 현재 전체 대여소 실시간 대여정보(거치대 수/주차된
+    자전거 수/거치율)를 페이징하며 가져온다.
+    실측 확인(2026-08-16, 전수 2,735건): root key는 'rentBikeStatus', 페이징 메타
+    필드(START_INDEX/END_INDEX/RNUM)는 응답에 없다.
+    """
+    logger.info("실시간 대여정보 API 호출 (전체 스냅샷)")
+    yield from _paginate("bikeList", [])
