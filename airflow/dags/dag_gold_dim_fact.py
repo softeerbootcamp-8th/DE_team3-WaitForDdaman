@@ -33,6 +33,13 @@ station_active / bike_man_action, 총 4개다(failure_report는 bike_features
       대신 실제 워터마크 파일을 직접 확인하는 BashSensor를 쓴다
       (ingestion/jobs/check_silver_bike_man_action_watermark.py).
 
+### TARGET_DATE를 어제로 넘기는 이유 (2026-08-17 수정, #52)
+daily_batch_bikeman_event.py는 항상 "어제까지"만 처리하므로(오늘 데이터는
+작업자가 몰아서 제출하는 경우가 많아 항상 미확정) silver_bike_man_action의
+워터마크는 구조적으로 실행일보다 하루 늦다. 예전엔 TARGET_DATE에 오늘({{ ds }})을
+그대로 넘겨서 이 센서가 워터마크를 영원히 못 따라잡고 매번 타임아웃났다
+(팀원 리뷰로 발견). `macros.ds_add(ds, -1)`로 하루 전 날짜를 넘겨서 고쳤다.
+
 ### execution_delta 계산 (ExternalTaskSensor)
 이 DAG는 08:00 KST에 스케줄된다. `external_execution_date = logical_date -
 execution_delta` 공식이므로, "같은 날짜의 데이터"를 가리키는 상류 DAG의
@@ -137,7 +144,7 @@ def dag_gold_dim_fact():
         task_id="wait_for_silver_bike_man_action",
         bash_command=_ingestion_bash(
             "check_silver_bike_man_action_watermark",
-            "TARGET_DATE='{{ ds }}' ",
+            "TARGET_DATE='{{ macros.ds_add(ds, -1) }}' ",
         ),
         mode="reschedule",
         poke_interval=POKE_INTERVAL,

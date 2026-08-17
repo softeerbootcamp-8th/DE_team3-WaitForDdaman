@@ -12,8 +12,18 @@ Asset 트리거 DAG는 이 계산이 통하지 않아 대상 DagRun을 못 찾�
 이 스크립트는 성공/실패가 아니라 "아직 준비 안 됨"을 나타내야 하므로, 준비 안 됐을
 때도 예외 없이 exit code 1로 조용히 끝낸다 (BashSensor가 poke_interval마다 재시도).
 
-사용법 (BashSensor에서):
-    TARGET_DATE=2026-08-17 python -m jobs.check_silver_bike_man_action_watermark
+### TARGET_DATE는 호출부에서 이미 하루 전으로 넘어온다 (2026-08-17 수정, #52)
+ingestion/jobs/daily_batch_bikeman_event.py는 "작업자가 몰아서 제출하는 경우가
+많아 오늘은 항상 미확정"이라는 이유로 항상 `end_date = date.today() - 1`까지만
+처리한다(파일 docstring 참고) - 즉 silver_bike_man_action의 워터마크는 구조적으로
+실행일보다 항상 하루 늦다. 이 스크립트가 예전에 `TARGET_DATE={{ ds }}`(오늘)를
+그대로 받아 비교했을 때는, 워터마크가 절대 오늘에 도달할 수 없어 센서가 영원히
+"준비 안 됨"만 반복하다 타임아웃났다. 그래서 호출부(dag_gold_dim_fact.py)가
+`{{ macros.ds_add(ds, -1) }}`로 이미 하루 전 날짜를 넘기도록 고쳤고, 이 스크립트는
+그 값을 그대로(추가 보정 없이) 비교하면 된다.
+
+사용법 (BashSensor에서, 호출부가 이미 하루 전 날짜를 넘김):
+    TARGET_DATE=2026-08-16 python -m jobs.check_silver_bike_man_action_watermark
 """
 import logging
 import os
