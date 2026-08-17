@@ -4,13 +4,17 @@ import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag
 
-from dag_assets import RENTAL_HISTORY_BRONZE
-from dag_common import DEFAULT_ARGS
-
 INGESTION_DIR = "/opt/airflow/ingestion"
 STAGING_DIR = "/opt/airflow/staging"
 RISK_MODEL_DIR = "/opt/airflow/pipeline/risk_model"
 PYTHON = "python"
+
+default_args = {
+    "retries": 2,
+    "retry_delay": timedelta(minutes=5),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=30),
+}
 
 
 def _bash(job_dir: str, job_module: str, extra_env: str = "") -> str:
@@ -25,11 +29,11 @@ def _bash(job_dir: str, job_module: str, extra_env: str = "") -> str:
 
 @dag(
     dag_id="silver_gold_daily_batch_rental_history",
-    schedule=[RENTAL_HISTORY_BRONZE],  # 고정 시간이 아니라 Bronze 완료 이벤트로 트리거
+    schedule="30 7 * * *",  # 매일 07:30 KST - Bronze(06:00 시작)가 보통 끝난 뒤
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Seoul"),
     catchup=False,
     max_active_runs=1,  # 같은 파티션에 두 실행이 동시에 MERGE/덮어쓰기 시도하는 것 방지
-    default_args=DEFAULT_ARGS,
+    default_args=default_args,
     tags=["daily_batch", "silver", "gold", "rental_history"],
     params={
         "max_days_per_run": "",
