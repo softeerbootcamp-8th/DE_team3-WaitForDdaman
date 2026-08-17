@@ -15,15 +15,9 @@ Silver 일 배치 DAG - 대여소 마스터 (station_master)
 
 브론즈에 그 날짜 스냅샷이 있다면 SNAPSHOT_DATE로 수동 재처리할 수 있다.
 
-### 왜 고정 시간이 아니라 Asset 기반 스케줄인가
-Bronze 완료 시각은 매일 일정하지 않다(API 응답 지연, 재시도, 로컬 LocalStack 부하 등).
-고정 시간(예: 07:00)으로 스케줄하면 "Bronze가 그 전에 끝난다"는 보장 없는 가정에
-의존하게 되고, 어기면 어제자 Bronze 데이터로 Silver가 조용히 돈다 - 에러도 안 나서
-제일 위험한 실패 모드다.
-
-bronze_daily_batch_all_sources DAG의 daily_batch_station_master 태스크가 성공하면
-(실패/스킵 시에는 발생하지 않음) outlets로 STATION_MASTER_BRONZE Asset을 갱신하고,
-이 DAG는 그 갱신을 스케줄 트리거로 사용한다.
+### schedule
+브론즈 일 배치가 06:00 KST에 돌므로 07:00으로 둔다. 대여소 브론즈 태스크는
+실측 23초에 끝나지만, 같은 DAG의 대여이력이 오래 걸릴 수 있어 여유를 둔다.
 
 ### PYTHONPATH
 staging/에는 자체 common/이 없어 ingestion/common/(spark_session)을 재사용하고,
@@ -37,15 +31,19 @@ import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag
 
-from dag_assets import STATION_MASTER_BRONZE
-from dag_common import DEFAULT_ARGS
-
 PYLIB_DIR = "/opt/airflow/pylib"          # config 패키지 (docker-compose가 ./config를 마운트)
 INGESTION_DIR = "/opt/airflow/ingestion"  # common/(spark_session), .env 출처
 STAGING_DIR = "/opt/airflow/staging"      # 잡 실행 위치
 PYTHON_BIN = "python"
 
 SILVER_MODULE = "silver_station_master"
+
+default_args = {
+    "retries": 3,
+    "retry_delay": timedelta(minutes=5),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=30),
+}
 
 
 def _staging_bash(job_module: str, extra_env: str = "") -> str:
@@ -59,11 +57,11 @@ def _staging_bash(job_module: str, extra_env: str = "") -> str:
 
 @dag(
     dag_id="silver_station_master_daily",
-    schedule=[STATION_MASTER_BRONZE],  # 고정 시간이 아니라 Bronze 완료 이벤트로 트리거
+    schedule="0 7 * * *",  # 매일 07:00 KST - bronze_daily_batch_all_sources(06:00) 뒤
     start_date=pendulum.datetime(2026, 8, 14, tz="Asia/Seoul"),
     catchup=False,  # 과거 스냅샷을 API로 소급 조회할 수 없다 - 위 doc 참고
     max_active_runs=1,  # 같은 파티션에 두 실행이 동시에 쓰는 것 방지
-    default_args=DEFAULT_ARGS,
+    default_args=default_args,
     tags=["daily_batch", "silver", "station_master"],
     doc_md=__doc__,
 )

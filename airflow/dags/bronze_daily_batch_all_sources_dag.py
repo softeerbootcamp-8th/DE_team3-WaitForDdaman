@@ -60,13 +60,7 @@ import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag
 
-from dag_assets import (
-    BIKEMAN_EVENT_BRONZE,
-    FAILURE_REPORT_BRONZE,
-    RENTAL_HISTORY_BRONZE,
-    STATION_ACTIVE_BRONZE,
-    STATION_MASTER_BRONZE,
-)
+from dag_assets import BIKEMAN_EVENT_BRONZE
 from dag_common import BRONZE_POOL, DEFAULT_ARGS, bash_job
 
 # 밀린 날짜가 많아도 한 run이 이만큼만 처리하고 끝낸다. run이 하루를 넘겨
@@ -96,7 +90,6 @@ def bronze_daily_batch_all_sources():
         task_id="daily_batch_station_master",
         bash_command=bash_job("daily_batch_station_master"),
         execution_timeout=timedelta(minutes=30),
-        outlets=[STATION_MASTER_BRONZE],
         pool=BRONZE_POOL,
         priority_weight=10,
     )
@@ -109,7 +102,6 @@ def bronze_daily_batch_all_sources():
             "MAX_DAYS_PER_RUN='{{ params.max_days_per_run }}' ",
         ),
         execution_timeout=timedelta(hours=2),
-        outlets=[RENTAL_HISTORY_BRONZE],
         pool=BRONZE_POOL,
     )
 
@@ -120,7 +112,6 @@ def bronze_daily_batch_all_sources():
             "MAX_DAYS_PER_RUN='{{ params.max_days_per_run }}' ",
         ),
         execution_timeout=timedelta(hours=1),
-        outlets=[FAILURE_REPORT_BRONZE],
         pool=BRONZE_POOL,
     )
 
@@ -145,7 +136,6 @@ def bronze_daily_batch_all_sources():
         task_id="daily_batch_station_active",
         bash_command=bash_job("daily_batch_station_active"),
         execution_timeout=timedelta(minutes=30),
-        outlets=[STATION_ACTIVE_BRONZE],
         pool=BRONZE_POOL,
     )
 
