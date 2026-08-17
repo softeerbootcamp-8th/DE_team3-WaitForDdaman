@@ -25,21 +25,28 @@ station_active / bike_man_action, 총 4개다(failure_report는 bike_features
 전용이라 이 DAG 범위에서 제외됨). 이 4개는 서로 다른 3개 DAG + 1개 Asset
 트리거 DAG에서 나온다.
 
-    - rental_history / station_master / station_active: 고정 cron DAG라
-      ExternalTaskSensor(execution_delta)로 정확히 매칭 가능
     - bike_man_action: silver_bike_man_action_daily가 Asset(bikeman_event_bronze)
       트리거라 logical_date가 매일 정해진 시각으로 정렬되지 않는다.
       ExternalTaskSensor의 execution_delta 매칭 전제(고정 스케줄)가 깨지므로,
       대신 실제 워터마크 파일을 직접 확인하는 BashSensor를 쓴다
       (ingestion/jobs/check_silver_bike_man_action_watermark.py).
 
-### execution_delta 계산 (ExternalTaskSensor)
-이 DAG는 08:00 KST에 스케줄된다. `external_execution_date = logical_date -
-execution_delta` 공식이므로, "같은 날짜의 데이터"를 가리키는 상류 DAG의
-logical_date와 맞추려면 두 DAG의 스케줄 시각 차이를 그대로 execution_delta로
-넣어야 한다.
-    - rental_history(30 7 * * *): 08:00 - 07:30 = 30분
-    - station_master(0 7 * * *) / station_active(0 7 * * *): 08:00 - 07:00 = 1시간
+### rental_history / station_master / station_active도 BashSensor로 전환 (2026-08-17, #50)
+이 3개 Silver DAG도 Bronze 완료 Asset 트리거로 전환되면서 bike_man_action과
+동일한 문제를 겪는다 - DagRun의 logical_date가 고정 스케줄 그리드에 맞춰
+정렬되지 않고(수동 Asset 이벤트로 만든 DagRun은 logical_date가 아예 null인
+경우도 실측 확인됨), ExternalTaskSensor(execution_delta)가 상류 DagRun을 못
+찾아 매번 타임아웃난다. `DagRun.find()`로 메타데이터 DB를 직접 조회하는 대안도
+시도했으나 Airflow 3의 Task SDK가 태스크 코드의 ORM 직접 접근을 막아
+`RuntimeError: Direct database access via the ORM is not allowed in Airflow 3.0`로
+실패한다(실측). 그래서 bike_man_action과 같은 방식(실제 상태를 직접 확인하는
+BashSensor)으로 통일한다.
+
+    - rental_history: 워터마크가 있는 증분 소스라 check_silver_watermark.py로
+      워터마크 값을 직접 확인 (T-1 구조라 REQUIRED_OFFSET_DAYS=1)
+    - station_master / station_active: 워터마크가 없는 스냅샷 소스라
+      check_silver_snapshot_date.py로 테이블의 MAX(snapshot_date)를 직접 확인
+      (T-0 구조라 오프셋 없음)
 
 ### silver.station_active (2026-08-17, 담당 팀원 작업 반영)
 더 이상 더미가 아니다 - `silver_station_active_daily` DAG(`staging/jobs/
@@ -53,15 +60,13 @@ from datetime import timedelta
 import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.sensors.bash import BashSensor
-from airflow.providers.standard.sensors.external_task import ExternalTaskSensor
 from airflow.sdk import dag
 
 INGESTION_DIR = "/opt/airflow/ingestion"
 COLLECTION_PRIORITY_DIR = "/opt/airflow/pipeline/collection_priority"
 PYTHON = "python"
 
-SENSOR_TIMEOUT = timedelta(hours=3).total_seconds()
-BIKE_MAN_ACTION_SENSOR_TIMEOUT = timedelta(hours=6).total_seconds()  # Asset 트리거라 더 여유
+SENSOR_TIMEOUT = timedelta(hours=6).total_seconds()  # 전부 Asset 트리거라 여유 있게
 POKE_INTERVAL = 300  # 5분
 
 default_args = {
@@ -106,29 +111,32 @@ def _collection_priority_bash(job_module: str, extra_env: str = "") -> str:
     doc_md=__doc__,
 )
 def dag_gold_dim_fact():
-    wait_rental_history = ExternalTaskSensor(
+    wait_rental_history = BashSensor(
         task_id="wait_for_silver_rental_history",
-        external_dag_id="silver_gold_daily_batch_rental_history",
-        external_task_id="transform_silver_rental_history",
-        execution_delta=timedelta(minutes=30),
+        bash_command=_ingestion_bash(
+            "check_silver_watermark",
+            "DATASET=rental_history REQUIRED_OFFSET_DAYS=1 TARGET_DATE='{{ ds }}' ",
+        ),
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,
     )
-    wait_station_master = ExternalTaskSensor(
+    wait_station_master = BashSensor(
         task_id="wait_for_silver_station_master",
-        external_dag_id="silver_station_master_daily",
-        external_task_id="silver_station_master",
-        execution_delta=timedelta(hours=1),
+        bash_command=_ingestion_bash(
+            "check_silver_snapshot_date",
+            "TABLE_NAME=silver.station_master TARGET_DATE='{{ ds }}' ",
+        ),
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,
     )
-    wait_station_active = ExternalTaskSensor(
+    wait_station_active = BashSensor(
         task_id="wait_for_silver_station_active",
-        external_dag_id="silver_station_active_daily",
-        external_task_id="silver_station_active",
-        execution_delta=timedelta(hours=1),
+        bash_command=_ingestion_bash(
+            "check_silver_snapshot_date",
+            "TABLE_NAME=silver.station_active TARGET_DATE='{{ ds }}' ",
+        ),
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,
@@ -141,7 +149,7 @@ def dag_gold_dim_fact():
         ),
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
-        timeout=BIKE_MAN_ACTION_SENSOR_TIMEOUT,
+        timeout=SENSOR_TIMEOUT,
     )
     build_dim_bike = BashOperator(
         task_id="build_dim_bike",
