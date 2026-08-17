@@ -37,13 +37,14 @@ from common.dq_utils import DEEQU_EXCLUDE, DEEQU_MAVEN_PACKAGE, ensure_dq_result
 from common.s3_utils import ensure_bucket
 from common.spark_session import build_spark_session
 from common.watermark import read_watermark, write_watermark
+from config.watermark_keys import SILVER_BIKE_MAN_ACTION
 from schema.bikeman_action_schema import FINAL_COLUMNS, SERVICE_START_DATE, classify_rows, dedup_rows
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 # Bronze와 워터마크 키가 겹치면 안 되므로 Silver 전용 키를 쓴다
-WATERMARK_KEY = "_meta/watermark/silver_bike_man_action.json"
+WATERMARK_KEY = SILVER_BIKE_MAN_ACTION
 
 # Bronze의 3일 lookback을 그대로 따라간다 (Bronze의 정정이 Silver까지 전파되도록)
 LOOKBACK_DAYS = 3
@@ -73,6 +74,7 @@ def _ensure_silver_tables(spark) -> None:
             bike_id     STRING,
             event_type  STRING,
             occurred_at TIMESTAMP,
+            station_id  STRING,
             ingested_at TIMESTAMP
         )
         USING iceberg
@@ -107,7 +109,7 @@ def _read_bronze_day(spark, target_date: date) -> list[dict]:
     rows = (
         spark.table(_bronze_table_name())
         .filter(F.col("occurred_date_partition") == date_str)  # 파티션 프루닝
-        .select("bike_id", "event_type", "occurred_at", "received_at")
+        .select("bike_id", "event_type", "occurred_at", "station_id", "received_at")
         .collect()
     )
     return [r.asDict() for r in rows]

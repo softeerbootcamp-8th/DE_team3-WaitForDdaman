@@ -9,7 +9,7 @@
 - rental_history : Bronze 워터마크 (증분 기준 = RENT_DT)
 - failure_report : Bronze 워터마크 (증분 기준 = REGDTTM)
 - silver_rental_history : Silver 워터마크 (staging/jobs/transform_silver_rental_history.py)
-- gold_dim_bike : Gold 워터마크 (pipeline/risk_model/jobs/build_dim_bike.py)
+- gold_dim_bike : Gold 워터마크 (pipeline/collection_priority/jobs/build_dim_bike.py)
 - bikeman_event  : 워터마크 있음 (증분 기준 = occurred_at). 백필이 아니라 서비스 시작일(6/30) 전날인 2026-06-29를 최초 1회 찍어야 함
 - station_master : **해당 없음** - tbCycleStationInfo는 날짜 파라미터가 없고 매번 전체
                    스냅샷만 주므로 증분 기준이 될 컬럼 자체가 없다. 그래서 이 DAG의

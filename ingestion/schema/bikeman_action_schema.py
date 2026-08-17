@@ -9,9 +9,13 @@ received_at 역전), 서비스 시작일 이전 발생 여부는 검증하지 �
 방어선을 하나 더 둔다 (defense-in-depth: Bronze 스키마가 나중에 느슨해져도
 Silver가 최종 방어선 역할).
 
-최종 Silver 컬럼은 bike_id/event_type/occurred_at/ingested_at 4개만 남기기로
-결정했으므로(station_id/worker_id/received_at/event_id 의도적 제외), received_at은
+최종 Silver 컬럼은 bike_id/event_type/occurred_at/station_id/ingested_at 5개로
+결정했으므로(worker_id/received_at/event_id 의도적 제외), received_at은
 이 모듈의 이상치 판정에만 쓰고 최종 select에는 포함하지 않는다.
+
+station_id는 Gold의 gold.fact_station_inventory가 DEPLOY 이벤트로 자전거의
+현재 위치를 정확히 파악하는 데 필요해서(2026-08-17) 포함했다. null이 정상값이다
+(노상 수거처럼 특정 대여소와 무관한 이벤트는 station_id가 없다).
 """
 import logging
 from datetime import date, datetime
@@ -23,8 +27,8 @@ ALLOWED_EVENT_TYPES = {"COLLECT", "DEPLOY"}
 # bikeman 서비스 시작일 - 이보다 이전 occurred_at은 물리적으로 존재할 수 없음
 SERVICE_START_DATE = date(2026, 6, 30)
 
-# 최종 Silver 테이블 컬럼 (station_id/worker_id/received_at/event_id 의도적 제외)
-FINAL_COLUMNS = ["bike_id", "event_type", "occurred_at", "ingested_at"]
+# 최종 Silver 테이블 컬럼 (worker_id/received_at/event_id 의도적 제외)
+FINAL_COLUMNS = ["bike_id", "event_type", "occurred_at", "station_id", "ingested_at"]
 
 
 def classify_rows(rows: list[dict], now: datetime) -> tuple[list[dict], list[dict]]:

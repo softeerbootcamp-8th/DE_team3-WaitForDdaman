@@ -44,6 +44,33 @@ def _table_name() -> str:
     return f"{config.SETTINGS.iceberg_catalog_name}.bronze.failure_report"
 
 
+def _ensure_bronze_table(spark) -> None:
+    """
+    backfill_failure_report.py와 동일한 DDL - 백필 없이 daily_batch만 단독으로
+    먼저 돌리는 경우에도 테이블이 없어서 writeTo().overwritePartitions()가
+    TABLE_OR_VIEW_NOT_FOUND로 실패하지 않게 한다. 이미 백필로 테이블이 있어도
+    CREATE TABLE IF NOT EXISTS라 안전하다(no-op).
+    """
+    spark.sql(f"CREATE DATABASE IF NOT EXISTS {config.SETTINGS.iceberg_catalog_name}.bronze")
+    spark.sql(
+        f"""
+        CREATE TABLE IF NOT EXISTS {_table_name()} (
+            bike_no STRING,
+            reg_dttm STRING,
+            failure_type STRING,
+            reg_date_partition STRING,
+            source_file STRING,
+            ingested_at TIMESTAMP
+        )
+        USING iceberg
+        PARTITIONED BY (reg_date_partition)
+        """
+    )
+    spark.sql(
+        f"ALTER TABLE {_table_name()} SET TBLPROPERTIES ('write.distribution-mode'='hash')"
+    )
+
+
 def _process_one_day(spark, target_date: date) -> int:
     raw_rows = list(fetch_failure_reports_by_date(target_date))
     date_str = target_date.strftime("%Y-%m-%d")
@@ -92,6 +119,7 @@ def run() -> None:
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
     spark = build_spark_session("bronze-daily-batch-failure-report")
+    _ensure_bronze_table(spark)
 
     last_processed = read_watermark(watermark_key=WATERMARK_KEY)
     start_date = last_processed + timedelta(days=1)

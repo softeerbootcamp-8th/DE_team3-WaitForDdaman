@@ -30,8 +30,17 @@ DEFAULT_ARGS = {
 
 
 def bash_job(job_module: str, extra_env: str = "") -> str:
-    """공통 실행 커맨드. .env를 로드해 각 잡이 설정값을 읽을 수 있게 한다."""
+    """
+    공통 실행 커맨드. .env를 로드해 각 잡이 설정값을 읽을 수 있게 한다.
+
+    PYTHONDONTWRITEBYTECODE=1: 브론즈 일 배치는 여러 태스크가 동시에(BRONZE_POOL
+    안에서 병렬로) 같은 ingestion/common 모듈을 처음 import하는데, 이때 여러
+    프로세스가 동시에 같은 .pyc 캐시 파일에 쓰다가 파일이 잘려서
+    "EOFError: marshal data too short"로 실패하는 게 실측으로 확인됐다
+    (2026-08-17). 바이트코드 캐시 자체를 안 만들게 해서 이 경합을 없앤다 -
+    이 정도 배치 잡에서 컴파일 오버헤드는 무시할 수준.
+    """
     return (
         f"cd {INGESTION_DIR} && set -a && source .env && set +a && "
-        f"{extra_env}{INGESTION_PYTHON} -m jobs.{job_module}"
+        f"PYTHONDONTWRITEBYTECODE=1 {extra_env}{INGESTION_PYTHON} -m jobs.{job_module}"
     )
