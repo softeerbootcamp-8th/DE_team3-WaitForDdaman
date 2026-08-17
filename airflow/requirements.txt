@@ -1,2 +1,4 @@
 # DAG에서 필요한 추가 Python 의존성을 여기에 추가 (예: pandas, boto3, requests).
 # apache-airflow-providers-* 는 provider 패키지이므로 pip 대신 constraints 파일과 함께 설치할 것.
+
+lightgbm  # risk_model_train DAG 후보 모델
