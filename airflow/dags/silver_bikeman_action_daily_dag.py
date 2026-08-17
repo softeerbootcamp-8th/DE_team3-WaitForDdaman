@@ -33,16 +33,10 @@ from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag
 
 from dag_assets import BIKEMAN_EVENT_BRONZE
+from dag_common import DEFAULT_ARGS
 
 INGESTION_DIR = "/opt/airflow/ingestion"
 INGESTION_PYTHON = "python"
-
-default_args = {
-    "retries": 3,
-    "retry_delay": timedelta(minutes=5),
-    "retry_exponential_backoff": True,
-    "max_retry_delay": timedelta(minutes=30),
-}
 
 
 @dag(
@@ -51,7 +45,7 @@ default_args = {
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Seoul"),
     catchup=False,
     max_active_runs=1,  # 같은 파티션에 두 실행이 동시에 덮어쓰기 시도하는 것 방지
-    default_args=default_args,
+    default_args=DEFAULT_ARGS,
     tags=["silver", "bikeman", "asset_triggered"],
     params={
         "max_days_per_run": "",
