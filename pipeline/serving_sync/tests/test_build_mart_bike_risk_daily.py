@@ -4,7 +4,13 @@ from datetime import date
 import pytest
 from pyspark.sql import types as T
 
-from build_mart_bike_risk_daily import build_mart_bike_risk_daily
+from build_mart_bike_risk_daily import _fail_history_agg, build_mart_bike_risk_daily
+
+RAW_FAILURE_SCHEMA = T.StructType([
+    T.StructField("bike_no", T.StringType()),
+    T.StructField("reg_dttm", T.StringType()),
+    T.StructField("failure_type", T.StringType()),
+])
 
 RISK_SCHEMA = T.StructType([
     T.StructField("bike_id", T.StringType()),
@@ -111,3 +117,35 @@ def test_aging_is_snapshot_year_minus_start_year(spark):
 def test_no_risk_scored_station_defaults_to_full_health(spark):
     result = build(spark, [("B1", 10.0, "Normal")], [("B1", "보류")])
     assert result["B1"]["healthy_ratio"] == pytest.approx(100.0)
+
+
+def test_fail_history_agg_orders_most_recent_first(spark):
+    raw = spark.createDataFrame(
+        [
+            ("B1", "2026-01-01 00:00:00", "펑크"),
+            ("B1", "2026-03-01 00:00:00", "타이어마모"),
+            ("B1", "2026-02-01 00:00:00", "체인끊김"),
+        ],
+        RAW_FAILURE_SCHEMA,
+    )
+    result = {r["bike_id"]: r for r in _fail_history_agg(raw, date(2026, 8, 18)).collect()}
+    assert result["B1"]["fail_history"] == [
+        "2026-03-01 타이어마모",
+        "2026-02-01 체인끊김",
+        "2026-01-01 펑크",
+    ]
+
+
+def test_fail_history_agg_respects_limit(spark):
+    raw = spark.createDataFrame(
+        [(f"B2", f"2026-01-0{i} 00:00:00", f"고장{i}") for i in range(1, 8)],
+        RAW_FAILURE_SCHEMA,
+    )
+    result = {r["bike_id"]: r for r in _fail_history_agg(raw, date(2026, 8, 18), limit=5).collect()}
+    assert result["B2"]["fail_history"] == [
+        "2026-01-07 고장7",
+        "2026-01-06 고장6",
+        "2026-01-05 고장5",
+        "2026-01-04 고장4",
+        "2026-01-03 고장3",
+    ]

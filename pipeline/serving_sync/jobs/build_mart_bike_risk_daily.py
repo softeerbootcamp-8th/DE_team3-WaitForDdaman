@@ -122,7 +122,7 @@ def _fail_history_agg(failure_df, as_of_date, limit: int = 5):
 
 
 def _apply_capacity_split(df, capacity: int):
-    w = Window.orderBy(F.col("risk_score").desc())
+    w = Window.orderBy(F.col("risk_score").desc(), F.col("bike_id").asc())
     suspend = (
         df.filter(F.col("action") == SUSPEND)
         .withColumn("_rank", F.row_number().over(w))
