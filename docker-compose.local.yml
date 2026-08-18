@@ -44,11 +44,16 @@ services:
     build:
       context: .
       dockerfile: services/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres/${POSTGRES_DB:-airflow}
     ports:
       - "8000:8000"
     volumes:
       - ./services/api/app:/app/services/api/app
       - ./services/api/data:/app/services/api/data
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   web:
     container_name: service-web
