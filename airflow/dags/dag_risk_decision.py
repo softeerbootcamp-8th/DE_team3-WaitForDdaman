@@ -165,10 +165,16 @@ def dag_risk_decision():
 
     # 8. gold_to_serving_sync 트리거 - wait_for_completion=False로 걸어 sync 실패가
     # 이 DAG(이미 만들어진 gold 데이터는 그 자체로 유효함)를 실패로 만들지 않게 한다.
+    #
+    # conf로 이 DAG가 실제로 처리한 날짜(params.snapshot_date, 미지정이면 ds)를 명시적으로
+    # 넘긴다 - gold_to_serving_sync는 자기 logical_date에서 파생한 ds로 파티션을 잡는데,
+    # 이 DAG는 params.snapshot_date(백필 시 임의의 날짜)로 파티션을 잡아 둘이 서로 다른
+    # 경로로 날짜를 정하므로, 명시 지정 없이는 백필/미래 스케줄 실행에서 어긋난다.
     trigger_serving_sync = TriggerDagRunOperator(
         task_id="trigger_serving_sync",
         trigger_dag_id="gold_to_serving_sync",
         logical_date="{{ logical_date }}",
+        conf={"snapshot_date": "{{ params.snapshot_date or ds }}"},
         wait_for_completion=False,
         reset_dag_run=True,
     )

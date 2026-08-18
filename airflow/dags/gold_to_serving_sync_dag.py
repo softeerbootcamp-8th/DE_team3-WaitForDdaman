@@ -60,10 +60,12 @@ def _bash(job_module: str, extra_env: str = "") -> str:
 
 
 def _verify_bash(iceberg_table: str, postgres_table: str) -> str:
+    # dag_risk_decision이 conf로 넘긴 snapshot_date가 있으면 그걸 우선한다 (아래
+    # SNAPSHOT_DATE 주석 참고) - 없으면(수동 트리거 등) 이 DAG 자신의 ds로 폴백.
     return _bash(
         "verify_serving_sync",
         f"ICEBERG_TABLE=bike_catalog.gold.{iceberg_table} POSTGRES_TABLE={postgres_table} "
-        "SNAPSHOT_DATE='{{ ds }}' ",
+        "SNAPSHOT_DATE='{{ dag_run.conf.get(\"snapshot_date\") or ds }}' ",
     )
 
 
@@ -78,14 +80,18 @@ def _verify_bash(iceberg_table: str, postgres_table: str) -> str:
     doc_md=__doc__,
 )
 def gold_to_serving_sync():
+    # 아래 네 태스크의 SNAPSHOT_DATE는 모두 dag_run.conf.get("snapshot_date")를 자기
+    # ds보다 우선한다 - dag_risk_decision이 conf로 trigger_serving_sync에서 넘긴 날짜가
+    # 있으면 그걸 쓰고(백필/미래 스케줄 실행에서 두 DAG의 날짜가 어긋나지 않게), 수동
+    # 트리거처럼 conf가 없으면 기존과 동일하게 이 DAG 자신의 ds로 폴백한다.
     build_mart_bike_risk_daily = BashOperator(
         task_id="build_mart_bike_risk_daily",
-        bash_command=_bash("build_mart_bike_risk_daily", "SNAPSHOT_DATE='{{ ds }}' "),
+        bash_command=_bash("build_mart_bike_risk_daily", "SNAPSHOT_DATE='{{ dag_run.conf.get(\"snapshot_date\") or ds }}' "),
         execution_timeout=timedelta(minutes=20),
     )
     write_bike_risk_daily = BashOperator(
         task_id="write_bike_risk_daily",
-        bash_command=_bash("write_bike_risk_daily", "SNAPSHOT_DATE='{{ ds }}' "),
+        bash_command=_bash("write_bike_risk_daily", "SNAPSHOT_DATE='{{ dag_run.conf.get(\"snapshot_date\") or ds }}' "),
         execution_timeout=timedelta(minutes=15),
     )
     verify_bike_risk_daily_sync = BashOperator(
@@ -96,12 +102,12 @@ def gold_to_serving_sync():
 
     build_mart_station_daily = BashOperator(
         task_id="build_mart_station_daily",
-        bash_command=_bash("build_mart_station_daily", "SNAPSHOT_DATE='{{ ds }}' "),
+        bash_command=_bash("build_mart_station_daily", "SNAPSHOT_DATE='{{ dag_run.conf.get(\"snapshot_date\") or ds }}' "),
         execution_timeout=timedelta(minutes=20),
     )
     write_station_daily = BashOperator(
         task_id="write_station_daily",
-        bash_command=_bash("write_station_daily", "SNAPSHOT_DATE='{{ ds }}' "),
+        bash_command=_bash("write_station_daily", "SNAPSHOT_DATE='{{ dag_run.conf.get(\"snapshot_date\") or ds }}' "),
         execution_timeout=timedelta(minutes=15),
     )
     verify_station_daily_sync = BashOperator(
