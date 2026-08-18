@@ -1,6 +1,6 @@
 # risk_model — 위험도 모델 학습(재학습) 파이프라인
 
-단일 DAG `risk_model_train` (수동 트리거). 아티팩트 저장까지가 범위이고, 서빙 반영은 추론 DAG 담당이다(추론 DAG은 아직 없음 — 이 문서의 "모델 아티팩트 관리" 절이 그 계약이다).
+단일 DAG `risk_model_train` (수동 트리거). 아티팩트 저장까지가 범위이고, 서빙 반영은 `dag_risk_decision`(`pipeline/risk_model`)이 담당한다 — `run_risk_scoring_model.py`가 이 문서의 "모델 아티팩트 관리" 절 계약대로 `registry.get_champion()` + `train.score()`를 그대로 불러 쓴다.
 
 ```
 resolve_anchors → validate_inputs → build_train_samples → assert_train_table
@@ -61,13 +61,20 @@ window_days: 14 / horizon_days: 3 / exclude_recent_days: 30
 
 ### 추론(서빙) 쪽에서 쓰는 방법 — 계약
 
-이 저장소에는 아직 추론 DAG이 없다. 나중에 만들 때 지켜야 할 계약:
+`pipeline/risk_model/jobs/run_risk_scoring_model.py`(`dag_risk_decision` DAG)가 이 계약대로 구현돼 있다:
 
 1. `{model_root}/registry.json`을 읽어 `champion.artifact_uri`를 얻는다.
 2. `joblib.load()`로 `model.joblib`을 로드한다 ([settings.py](settings.py) `read_bytes` + `io.BytesIO`를 쓰면 S3/로컬 모두 동일 코드로 처리됨).
-3. 스코어링은 [train.py](train.py) `score(artifact, feat)`를 그대로 호출한다 — `model_type`에 따라 `rule_trips`(트립수 그대로)/`logreg`(스케일러 적용)/`lgbm` 분기가 이미 그 안에 있다.
-4. 입력 피처는 반드시 [features.py](features.py) `build_features_for_inference()`로 만든다 — 학습과 동일 로직이라야 skew가 안 생긴다.
+3. 스코어링은 [train.py](train.py) `score(artifact, feat)`를 그대로 호출한다. champion은 항상 `models.primary` 타입으로 승격되므로(아래 "champion 승격 정책" 참고) 실제로는 그 타입 분기만 타지만, `score()` 자체는 `rule_trips`/`logreg`/`lgbm` 전부 지원한다.
+4. 입력 피처는 반드시 [features.py](features.py) `build_features_for_inference()`로 만든다 — 학습과 동일 로직이라야 skew가 안 생긴다. `pipeline/risk_model/jobs/build_bike_features_daily.py`가 이걸 그대로 호출한다.
 5. MLflow를 켠 경우(`mlflow.enabled: true`)에도 `artifact_uri`는 태그로만 남아 있으므로, tracking server가 죽어도 S3 직접 로드로 폴백 가능해야 한다.
+
+### champion 승격 정책 — models.primary 고정
+
+`train_and_evaluate` 태스크는 매 실행마다 `models.candidates`(`rule_trips`/`logreg`/`lgbm`) 전부를 학습·평가하지만, **승격 후보는 항상 `models.primary`(lgbm)로 고정**한다. `select_best()`가 고르는 "이번 평가 1등"은 리포트로만 로그에 남고 승격에는 안 쓰인다. 이유:
+
+- `rule_trips`는 `score()`가 확률이 아니라 trips 개수를 그대로 반환한다 - 그게 승격되면 `risk_score`가 0~100 범위를 벗어나 추론 쪽 PyDeequ 검증이 깨진다. 애초에 "rule 대조군이 발표 근거가 된다"(위 표 참고)는 리포트용 설계다.
+- `logreg`/`lgbm`처럼 둘 다 확률을 반환하는 타입끼리도 캘리브레이션(확률 분포)이 달라서, 재학습마다 champion 타입이 바뀌면 `risk_grade` 컷오프가 조용히 안 맞게 된다(에러 없이 등급만 이상해짐). 모델 아키텍처를 바꾸는 건 재학습이 자동으로 정할 일이 아니라 `models.primary`를 사람이 바꾸는 명시적 결정이어야 한다.
 
 ## 테스트 방법
 
@@ -184,4 +191,4 @@ docker exec airflow-scheduler airflow tasks states-for-dag-run risk_model_train 
   `samples.py` 에 `--anchor-plan` CLI 를 이미 붙여뒀다.
 - MLflow — `mlflow.enabled: false`. 켤 경우 compose에 tracking server(백엔드=기존 postgres 별 DB,
   아티팩트=S3) 추가가 필요하고, joblib 은 S3 직접 저장 + 경로를 태그로 남겨 폴백을 유지한다.
-- 추론 DAG — 아직 없음. 위 "추론 쪽에서 쓰는 방법" 계약대로 만들면 됨.
+- 추론 — `dag_risk_decision`(`pipeline/risk_model`)이 위 계약대로 연결돼 있음. 다만 이 환경엔 아직 `registry.json`에 champion이 없어서(`risk_model_train`을 `dry_run=false`로 실제 실행해 승격시킨 적 없음) end-to-end 동작은 미검증 상태 — 실제 학습 실행 후 확인 필요.
