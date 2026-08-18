@@ -26,6 +26,12 @@ apply_lagged_filter는 실제로는 bike_man_action 최신 이벤트만 보고 f
 바꾸지 않음 - 대여소 재고가 바뀌면 오늘 다시 대여중단/보류가 갈릴 수 있어서). 그래서
 4-a/4-b가 실제로는 같은 job을 부르지만, 계획 문서에 있는 이름 그대로 태스크는
 남겨뒀다.
+
+### trigger_serving_sync (2026-08-18 추가)
+build_fact_bike_decision이 끝나면 gold_to_serving_sync(gold_to_serving_sync_dag.py)를
+TriggerDagRunOperator로 트리거한다. bike_risk_daily 마트가 필요로 하는
+fact_bike_risk/fact_bike_decision은 이 DAG의 산출물이라, dag_gold_dim_fact가 아니라
+여기서 트리거해야 두 마트(station_daily 포함) 모두 만들 재료가 갖춰진다.
 """
 from datetime import timedelta
 
@@ -33,6 +39,7 @@ import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.standard.operators.python import BranchPythonOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.providers.standard.sensors.external_task import ExternalTaskSensor
 from airflow.sdk import dag
 
@@ -156,9 +163,26 @@ def dag_risk_decision():
         execution_timeout=timedelta(minutes=30),
     )
 
+    # 8. gold_to_serving_sync 트리거 - wait_for_completion=False로 걸어 sync 실패가
+    # 이 DAG(이미 만들어진 gold 데이터는 그 자체로 유효함)를 실패로 만들지 않게 한다.
+    #
+    # conf로 이 DAG가 실제로 처리한 날짜(params.snapshot_date, 미지정이면 ds)를 명시적으로
+    # 넘긴다 - gold_to_serving_sync는 자기 logical_date에서 파생한 ds로 파티션을 잡는데,
+    # 이 DAG는 params.snapshot_date(백필 시 임의의 날짜)로 파티션을 잡아 둘이 서로 다른
+    # 경로로 날짜를 정하므로, 명시 지정 없이는 백필/미래 스케줄 실행에서 어긋난다.
+    trigger_serving_sync = TriggerDagRunOperator(
+        task_id="trigger_serving_sync",
+        trigger_dag_id="gold_to_serving_sync",
+        logical_date="{{ logical_date }}",
+        conf={"snapshot_date": "{{ params.snapshot_date or ds }}"},
+        wait_for_completion=False,
+        reset_dag_run=True,
+    )
+
     wait_for_gold_facts >> wait_for_yesterday_decision >> check_cold_start
     check_cold_start >> [skip_filter_first_run, apply_lagged_filter]
     [skip_filter_first_run, apply_lagged_filter, build_bike_features_daily] >> run_risk_scoring_model >> build_fact_bike_decision
+    build_fact_bike_decision >> trigger_serving_sync
 
 
 dag_risk_decision()
