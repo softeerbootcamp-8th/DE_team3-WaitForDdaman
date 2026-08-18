@@ -3,11 +3,12 @@ Gold - 대여소별 서빙 마트 (station_active + fact_station_inventory + 위
 -> gold.mart_station_daily, {{ ds }} 파티션 단위 OVERWRITE) -> postgres.station_daily로
 넘어갈 최종 모양.
 
-### x/y = longitude/latitude 임시 대응
-station_daily.x/y는 프론트(DistrictMap.tsx)가 SVG 픽셀 좌표로 직접 쓰는 값이라
-dim_district(cx/cy)와 같은 커스텀 좌표계가 맞지만, 그 투영 변환이 아직 없어 실제
-위경도를 그대로 넣는다 - 지도 표시가 정확하지 않을 수 있음을 알고 쓰는 임시 값이고,
-프론트 쪽 좌표 투영 작업이 끝나면 여기만 바꾸면 된다.
+### 컬럼명은 상류 소스 그대로 유지
+latitude/longitude(station_active) / bike_cnt(fact_station_inventory) / risk_cnt
+(station_risk_shared)를 마트 출력에서 다른 이름으로 바꾸지 않는다 - gold mart와
+postgres 서빙 테이블의 컬럼명을 동일하게 맞춰서 두 스키마를 나란히 봤을 때 헷갈리지
+않게 하기 위함. API/프론트가 SVG 픽셀 좌표용 x/y를 쓰던 것은 이 컬럼명과 무관한
+API 응답 계층의 별도 매핑으로 처리한다(app 연동 작업에서 다룸).
 
 ### urgency 기준
 DetailPanel.tsx의 "정상자전거 비율 {healthyRatio}% -> {stationUrgency} (70% 기준)"
@@ -34,7 +35,7 @@ HEALTHY_RATIO_THRESHOLD = 70.0
 
 MART_COLUMNS = [
     "snapshot_date", "station_id", "station_name", "region", "district",
-    "x", "y", "hold_num", "bike_count", "risk_count", "healthy_ratio", "urgency",
+    "latitude", "longitude", "hold_num", "bike_cnt", "risk_cnt", "healthy_ratio", "urgency",
 ]
 
 
@@ -61,11 +62,11 @@ def _ensure_mart_table(spark) -> None:
             station_name STRING,
             region STRING,
             district STRING,
-            x DOUBLE,
-            y DOUBLE,
+            latitude DOUBLE,
+            longitude DOUBLE,
             hold_num INT,
-            bike_count INT,
-            risk_count INT,
+            bike_cnt INT,
+            risk_cnt INT,
             healthy_ratio DOUBLE,
             urgency STRING
         )
@@ -77,8 +78,8 @@ def _ensure_mart_table(spark) -> None:
 
 def build_mart_station_daily(station_active_df, inventory_df, station_risk_df, snapshot_date):
     # inventory_df.bike_cnt(gold.fact_station_inventory) / station_risk_df.risk_cnt
-    # (station_risk_shared) 이름 그대로 조인하고, 최종 select에서만 postgres/API가 쓰는
-    # bike_count/risk_count로 바꾼다 (state.py 쿼리와 맞춰야 하는 건 출력 스키마뿐).
+    # (station_risk_shared) 이름 그대로 조인하고 최종 select까지 그대로 유지한다 -
+    # gold mart와 postgres 서빙 테이블의 컬럼명을 동일하게 맞춘다.
     joined = (
         station_active_df.select(
             "station_id", "station_name", "region", "district", "latitude", "longitude", "hold_num"
@@ -88,15 +89,13 @@ def build_mart_station_daily(station_active_df, inventory_df, station_risk_df, s
     )
 
     joined = (
-        joined.withColumn("bike_count", F.coalesce(F.col("bike_cnt"), F.lit(0)))
-        .withColumn("risk_count", F.coalesce(F.col("risk_cnt"), F.lit(0)))
+        joined.withColumn("bike_cnt", F.coalesce(F.col("bike_cnt"), F.lit(0)))
+        .withColumn("risk_cnt", F.coalesce(F.col("risk_cnt"), F.lit(0)))
         .withColumn("healthy_ratio", F.coalesce(F.col("healthy_ratio"), F.lit(100.0)))
         .withColumn(
             "urgency",
             F.when(F.col("healthy_ratio") >= HEALTHY_RATIO_THRESHOLD, F.lit("여유있음")).otherwise(F.lit("부족함")),
         )
-        .withColumnRenamed("longitude", "x")
-        .withColumnRenamed("latitude", "y")
     )
 
     return joined.withColumn("snapshot_date", F.lit(str(snapshot_date)).cast("date")).select(*MART_COLUMNS)

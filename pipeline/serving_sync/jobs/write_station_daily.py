@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 TABLE = "station_daily"
 COLUMNS = [
     "snapshot_date", "station_id", "station_name", "region", "district",
-    "x", "y", "hold_num", "bike_count", "risk_count", "healthy_ratio", "urgency",
+    "latitude", "longitude", "hold_num", "bike_cnt", "risk_cnt", "healthy_ratio", "urgency",
 ]
 
 

@@ -56,15 +56,15 @@ def build(spark, station_active_rows, inventory_rows, station_risk_rows):
     }
 
 
-def test_x_y_come_from_longitude_latitude(spark):
+def test_latitude_longitude_pass_through_unchanged(spark):
     result = build(
         spark,
         [("ST-1", "역삼역", "강남", "강남구", 37.5, 127.0, 10)],
         [("ST-1", 5, 10)],
         [],
     )
-    assert result["ST-1"]["x"] == pytest.approx(127.0)
-    assert result["ST-1"]["y"] == pytest.approx(37.5)
+    assert result["ST-1"]["latitude"] == pytest.approx(37.5)
+    assert result["ST-1"]["longitude"] == pytest.approx(127.0)
 
 
 def test_healthy_ratio_ge_70_is_sufficient(spark):
@@ -87,14 +87,14 @@ def test_healthy_ratio_below_70_is_insufficient(spark):
     assert result["ST-1"]["urgency"] == "부족함"
 
 
-def test_missing_inventory_defaults_bike_count_to_zero(spark):
+def test_missing_inventory_defaults_bike_cnt_to_zero(spark):
     result = build(
         spark,
         [("ST-1", "역삼역", "강남", "강남구", 37.5, 127.0, 10)],
         [],
         [],
     )
-    assert result["ST-1"]["bike_count"] == 0
-    assert result["ST-1"]["risk_count"] == 0
+    assert result["ST-1"]["bike_cnt"] == 0
+    assert result["ST-1"]["risk_cnt"] == 0
     assert result["ST-1"]["healthy_ratio"] == pytest.approx(100.0)
     assert result["ST-1"]["urgency"] == "여유있음"
