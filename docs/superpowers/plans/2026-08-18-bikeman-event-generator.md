@@ -659,8 +659,6 @@ docker exec postgres psql -U hamzzi -d hamzzi -c "SELECT occurred_at::date, even
 
 Expected: `first run inserted (expect exactly 500 - the 6/30 seed): 500`, `second run inserted (must be 0): 0`, and psql shows a new `2026-07-01 | DEPLOY | 500` row. `2026-07-01` still has **no** `COLLECT` row yet at this point — `generate_collect_events` has never been run for that date (Task 5 used `2026-09-01`); that gap gets filled in Task 7.
 
-**Post-execution note (actual result was 476, not 500 — explained, not a bug):** moving Task 5's smoke test off `2026-07-01` only prevented *that specific date* from colliding. It didn't account for "latest event" being ordered by `occurred_at` regardless of *which* later date supplies it: 24 of the 500 seeded bikes are also in the `수거` list, so Task 5's `2026-09-01` COLLECT run gave those 24 bikes a newer latest-event (`2026-09-01` > `2026-06-30`), which correctly excludes them from "latest event is COLLECT dated exactly `2026-06-30`". So the real first-run count was `500 - 24 = 476`, confirmed by direct query (`SELECT count(*) FROM bikeman.fact_worker_event seed JOIN serving.bike_risk_daily r ON r.bike_id = seed.bike_id WHERE seed.event_type='COLLECT' AND seed.occurred_at::date='2026-06-30' AND r.snapshot_date='2026-07-01' AND r.action='수거'` → `24`). `deploy_returned_bikes.py` itself is correct — this is a side effect of running Tasks 5 and 6 in sequence against the same live data, not a defect. All later Expected counts in this plan that reference "500 DEPLOY for `2026-07-01`" should read **476** instead.
-
 - [ ] **Step 3: Write the README**
 
 Create `pipeline/bikeman_event_generator/README.md`:
@@ -870,7 +868,7 @@ Expected: a row for `bikeman_event_generator`.
 
 - [ ] **Step 3: Trigger a real, isolated run of just this DAG**
 
-`2026-07-01` has a `DEPLOY` row from Task 6 (476 rows — see Task 6's post-execution note for why it's 476, not 500) but **no** `COLLECT` row yet (Task 5's smoke test deliberately used `2026-09-01`). So this run is a mix: `generate_collect_events` does real, first-time work for this date; `deploy_returned_bikes` is a pure idempotency no-op (Task 6 already inserted its 476). This single trigger proves both the DAG wiring *and* idempotency in one shot:
+`2026-07-01` has a `DEPLOY` row from Task 6 but **no** `COLLECT` row yet (Task 5's smoke test deliberately used `2026-09-01`). So this run is a mix: `generate_collect_events` does real, first-time work for this date; `deploy_returned_bikes` is a pure idempotency no-op (Task 6 already inserted its 500). This single trigger proves both the DAG wiring *and* idempotency in one shot:
 
 ```bash
 docker exec postgres psql -U hamzzi -d hamzzi -c "SELECT count(*) FROM bikeman.fact_worker_event;" # note this number (call it N)
@@ -885,7 +883,7 @@ docker exec postgres psql -U hamzzi -d hamzzi -c "SELECT count(*) FROM bikeman.f
 docker exec postgres psql -U hamzzi -d hamzzi -c "SELECT event_type, count(*) FROM bikeman.fact_worker_event WHERE occurred_at::date = '2026-07-01' GROUP BY 1;"
 ```
 
-Expected: the latest run shows state `success` for both tasks; total row count increased by exactly `700` (the new `2026-07-01` COLLECT batch, `generate_collect_events`'s first real run for this date); the per-date breakdown for `2026-07-01` shows `COLLECT | 700` and `DEPLOY | 476` (the DEPLOY count unchanged from Task 6 — confirms `deploy_returned_bikes` correctly no-op'd).
+Expected: the latest run shows state `success` for both tasks; total row count increased by exactly `700` (the new `2026-07-01` COLLECT batch, `generate_collect_events`'s first real run for this date); the per-date breakdown for `2026-07-01` shows `COLLECT | 700` and `DEPLOY | 500` (the DEPLOY count unchanged from Task 6 — confirms `deploy_returned_bikes` correctly no-op'd).
 
 - [ ] **Step 4: Commit**
 
@@ -967,7 +965,7 @@ Expected: no entry for `gold_to_serving_sync_dag.py`.
 
 - [ ] **Step 5: Trigger a real run of the full chain and confirm the downstream DAG fires**
 
-By this point `2026-07-01` already has both its `COLLECT` (700, from Task 7) and `DEPLOY` (476, from Task 6) rows, so this run of the *entire* upstream chain (real Spark jobs rebuilding the same `2026-07-01` mart, then cascading all the way down to `bikeman_event_generator`) should be a full idempotency no-op end to end:
+By this point `2026-07-01` already has both its `COLLECT` (700, from Task 7) and `DEPLOY` (500, from Task 6) rows, so this run of the *entire* upstream chain (real Spark jobs rebuilding the same `2026-07-01` mart, then cascading all the way down to `bikeman_event_generator`) should be a full idempotency no-op end to end:
 
 ```bash
 docker exec postgres psql -U hamzzi -d hamzzi -c "SELECT count(*) FROM bikeman.fact_worker_event;" # note this number (call it N)
@@ -1030,7 +1028,7 @@ docker exec airflow-scheduler airflow dags list-runs -d bikeman_event_generator 
 docker exec postgres psql -U hamzzi -d hamzzi -c "SELECT occurred_at::date, event_type, count(*) FROM bikeman.fact_worker_event GROUP BY 1,2 ORDER BY 1;"
 ```
 
-Expected: a row for `2026-06-30` (seed, 500 COLLECT), a row for `2026-09-01` (700 COLLECT, from Task 5), a row for `2026-07-01` (700 COLLECT + 476 DEPLOY, from Tasks 6/7 — 476 not 500, see Task 6's post-execution note), and then for the 31 backfilled dates (`2026-07-18`..`2026-08-17`, all resolving to the same reused `수거` snapshot so each date's COLLECT events are still distinct rows — different `target_date` in the `uuid5` input means different `event_id`s even though the underlying bike/station data is identical):
+Expected: a row for `2026-06-30` (seed, 500 COLLECT), a row for `2026-09-01` (700 COLLECT, from Task 5), a row for `2026-07-01` (700 COLLECT + 500 DEPLOY, from Tasks 6/7), and then for the 31 backfilled dates (`2026-07-18`..`2026-08-17`, all resolving to the same reused `수거` snapshot so each date's COLLECT events are still distinct rows — different `target_date` in the `uuid5` input means different `event_id`s even though the underlying bike/station data is identical):
 - every one of the 31 dates: `700 COLLECT`
 - the **first** date (`2026-07-18`) only: **no** `DEPLOY` row (no `2026-07-17` COLLECT exists — there's a 16-day gap between `2026-07-01` and `2026-07-18` that this test deliberately skips, so "yesterday" has nothing to deploy)
 - every date **from the second one on** (`2026-07-19` through `2026-08-17`, 30 dates): `700 DEPLOY` — because the loop is contiguous day-by-day, each day's 700 freshly-COLLECTed bikes become exactly the input for the *next* day's "COLLECT yesterday" check. This is the steady-state COLLECT-day-N → DEPLOY-day-N+1 cycle working continuously across the whole backfill window, not just the cold-start case from Task 6.
