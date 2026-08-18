@@ -31,11 +31,18 @@ _FETCH_DEPLOY_TARGETS_SQL = """
     WITH latest AS (
         SELECT DISTINCT ON (bike_id) bike_id, event_type, station_id, occurred_at
         FROM bikeman.fact_worker_event
-        ORDER BY bike_id, occurred_at DESC
+        ORDER BY bike_id, occurred_at DESC, (event_type = 'COLLECT') DESC
     )
     SELECT bike_id, station_id FROM latest
     WHERE event_type = 'COLLECT' AND occurred_at::date = %(target_date)s::date - INTERVAL '1 day'
 """
+# ORDER BY의 세 번째 키: event_builder가 COLLECT/DEPLOY 모두 occurred_at을 target_date
+# 09:00로 고정 부여하므로(event_builder.py 참고), 같은 자전거가 어제 COLLECT되고 오늘
+# 다시 "수거" 목록에 올라 오늘 DEPLOY+COLLECT가 동시에 발생하면 둘의 occurred_at이
+# 정확히 같아진다. DISTINCT ON은 동률일 때 어느 행이 남을지 보장하지 않으므로(Task 9
+# E2E 백필에서 실측: 이 타이브레이커 없이는 둘째 날 이후 DEPLOY 건수가 700이 아니라
+# 매일 376~512 사이로 들쭉날쭉했다) "오늘 COLLECT 목록에 다시 올랐다"는 사실이 "오늘
+# 재배치됐다"보다 더 최신 상태를 나타낸다고 보고 동률에서 COLLECT가 이기도록 강제한다.
 
 
 def fetch_collect_targets(conn, target_date: str) -> list[dict]:
