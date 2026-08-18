@@ -80,6 +80,8 @@ def count_rows(table: str, snapshot_date: str) -> int:
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {table} WHERE snapshot_date = %s", (snapshot_date,))
             return cur.fetchone()[0]
+    except psycopg2.Error as e:
+        raise ServingDbError(f"{table} 행 개수 조회 실패: {e}") from e
     finally:
         conn.close()
 
@@ -133,6 +135,8 @@ def ensure_serving_tables() -> None:
                 """
             )
         conn.commit()
+    except psycopg2.Error as e:
+        raise ServingDbError(f"serving 테이블 생성 실패: {e}") from e
     finally:
         conn.close()
     logger.info("station_daily / bike_risk_daily 테이블 준비 완료")
