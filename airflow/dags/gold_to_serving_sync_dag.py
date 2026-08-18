@@ -1,0 +1,117 @@
+# airflow/dags/gold_to_serving_sync_dag.py
+"""
+gold_to_serving_sync - Gold Iceberg 마트를 서빙 Postgres(station_daily/bike_risk_daily)로
+동기화한다. dag_risk_decision의 마지막 태스크(build_fact_bike_decision)가 끝나면
+TriggerDagRunOperator로 이 DAG를 트리거한다 (dag_gold_dim_fact가 아님 - bike_risk_daily가
+필요로 하는 fact_bike_risk/fact_bike_decision은 dag_risk_decision의 산출물이라 그게
+끝나야 두 마트 모두 만들 재료가 갖춰짐).
+
+두 브랜치(bike_risk_daily / station_daily)는 서로 의존하지 않아 병렬 실행한다.
+
+### 실패 전파를 끊는 이유
+트리거는 wait_for_completion=False다 - 이 DAG가 실패해도 이미 만들어진 gold 데이터
+자체는 유효하므로 dag_risk_decision을 실패로 만들 이유가 없다. 대신 각 태스크에
+Slack 알림을 건다 (CloudWatch/SNS는 이 프로젝트에 대응 AWS 인프라가 없어 스코프 제외 -
+spec §2/§3 참고).
+"""
+from datetime import timedelta
+
+import pendulum
+import requests
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.sdk import dag
+
+SERVING_SYNC_DIR = "/opt/airflow/pipeline/serving_sync"
+INGESTION_DIR = "/opt/airflow/ingestion"
+PYTHON = "python"
+
+default_args = {
+    "retries": 2,
+    "retry_delay": timedelta(minutes=5),
+    "retry_exponential_backoff": True,
+    "max_retry_delay": timedelta(minutes=30),
+}
+
+
+def _notify_slack_on_failure(context: dict) -> None:
+    import os
+
+    webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+    if not webhook_url:
+        return
+
+    ti = context["task_instance"]
+    message = f":x: *{ti.dag_id}.{ti.task_id}* 실패\n실행일: {context['ds']}\n로그: {ti.log_url}"
+    try:
+        requests.post(webhook_url, json={"text": message}, timeout=10)
+    except requests.RequestException:
+        pass
+
+
+default_args["on_failure_callback"] = _notify_slack_on_failure
+
+
+def _bash(job_module: str, extra_env: str = "") -> str:
+    return (
+        f"cd {SERVING_SYNC_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
+        f"PYTHONPATH={INGESTION_DIR}:{SERVING_SYNC_DIR}/jobs:$PYTHONPATH "
+        f"PYTHONDONTWRITEBYTECODE=1 {extra_env}{PYTHON} -m jobs.{job_module}"
+    )
+
+
+def _verify_bash(iceberg_table: str, postgres_table: str) -> str:
+    return _bash(
+        "verify_serving_sync",
+        f"ICEBERG_TABLE=bike_catalog.gold.{iceberg_table} POSTGRES_TABLE={postgres_table} "
+        "SNAPSHOT_DATE='{{ ds }}' ",
+    )
+
+
+@dag(
+    dag_id="gold_to_serving_sync",
+    schedule=None,  # dag_risk_decision의 TriggerDagRunOperator로만 실행
+    start_date=pendulum.datetime(2026, 8, 18, tz="Asia/Seoul"),
+    catchup=False,
+    max_active_runs=1,
+    default_args=default_args,
+    tags=["daily_batch", "serving"],
+    doc_md=__doc__,
+)
+def gold_to_serving_sync():
+    build_mart_bike_risk_daily = BashOperator(
+        task_id="build_mart_bike_risk_daily",
+        bash_command=_bash("build_mart_bike_risk_daily", "SNAPSHOT_DATE='{{ ds }}' "),
+        execution_timeout=timedelta(minutes=20),
+    )
+    write_bike_risk_daily = BashOperator(
+        task_id="write_bike_risk_daily",
+        bash_command=_bash("write_bike_risk_daily", "SNAPSHOT_DATE='{{ ds }}' "),
+        execution_timeout=timedelta(minutes=15),
+    )
+    verify_bike_risk_daily_sync = BashOperator(
+        task_id="verify_bike_risk_daily_sync",
+        bash_command=_verify_bash("mart_bike_risk_daily", "bike_risk_daily"),
+        execution_timeout=timedelta(minutes=10),
+    )
+
+    build_mart_station_daily = BashOperator(
+        task_id="build_mart_station_daily",
+        bash_command=_bash("build_mart_station_daily", "SNAPSHOT_DATE='{{ ds }}' "),
+        execution_timeout=timedelta(minutes=20),
+    )
+    write_station_daily = BashOperator(
+        task_id="write_station_daily",
+        bash_command=_bash("write_station_daily", "SNAPSHOT_DATE='{{ ds }}' "),
+        execution_timeout=timedelta(minutes=15),
+    )
+    verify_station_daily_sync = BashOperator(
+        task_id="verify_station_daily_sync",
+        bash_command=_verify_bash("mart_station_daily", "station_daily"),
+        execution_timeout=timedelta(minutes=10),
+    )
+
+    build_mart_bike_risk_daily >> write_bike_risk_daily >> verify_bike_risk_daily_sync
+    build_mart_station_daily >> write_station_daily >> verify_station_daily_sync
+
+
+gold_to_serving_sync()
