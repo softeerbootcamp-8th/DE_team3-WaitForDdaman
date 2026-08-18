@@ -2,20 +2,20 @@ export type Tier = "Normal" | "Warning" | "Critical";
 export type Urgency = "여유있음" | "부족함" | "정보없음";
 
 export type Side = "강남" | "강북";
-export type RegionFilter = { kind: "all" } | { kind: "side"; side: Side } | { kind: "gu"; name: string };
+export type RegionFilter = { kind: "all" } | { kind: "side"; side: Side } | { kind: "district"; name: string };
 
 export interface Bike {
   id: string;
   station: string;
-  gu: string;
+  district: string;
   region: Side;
   stationUrgency: Urgency;
   healthyRatio: number | null;
   tier: Tier;
   score: number;
-  reason: string;
+  reason: string | null;
   distKm: number;
-  durH: number;
+  durH: number | null;
   aging: number;
   history: string[];
 }
@@ -39,7 +39,7 @@ export interface District {
 export interface MapStation {
   id: number;
   name: string;
-  gu: string;
+  district: string;
   region: Side;
   x: number;
   y: number;

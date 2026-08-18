@@ -10,7 +10,7 @@ import { isDistrictActive, regionLabel, totalBikeCount } from "../utils/regions"
 interface MainPageProps {
   mapData: MapData;
   districtNames: string[];
-  guToSide: Record<string, Side>;
+  districtToSide: Record<string, Side>;
   pool: Bike[];
   generatedAt?: string;
   regionFilter: RegionFilter;
@@ -22,7 +22,7 @@ interface MainPageProps {
 export function MainPage({
   mapData,
   districtNames,
-  guToSide,
+  districtToSide,
   pool,
   generatedAt,
   regionFilter,
@@ -38,11 +38,11 @@ export function MainPage({
 
   const { dest, source } = useClassifiedPool(pool, regionFilter, capacity);
 
-  function handleDistrictClick(gu: string) {
-    if (regionFilter.kind === "gu" && regionFilter.name === gu) {
+  function handleDistrictClick(district: string) {
+    if (regionFilter.kind === "district" && regionFilter.name === district) {
       onOpenDetail();
     } else {
-      onRegionFilterChange({ kind: "gu", name: gu });
+      onRegionFilterChange({ kind: "district", name: district });
     }
   }
 
@@ -63,7 +63,7 @@ export function MainPage({
           districts={mapData.districts}
           stations={mapData.stations}
           variant="full"
-          highlight={(gu) => isDistrictActive(gu, regionFilter, guToSide)}
+          highlight={(district) => isDistrictActive(district, regionFilter, districtToSide)}
           onSelectDistrict={handleDistrictClick}
         />
         <div className="map-side">
@@ -92,12 +92,12 @@ export function MainPage({
             </div>
             <ol className="top-station-list">
               {top10.map((s, i) => (
-                <li key={s.id} onClick={() => handleDistrictClick(s.gu)}>
+                <li key={s.id} onClick={() => handleDistrictClick(s.district)}>
                   <span className="rank">{i + 1}</span>
                   <span className="st-name">
                     {s.name.trim()}
                     <br />
-                    <span className="st-gu">{s.gu}</span>
+                    <span className="st-gu">{s.district}</span>
                   </span>
                   <span className="st-count">{s.riskCount}대</span>
                 </li>

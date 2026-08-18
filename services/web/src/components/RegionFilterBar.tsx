@@ -30,8 +30,8 @@ export function RegionFilterBar({ filter, onChange, districtNames }: RegionFilte
       ))}
       <select
         className="region-gu-select"
-        value={filter.kind === "gu" ? filter.name : ""}
-        onChange={(e) => (e.target.value ? onChange({ kind: "gu", name: e.target.value }) : onChange({ kind: "all" }))}
+        value={filter.kind === "district" ? filter.name : ""}
+        onChange={(e) => (e.target.value ? onChange({ kind: "district", name: e.target.value }) : onChange({ kind: "all" }))}
       >
         <option value="">구 선택…</option>
         {sortedNames.map((name) => (

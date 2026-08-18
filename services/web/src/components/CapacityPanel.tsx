@@ -51,12 +51,12 @@ export function CapacityPanel({ pool, filter, capacity }: CapacityPanelProps) {
             <CapacityRow key={side} label={side} used={used} max={max} onChange={(n) => capacity.setSideCapacity(side, n)} />
           );
         })}
-        {filter.kind === "gu" && (
+        {filter.kind === "district" && (
           <CapacityRow
             label={filter.name}
-            used={countInCapacity(pool, filter, capacity.getGuCapacity(filter.name))}
-            max={capacity.getGuCapacity(filter.name)}
-            onChange={(n) => capacity.setGuCapacity(filter.name, n)}
+            used={countInCapacity(pool, filter, capacity.getDistrictCapacity(filter.name))}
+            max={capacity.getDistrictCapacity(filter.name)}
+            onChange={(n) => capacity.setDistrictCapacity(filter.name, n)}
           />
         )}
       </div>

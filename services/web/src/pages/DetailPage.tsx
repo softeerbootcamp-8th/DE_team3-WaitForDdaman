@@ -14,7 +14,7 @@ interface DetailPageProps {
   meta: SnapshotMeta;
   mapData: MapData;
   districtNames: string[];
-  guToSide: Record<string, Side>;
+  districtToSide: Record<string, Side>;
   pool: Bike[];
   regionFilter: RegionFilter;
   onRegionFilterChange: (filter: RegionFilter) => void;
@@ -25,7 +25,7 @@ function passesFilter(bike: Bike, query: string, tiers: Set<string>, urgencies: 
   if (tiers.size && !tiers.has(bike.tier)) return false;
   if (urgencies.size && bike.stationUrgency !== "정보없음" && !urgencies.has(bike.stationUrgency)) return false;
   if (query) {
-    const hay = (bike.id + " " + bike.station + " " + bike.gu).toLowerCase();
+    const hay = (bike.id + " " + bike.station + " " + bike.district).toLowerCase();
     if (!hay.includes(query)) return false;
   }
   return true;
@@ -35,7 +35,7 @@ export function DetailPage({
   meta,
   mapData,
   districtNames,
-  guToSide,
+  districtToSide,
   pool,
   regionFilter,
   onRegionFilterChange,
@@ -95,8 +95,8 @@ export function DetailPage({
           viewBox={mapData.viewBox}
           districts={mapData.districts}
           variant="mini"
-          highlight={(gu) => isDistrictActive(gu, regionFilter, guToSide)}
-          onSelectDistrict={(gu) => onRegionFilterChange({ kind: "gu", name: gu })}
+          highlight={(district) => isDistrictActive(district, regionFilter, districtToSide)}
+          onSelectDistrict={(district) => onRegionFilterChange({ kind: "district", name: district })}
         />
       </div>
 

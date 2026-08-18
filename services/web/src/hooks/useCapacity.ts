@@ -9,8 +9,8 @@ export interface UseCapacityResult {
   getSideCapacity: (side: Side) => number;
   setSideCapacity: (side: Side, n: number) => void;
 
-  getGuCapacity: (gu: string) => number;
-  setGuCapacity: (gu: string, n: number) => void;
+  getDistrictCapacity: (district: string) => number;
+  setDistrictCapacity: (district: string, n: number) => void;
 
   capacityFor: (filter: RegionFilter) => number;
 }
@@ -37,57 +37,63 @@ function scaleToTarget(values: Record<string, number>, keys: string[], target: n
 
 export function useCapacity(
   districtNames: string[],
-  guToSide: Record<string, Side>,
+  districtToSide: Record<string, Side>,
   initialOverall: number,
 ): UseCapacityResult {
   // 구별 capacity가 유일한 상태(source of truth)다. 지역/전체 capacity는 여기서 합산해 파생시킨다.
-  const [guCapacities, setGuCapacities] = useState<Record<string, number>>(() =>
+  const [districtCapacities, setDistrictCapacities] = useState<Record<string, number>>(() =>
     evenSplit(clamp(initialOverall), districtNames),
   );
 
-  const setGuCapacity = useCallback(
-    (gu: string, n: number) => setGuCapacities((prev) => ({ ...prev, [gu]: clamp(n) })),
+  const setDistrictCapacity = useCallback(
+    (district: string, n: number) => setDistrictCapacities((prev) => ({ ...prev, [district]: clamp(n) })),
     [],
   );
-  const getGuCapacity = useCallback((gu: string) => guCapacities[gu] ?? 0, [guCapacities]);
+  const getDistrictCapacity = useCallback(
+    (district: string) => districtCapacities[district] ?? 0,
+    [districtCapacities],
+  );
 
-  const guNamesBySide = useCallback(
-    (side: Side) => districtNames.filter((gu) => guToSide[gu] === side),
-    [districtNames, guToSide],
+  const districtNamesBySide = useCallback(
+    (side: Side) => districtNames.filter((district) => districtToSide[district] === side),
+    [districtNames, districtToSide],
   );
 
   const setSideCapacity = useCallback(
     (side: Side, n: number) => {
-      const keys = guNamesBySide(side);
-      setGuCapacities((prev) => scaleToTarget(prev, keys, clamp(n)));
+      const keys = districtNamesBySide(side);
+      setDistrictCapacities((prev) => scaleToTarget(prev, keys, clamp(n)));
     },
-    [guNamesBySide],
+    [districtNamesBySide],
   );
   const getSideCapacity = useCallback(
-    (side: Side) => guNamesBySide(side).reduce((sum, gu) => sum + (guCapacities[gu] ?? 0), 0),
-    [guNamesBySide, guCapacities],
+    (side: Side) => districtNamesBySide(side).reduce((sum, district) => sum + (districtCapacities[district] ?? 0), 0),
+    [districtNamesBySide, districtCapacities],
   );
 
   const setOverall = useCallback(
-    (n: number) => setGuCapacities((prev) => scaleToTarget(prev, districtNames, clamp(n))),
+    (n: number) => setDistrictCapacities((prev) => scaleToTarget(prev, districtNames, clamp(n))),
     [districtNames],
   );
   const overall = useMemo(
-    () => districtNames.reduce((sum, gu) => sum + (guCapacities[gu] ?? 0), 0),
-    [districtNames, guCapacities],
+    () => districtNames.reduce((sum, district) => sum + (districtCapacities[district] ?? 0), 0),
+    [districtNames, districtCapacities],
   );
 
   const capacityFor = useCallback(
     (filter: RegionFilter) => {
       if (filter.kind === "all") return overall;
       if (filter.kind === "side") return getSideCapacity(filter.side);
-      return getGuCapacity(filter.name);
+      return getDistrictCapacity(filter.name);
     },
-    [overall, getSideCapacity, getGuCapacity],
+    [overall, getSideCapacity, getDistrictCapacity],
   );
 
   return useMemo(
-    () => ({ overall, setOverall, getSideCapacity, setSideCapacity, getGuCapacity, setGuCapacity, capacityFor }),
-    [overall, setOverall, getSideCapacity, setSideCapacity, getGuCapacity, setGuCapacity, capacityFor],
+    () => ({
+      overall, setOverall, getSideCapacity, setSideCapacity,
+      getDistrictCapacity, setDistrictCapacity, capacityFor,
+    }),
+    [overall, setOverall, getSideCapacity, setSideCapacity, getDistrictCapacity, setDistrictCapacity, capacityFor],
   );
 }

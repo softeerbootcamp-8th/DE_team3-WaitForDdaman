@@ -7,7 +7,7 @@ import { useClassifiedPool } from "./hooks/useClassifiedPool";
 import { DetailPage } from "./pages/DetailPage";
 import { MainPage } from "./pages/MainPage";
 import type { Bike, BikeLists, MapData, RegionFilter, SnapshotMeta } from "./types";
-import { buildGuSideMap, totalBikeCount } from "./utils/regions";
+import { buildDistrictSideMap, totalBikeCount } from "./utils/regions";
 
 type View = "main" | "detail";
 const ALL_FILTER: RegionFilter = { kind: "all" };
@@ -64,8 +64,8 @@ function Dashboard({ meta, mapData, pool }: DashboardProps) {
   const [view, setView] = useState<View>("main");
   const [regionFilter, setRegionFilter] = useState<RegionFilter>({ kind: "all" });
   const districtNames = useMemo(() => mapData.districts.map((d) => d.name), [mapData]);
-  const guToSide = useMemo(() => buildGuSideMap(mapData.stations), [mapData]);
-  const capacity = useCapacity(districtNames, guToSide, meta.capacity.max);
+  const districtToSide = useMemo(() => buildDistrictSideMap(mapData.stations), [mapData]);
+  const capacity = useCapacity(districtNames, districtToSide, meta.capacity.max);
 
   const { dest, source } = useClassifiedPool(pool, ALL_FILTER, capacity);
   const totalBikes = useMemo(() => totalBikeCount(mapData.stations, ALL_FILTER), [mapData]);
@@ -89,7 +89,7 @@ function Dashboard({ meta, mapData, pool }: DashboardProps) {
         <MainPage
           mapData={mapData}
           districtNames={districtNames}
-          guToSide={guToSide}
+          districtToSide={districtToSide}
           pool={pool}
           generatedAt={meta.generatedAt}
           regionFilter={regionFilter}
@@ -102,7 +102,7 @@ function Dashboard({ meta, mapData, pool }: DashboardProps) {
           meta={meta}
           mapData={mapData}
           districtNames={districtNames}
-          guToSide={guToSide}
+          districtToSide={districtToSide}
           pool={pool}
           regionFilter={regionFilter}
           onRegionFilterChange={setRegionFilter}
