@@ -15,6 +15,8 @@ FROM apache/airflow:${AIRFLOW_VERSION}-python${PYTHON_VERSION}
 # ----------------------------------------------------------------------------
 USER root
 RUN apt-get update \
+    # libgomp1: lightgbm(risk_model_v1.joblib 추론용)이 내부적으로 OpenMP를 쓰는데,
+    # 이 공유 라이브러리가 없으면 "libgomp.so.1: cannot open shared object file"로 죽는다.
     && apt-get install -y --no-install-recommends openjdk-17-jre-headless libgomp1 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
