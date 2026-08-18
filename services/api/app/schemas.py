@@ -8,9 +8,9 @@ Tier = Literal["Normal", "Warning", "Critical"]
 
 class Bike(BaseModel):
     id: str
-    station: str
-    district: str
-    region: Region
+    station: Optional[str] = None
+    district: Optional[str] = None
+    region: Optional[Region] = None
     stationUrgency: str
     healthyRatio: Optional[float]
     tier: Tier
