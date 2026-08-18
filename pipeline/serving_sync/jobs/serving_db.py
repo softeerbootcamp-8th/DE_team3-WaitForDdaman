@@ -42,35 +42,26 @@ def connect():
         raise ServingDbError(f"서빙 DB 연결 실패: {e}") from e
 
 
-def _build_upsert_query(table: str, columns: list[str], conflict_keys: list[str]) -> str:
-    update_cols = [c for c in columns if c not in conflict_keys]
-    set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
-    return (
-        f"INSERT INTO {table} ({', '.join(columns)}) VALUES %s "
-        f"ON CONFLICT ({', '.join(conflict_keys)}) DO UPDATE SET {set_clause}"
-    )
-
-
-def upsert_rows(table: str, columns: list[str], conflict_keys: list[str], rows: list[tuple]) -> int:
-    """rows를 BATCH_SIZE 단위로 나눠 INSERT ... ON CONFLICT DO UPDATE. 반환값: 적재한 행 수."""
-    if not rows:
-        return 0
-
-    query = _build_upsert_query(table, columns, conflict_keys)
+def replace_partition(table: str, columns: list[str], snapshot_date: str, rows: list[tuple]) -> int:
+    """해당 snapshot_date 파티션을 삭제 후 재삽입 (같은 트랜잭션) - Iceberg의
+    overwritePartitions와 동일한 의미. mart가 줄어드는 경우(대여소 비활성화 등)에도
+    postgres에 오래된 행이 남지 않아 verify_serving_sync의 row count 비교가 항상 유효하다."""
     conn = connect()
     try:
         with conn.cursor() as cur:
-            for i in range(0, len(rows), BATCH_SIZE):
-                batch = rows[i : i + BATCH_SIZE]
-                psycopg2.extras.execute_values(cur, query, batch, page_size=BATCH_SIZE)
+            cur.execute(f"DELETE FROM {table} WHERE snapshot_date = %s", (snapshot_date,))
+            if rows:
+                query = f"INSERT INTO {table} ({', '.join(columns)}) VALUES %s"
+                for i in range(0, len(rows), BATCH_SIZE):
+                    psycopg2.extras.execute_values(cur, query, rows[i : i + BATCH_SIZE], page_size=BATCH_SIZE)
         conn.commit()
     except psycopg2.Error as e:
         conn.rollback()
-        raise ServingDbError(f"{table} UPSERT 실패: {e}") from e
+        raise ServingDbError(f"{table} 파티션 교체 실패: {e}") from e
     finally:
         conn.close()
 
-    logger.info("%s: %d행 UPSERT 완료", table, len(rows))
+    logger.info("%s: %s 파티션 교체 완료 (%d행)", table, snapshot_date, len(rows))
     return len(rows)
 
 
