@@ -42,32 +42,6 @@ x-airflow-common:
       condition: service_healthy
 
 services:
-  api:
-    container_name: service-api
-    build:
-      context: .
-      dockerfile: services/api/Dockerfile
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./services/api/app:/app/services/api/app
-      - ./services/api/data:/app/services/api/data
-
-  web:
-    container_name: service-web
-    build:
-      context: services/web
-      dockerfile: Dockerfile
-    environment:
-      VITE_API_PROXY_TARGET: http://api:8000
-    ports:
-      - "5173:5173"
-    volumes:
-      - ./services/web:/app
-      - /app/node_modules
-    depends_on:
-      - api
-
   postgres:
     image: postgres:16
     container_name: postgres
