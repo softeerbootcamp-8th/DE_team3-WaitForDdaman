@@ -191,7 +191,16 @@ def risk_model_train():
 
     @task
     def train_and_evaluate(plan: dict, stats: dict, quality: dict) -> dict:
-        """후보 학습 → 홀드아웃 walk-forward 평가 → best 선택 → 게이트 판정.
+        """후보 학습 → 홀드아웃 walk-forward 평가 → 승격 → 게이트 판정.
+
+        rule_trips/logreg/lgbm 3개를 전부 학습·평가하는 건 "baseline보다 실제로
+        나은가"를 매번 리포트로 확인하기 위한 것뿐이다(select_best는 그 리포트용
+        1등을 보여준다) - 승격 후보는 항상 models.primary 하나로 고정한다.
+        타입이 재학습마다 바뀌면 (a) rule_trips처럼 score()가 확률이 아니라 다른
+        스케일 값을 반환하는 타입이 승격돼 추론 쪽 검증이 깨질 수 있고, (b) logreg/
+        lgbm처럼 서로 확률을 반환하는 타입끼리도 캘리브레이션이 달라서 risk_grade
+        컷오프가 조용히 안 맞게 된다. 모델 타입을 바꾸는 건 재학습이 자동으로 정할
+        일이 아니라 models.primary를 사람이 바꾸는 명시적 결정이어야 한다.
 
         학습된 모델 객체는 XCom 으로 넘기지 않는다. 저장까지 이 태스크에서 끝낸다.
         """
@@ -225,20 +234,30 @@ def risk_model_train():
                 f"pr_auc={m['pr_auc']}  days={m['eval_days']}"
             )
 
-        best = select_best(eval_result["metrics"], cfg)
+        report_best = select_best(eval_result["metrics"], cfg)
+        primary = cfg.get_path("models.primary", "lgbm")
+        if primary not in candidates:
+            raise ValueError(
+                f"models.primary={primary!r}가 학습된 후보({list(candidates)})에 없습니다 - "
+                "models.candidates 설정을 확인하세요"
+            )
+        if report_best != primary:
+            print(f"참고: 이번 평가는 {report_best}가 1등이었지만, 승격 후보는 항상 primary({primary})로 고정")
+
         champion = registry.get_champion(cfg)
-        gate = apply_gate(best, eval_result["metrics"], champion, cfg)
+        gate = apply_gate(primary, eval_result["metrics"], champion, cfg)
         if params.get("skip_gate"):
             gate = {**gate, "passed": True, "reason": gate["reason"] + " (skip_gate=True)"}
-        print(f"선택: {best}  게이트: {gate['passed']} — {gate['reason']}")
+        print(f"승격 후보: {primary}  게이트: {gate['passed']} — {gate['reason']}")
 
-        importance = feature_importance(candidates[best])
+        importance = feature_importance(candidates[primary])
 
         if params.get("dry_run"):
             print("[dry_run] 아티팩트 저장/승격 생략")
             return {
                 "run_key": plan["run_key"],
-                "selected": best,
+                "selected": primary,
+                "report_best": report_best,
                 "metrics": eval_result["metrics"],
                 "gate": gate,
                 "dry_run": True,
@@ -247,7 +266,7 @@ def risk_model_train():
         entry = registry.save_run(
             cfg,
             run_key=plan["run_key"],
-            best_name=best,
+            best_name=primary,
             candidates=candidates,
             eval_result=eval_result,
             anchor_plan={k: v for k, v in plan.items() if k != "source_probe"},
@@ -258,14 +277,15 @@ def risk_model_train():
         )
         registry.promote(cfg, entry)
         mlflow_run = registry.log_to_mlflow(
-            cfg, plan["run_key"], best, eval_result, entry, trained["train_stats"], importance
+            cfg, plan["run_key"], primary, eval_result, entry, trained["train_stats"], importance
         )
 
         print(f"아티팩트 → {entry['artifact_uri']}")
         print(f"champion 갱신: {gate['passed']}")
         return {
             "run_key": entry["model_version"],
-            "selected": best,
+            "selected": primary,
+            "report_best": report_best,
             "artifact_uri": entry["artifact_uri"],
             "metrics_uri": entry["metrics_uri"],
             "metrics": eval_result["metrics"],
@@ -279,8 +299,9 @@ def risk_model_train():
         """실행 요약. 게이트 미통과는 실패가 아니라 '승격 보류' 로 기록한다."""
         g = result["gate"]
         status = "PROMOTED" if g["passed"] else "HELD (champion 유지)"
+        note = "" if result["report_best"] == result["selected"] else f"  (참고: 리포트 1등은 {result['report_best']})"
         print(
-            f"[{result['run_key']}] {result['selected']} → {status}\n"
+            f"[{result['run_key']}] {result['selected']} → {status}{note}\n"
             f"  {g['reason']}\n"
             f"  아티팩트: {result.get('artifact_uri', '(dry_run)')}"
         )

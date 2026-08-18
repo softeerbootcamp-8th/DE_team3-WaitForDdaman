@@ -9,11 +9,11 @@
 
 - `build_bike_features_daily.py`: `silver.rental_history` + `silver.failure_report` -> `gold.bike_features_daily` (하루치 통째로 재계산, OVERWRITE + PyDeequ 검증)
   - 컬럼: `snapshot_date`(파티션), `bike_id`, `trips`, `dist_km`, `instant_ret`, `fail_150d`, `days_since_fail`, `days_since_last_rent`, `trend_ratio`
-  - 기준일 이전 14일 rolling window로 집계 (노트북 `build_features(as_of)` 이식) - `dim_bike`처럼 누적 처리 아님, 워터마크 없음
+  - 기준일 이전 14일 rolling window로 집계. 피처 로직은 `pipeline/train_risk_model/features.py`의 `build_features_for_inference()`를 그대로 호출한다(학습·추론 공유, train-serving skew 방지) - `dim_bike`처럼 누적 처리 아님, 워터마크 없음
   - `dag_gold_dim_fact` 산출물이 아니라 이 폴더가 직접 만든다 - 순수 추론 입력이라 risk_model 스코프
-- `run_risk_scoring_model.py`: `risk_model_v1.joblib`(dict: `scaler`/`model`/`features`/`model_type`) 로드 + 추론 라이브러리
-  - `art['features']` 순서 그대로 컬럼을 선택해 스코어링 - 모델이 numpy array로 학습돼 컬럼명 정보가 없어서, 순서가 곧 계약이다
-  - `risk_score`는 그날 전체 자전거 대비 percentile rank(0~100), `risk_grade`는 95/99 분위수 컷오프로 Normal/Warning/Critical 3등급
+- `run_risk_scoring_model.py`: `pipeline/train_risk_model`의 `registry.get_champion()` + `train.score()`를 그대로 불러 쓰는 추론 라이브러리
+  - champion은 `registry.json`에서 로드하고(`{model_root}/registry.json`), 승격 후보는 학습 쪽(`risk_model_train_dag.py`)에서 항상 `models.primary`(lgbm)로 고정돼 있어 여기서는 model_type 분기를 신경 쓸 필요가 없다
+  - `risk_score`는 모델이 출력한 원본 확률(0~1)에 100을 곱한 값(0~100), `risk_grade`는 95/99 컷오프로 Normal/Warning/Critical 3등급 (이 컷오프 값은 champion의 확률 분포에 맞춰 재검증이 필요할 수 있음 - 재학습마다 드리프트 가능)
   - 독립 job이 아니라 `build_fact_bike_risk.py`가 라이브러리로 불러 쓴다
 - `build_fact_bike_risk.py`: `gold.bike_features_daily` -> `gold.fact_bike_risk` (하루치 통째로 재계산, OVERWRITE + PyDeequ 검증)
   - 컬럼: `snapshot_date`(파티션), `bike_id`, `risk_score`, `risk_grade`, `model_version`
@@ -33,7 +33,7 @@
 
 ## 로컬 실행
 
-`run_risk_scoring_model.py`는 `gold.bike_features_daily` 없이도 단독으로 동작 확인 가능하다 (모델 로드 + 가짜 입력으로 스코어링):
+`run_risk_scoring_model.py`는 `gold.bike_features_daily` 없이도 단독으로 동작 확인 가능하다 (모델 로드 + 가짜 입력으로 스코어링) - 단, `registry.json`에 champion이 승격돼 있어야 한다(`risk_model_train` DAG을 `dry_run=false`로 먼저 실행):
 
 ```bash
 cd pipeline/risk_model

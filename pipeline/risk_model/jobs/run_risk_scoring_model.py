@@ -2,47 +2,60 @@
 dag_risk_decision 원안의 "5. run_risk_scoring_model" 단계 구현 - gold.bike_features_daily
 -> risk_score/risk_grade 추론. build_fact_bike_risk.py가 이 모듈을 그대로 불러 쓴다.
 
-모델 파일(risk_model_v1.joblib)은 {scaler, model, features, model_type, ...} 형태의
-딕셔너리로 저장돼 있다. model은 features 순서 그대로(numpy array, 컬럼명 정보 없음)
-학습됐으므로, 추론 시에도 반드시 art['features'] 순서를 그대로 지켜서 컬럼을 선택해야 한다.
+모델 로딩(registry.json의 champion)과 스코어링(model_type별 predict_proba 분기)은
+pipeline/train_risk_model의 registry.get_champion() / train.score()를 그대로 쓴다 -
+학습 쪽과 추론 쪽이 이 분기를 따로 구현하면 모델 타입이 늘어날 때마다 두 곳을 같이
+고쳐야 하고, 하나만 고치고 잊어버리기 쉽다(train-serving skew). champion은 항상
+models.primary 타입만 승격되도록 학습 쪽에서 보장하므로(risk_model_train_dag.py),
+여기서는 model_type 분기를 신경 쓸 필요 없이 train.score()에 그대로 위임한다.
 """
+import io
 import logging
-from pathlib import Path
 
 import joblib
 import pandas as pd
 
+from pipeline.train_risk_model.registry import get_champion
+from pipeline.train_risk_model.settings import load_config, read_bytes
+from pipeline.train_risk_model.train import score as _train_score
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-MODEL_DIR = Path(__file__).resolve().parent.parent / "models"
 
-RISK_GRADE_BINS = [-1, 95, 99, 101]
+# 임시값 - 2026-07-06, champion(lgbm, is_unbalance=True, run_key=20260706) 실측 분포
+# 기준(p95=67.06, p99=76.06)으로 잡음. risk_score가 이제 raw 확률이라 재학습마다
+# (특히 양성비율이 바뀌면) 분포가 드리프트할 수 있어 고정 컷오프는 근본 해법이 아님 -
+# 컷오프를 하드코딩하는 대신 그때그때의 분포에 맞춰 재계산하는 방식으로 바꿀지 검토 필요.
+RISK_GRADE_BINS = [-1, 67, 76, 101]
 RISK_GRADE_LABELS = ["Normal", "Warning", "Critical"]
 
 
-def load_model(model_file: str = "risk_model_v1.joblib") -> dict:
-    art = joblib.load(MODEL_DIR / model_file)
-    logger.info("모델 로드: %s (features=%s)", art["model_type"], art["features"])
+def load_model(cfg=None) -> dict:
+    cfg = cfg or load_config()
+    champion = get_champion(cfg)
+    if champion is None:
+        raise RuntimeError(
+            "champion 모델이 없습니다 - risk_model_train DAG을 먼저 실행해 모델을 승격해야 합니다"
+        )
+    art = joblib.load(io.BytesIO(read_bytes(champion["artifact_uri"])))
+    logger.info(
+        "모델 로드: %s (features=%s, model_version=%s)",
+        art["model_type"], art["features"], champion["model_version"],
+    )
     return art
 
 
 def score(feat: pd.DataFrame, art: dict) -> pd.DataFrame:
     """feat: bike_id를 index로 갖는 feature DataFrame (art['features'] 컬럼 포함)."""
-    X = feat[art["features"]].fillna(0)
-
-    if art["model_type"] == "lgbm":
-        p = art["model"].predict_proba(X.values)[:, 1]
-    else:
-        p = art["model"].predict_proba(art["scaler"].transform(X.values))[:, 1]
+    p = _train_score(art, feat)
 
     out = pd.DataFrame(index=feat.index)
-    out["risk_raw"] = p
-    out["risk_score"] = (pd.Series(p, index=feat.index).rank(pct=True) * 100).round(3)
+    out["risk_score"] = (p * 100).round(3)
     out["risk_grade"] = pd.cut(
         out["risk_score"], bins=RISK_GRADE_BINS, labels=RISK_GRADE_LABELS
     )
-    out["model_version"] = art.get("model_file", "risk_model_v1.joblib")
+    out["model_version"] = art.get("model_version", "unknown")
     return out
 
 
