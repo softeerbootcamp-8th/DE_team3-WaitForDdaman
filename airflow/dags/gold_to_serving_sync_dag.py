@@ -13,12 +13,19 @@ TriggerDagRunOperator로 이 DAG를 트리거한다 (dag_gold_dim_fact가 아님
 자체는 유효하므로 dag_risk_decision을 실패로 만들 이유가 없다. 대신 각 태스크에
 Slack 알림을 건다 (CloudWatch/SNS는 이 프로젝트에 대응 AWS 인프라가 없어 스코프 제외 -
 spec §2/§3 참고).
+
+### trigger_bikeman_event_generator (2026-08-18 추가)
+verify_bike_risk_daily_sync가 끝나면 bikeman_event_generator를 트리거한다
+(station_daily 브랜치와는 무관 - 그 DAG가 읽는 건 bike_risk_daily뿐이라 완료를
+기다리지 않는다). 세부 설계는
+docs/superpowers/specs/2026-08-18-bikeman-event-generator-design.md 참고.
 """
 from datetime import timedelta
 
 import pendulum
 import requests
 from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import dag
 
 SERVING_SYNC_DIR = "/opt/airflow/pipeline/serving_sync"
@@ -99,6 +106,21 @@ def gold_to_serving_sync():
         bash_command=_verify_bash("mart_bike_risk_daily", "bike_risk_daily"),
         execution_timeout=timedelta(minutes=10),
     )
+    trigger_bikeman_event_generator = TriggerDagRunOperator(
+        task_id="trigger_bikeman_event_generator",
+        trigger_dag_id="bikeman_event_generator",
+        # logical_date는 일부러 지정하지 않는다 - "{{ logical_date }}"로 명시했더니 이
+        # DAG가 schedule=None이라 conf만 넘기고 --logical-date 없이 트리거된 실행에서는
+        # dag_run.logical_date가 None이 되고, 그 경우 Jinja 컨텍스트에 logical_date
+        # 키 자체가 주입되지 않아 UndefinedError로 매번 실패했다(airflow 3.3, 실측 확인).
+        # bikeman_event_generator는 날짜를 conf.snapshot_date로만 받으므로(아래 conf
+        # 참고) 트리거되는 DAG run 자체의 logical_date는 어떤 값이어도 무방하다 -
+        # 파라미터를 아예 생략하면 TriggerDagRunOperator가 기본값(NOTSET)으로 두고
+        # 실행 시점에 timezone.utcnow()를 자동으로 채워 넣는다.
+        conf={"snapshot_date": "{{ dag_run.conf.get(\"snapshot_date\") or ds }}"},
+        wait_for_completion=False,
+        reset_dag_run=True,
+    )
 
     build_mart_station_daily = BashOperator(
         task_id="build_mart_station_daily",
@@ -116,7 +138,7 @@ def gold_to_serving_sync():
         execution_timeout=timedelta(minutes=10),
     )
 
-    build_mart_bike_risk_daily >> write_bike_risk_daily >> verify_bike_risk_daily_sync
+    build_mart_bike_risk_daily >> write_bike_risk_daily >> verify_bike_risk_daily_sync >> trigger_bikeman_event_generator
     build_mart_station_daily >> write_station_daily >> verify_station_daily_sync
 
 
