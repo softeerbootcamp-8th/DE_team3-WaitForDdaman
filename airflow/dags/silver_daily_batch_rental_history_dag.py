@@ -26,7 +26,7 @@ def _bash(job_dir: str, job_module: str, extra_env: str = "") -> str:
 
 
 @dag(
-    dag_id="silver_gold_daily_batch_rental_history",
+    dag_id="silver_daily_batch_rental_history",
     schedule=[RENTAL_HISTORY_BRONZE],  # 고정 시간이 아니라 Bronze 완료 이벤트로 트리거
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Seoul"),
     catchup=False,
@@ -38,7 +38,7 @@ def _bash(job_dir: str, job_module: str, extra_env: str = "") -> str:
     },
     doc_md=__doc__,
 )
-def silver_gold_daily_batch_rental_history():
+def silver_daily_batch_rental_history():
     BashOperator(
         task_id="transform_silver_rental_history",
         bash_command=_bash(
@@ -50,4 +50,4 @@ def silver_gold_daily_batch_rental_history():
     )
 
 
-silver_gold_daily_batch_rental_history()
+silver_daily_batch_rental_history()

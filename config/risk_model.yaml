@@ -12,14 +12,16 @@ run:
   top_k: 500               # 메인지표 top-K (정비소 하루 capacity 근사)
   fail_window_days: 150    # fail_150d 집계 창
   fault_lookback_days: null # days_since_fail 계산 시 조회 범위. null = 전체 이력(노트북 동일)
-  min_rent_date: "2022-05-18"
+  min_rent_date: null      # 과거엔 특정 앵커 계획(첫 앵커 2022-06-01 - window_days)에서 역산한 스냅샷값이었으나,
+                            # rolling_months/as_of_end가 바뀔 때마다 다시 계산해야 해서 하드코딩을 없앤다.
+                            # rolling_months가 어차피 학습 시작점을 계산하므로 필터 없이도 안전하다.
   saessak_min_num: 80000   # 이 번호 이상 = 새싹 자전거 (bike_class 라벨링용, 필터 아님)
 
 sources:
-  mode: parquet            # parquet | iceberg  (iceberg 전환 시 io.read_silver만 교체)
+  mode: iceberg             # 실제 인프라가 Iceberg(LocalStack/S3)라 parquet 경로는 안 씀
   assume_silver_clean: false  # true면 이상치 필터를 재적용하지 않는다 (silver DAG이 이미 했다면)
-  rental_history: "/opt/airflow/data/silver/rental_history"
-  failure_report: "/opt/airflow/data/silver/failure_report"
+  rental_history: "silver.rental_history"
+  failure_report: "silver.failure_report"
   # silver 실제 컬럼명 → 내부 표준명 매핑. null이면 파생 규칙 적용.
   rental_columns:
     bike_id: bike_id
@@ -76,6 +78,7 @@ models:
     random_state: 42
     n_jobs: 1              # 결정론 확보 (스레드 수에 따라 결과가 흔들리지 않게)
     verbose: -1
+    is_unbalance: true     # 양성비율 낮은(~2%) 불균형 데이터라 손실에 클래스 가중치 반영 (실측: median 2%->48% 확률 이동)
 
 spark:
   master: "local[*]"

@@ -45,6 +45,7 @@ from airflow.sdk import dag
 
 RISK_MODEL_DIR = "/opt/airflow/pipeline/risk_model"
 INGESTION_DIR = "/opt/airflow/ingestion"
+AIRFLOW_HOME_DIR = "/opt/airflow"
 PYTHON = "python"
 
 DAG_ID = "dag_risk_decision"
@@ -59,9 +60,11 @@ default_args = {
 
 
 def _bash(job_module: str, extra_env: str = "") -> str:
+    # /opt/airflow 를 넣어야 jobs/*.py 에서 pipeline.train_risk_model.* 을 import 할 수 있다
+    # (train_risk_model 계약 - registry/score/features 공유) - 컨테이너에서 직접 검증함.
     return (
         f"cd {RISK_MODEL_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
-        f"PYTHONPATH={INGESTION_DIR}:$PYTHONPATH {extra_env}{PYTHON} -m jobs.{job_module}"
+        f"PYTHONPATH={INGESTION_DIR}:{AIRFLOW_HOME_DIR}:$PYTHONPATH {extra_env}{PYTHON} -m jobs.{job_module}"
     )
 
 
