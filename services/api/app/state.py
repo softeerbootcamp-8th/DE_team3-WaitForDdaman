@@ -40,7 +40,7 @@ def get_map_data() -> dict:
         stations = conn.execute(
             text(
                 """
-                SELECT station_id, station_name, region, gu, x, y, hold_num,
+                SELECT station_id, station_name, region, district, x, y, hold_num,
                        bike_count, risk_count, healthy_ratio, urgency
                 FROM station_daily
                 WHERE snapshot_date = :d
@@ -58,7 +58,7 @@ def get_map_data() -> dict:
             {
                 "id": s["station_id"],
                 "name": s["station_name"],
-                "gu": s["gu"],
+                "district": s["district"],
                 "region": s["region"],
                 "x": s["x"],
                 "y": s["y"],
@@ -84,9 +84,9 @@ def get_bikes() -> tuple[list[dict], list[dict]]:
         rows = conn.execute(
             text(
                 """
-                SELECT b.bike_id, b.station_name, b.gu, b.region, b.healthy_ratio,
-                       b.risk_grade, b.risk_score, b.dist_km, b.dur_h, b.aging,
-                       b.fail_history, b.reason, b.action, s.urgency AS station_urgency
+                SELECT b.bike_id, b.station_name, b.district, b.region, b.healthy_ratio,
+                       b.risk_grade, b.risk_score, b.dist_km, b.aging,
+                       b.fail_history, b.action, s.urgency AS station_urgency
                 FROM bike_risk_daily b
                 LEFT JOIN station_daily s
                   ON s.station_id = b.station_id AND s.snapshot_date = b.snapshot_date
@@ -101,15 +101,13 @@ def get_bikes() -> tuple[list[dict], list[dict]]:
         return {
             "id": r["bike_id"],
             "station": r["station_name"],
-            "gu": r["gu"],
+            "district": r["district"],
             "region": r["region"],
             "stationUrgency": r["station_urgency"] or "정보없음",
             "healthyRatio": r["healthy_ratio"],
             "tier": r["risk_grade"],
             "score": r["risk_score"],
-            "reason": r["reason"],
             "distKm": r["dist_km"],
-            "durH": r["dur_h"],
             "aging": r["aging"],
             "history": r["fail_history"] or [],
         }
