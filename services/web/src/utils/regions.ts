@@ -12,7 +12,7 @@ export function buildDistrictSideMap(stations: MapStation[]): Record<string, Sid
   return map;
 }
 
-export function matchesRegion(entity: { district: string; region: Side }, filter: RegionFilter): boolean {
+export function matchesRegion(entity: { district: string | null; region: Side | null }, filter: RegionFilter): boolean {
   if (filter.kind === "all") return true;
   if (filter.kind === "side") return entity.region === filter.side;
   return entity.district === filter.name;

@@ -6,17 +6,17 @@ export type RegionFilter = { kind: "all" } | { kind: "side"; side: Side } | { ki
 
 export interface Bike {
   id: string;
-  station: string;
-  district: string;
-  region: Side;
+  station: string | null;
+  district: string | null;
+  region: Side | null;
   stationUrgency: Urgency;
   healthyRatio: number | null;
   tier: Tier;
   score: number;
   reason: string | null;
-  distKm: number;
+  distKm: number | null;
   durH: number | null;
-  aging: number;
+  aging: number | null;
   history: string[];
 }
 

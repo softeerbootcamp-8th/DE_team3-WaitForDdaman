@@ -42,7 +42,7 @@ export function BikeTable({ bikes, activeDetailId, onRowClick }: BikeTableProps)
                 {bike.id}
                 <span className={`tier-pill ${bike.tier}`}>{bike.tier}</span>
               </td>
-              <td>{bike.station}</td>
+              <td>{bike.station ?? "정보없음"}</td>
               <td className={`rate ${rc}`}>
                 {pctLabel}
                 <span className="rate-bar">

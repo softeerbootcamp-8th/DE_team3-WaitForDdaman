@@ -34,13 +34,13 @@ export function DetailPanel({ bike }: { bike: Bike | null }) {
           <span className={`badge-type ${bike.tier}`}>{bike.tier}</span>
         </div>
         <div className="detail-station">
-          {bike.station} · {bike.district}
+          {bike.station ?? "정보없음"} · {bike.district ?? "정보없음"}
         </div>
 
         <div className="detail-grid">
           <div className="stat-box">
             <div className="s-label">누적 이동거리</div>
-            <div className="s-value">{bike.distKm.toLocaleString()}km</div>
+            <div className="s-value">{bike.distKm != null ? `${bike.distKm.toLocaleString()}km` : "정보없음"}</div>
           </div>
           <div className="stat-box">
             <div className="s-label">누적 이용시간</div>
@@ -48,7 +48,7 @@ export function DetailPanel({ bike }: { bike: Bike | null }) {
           </div>
           <div className="stat-box">
             <div className="s-label">노후화</div>
-            <div className="s-value">{bike.aging.toLocaleString()}년</div>
+            <div className="s-value">{bike.aging != null ? `${bike.aging.toLocaleString()}년` : "정보없음"}</div>
           </div>
         </div>
 

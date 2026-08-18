@@ -16,9 +16,9 @@ class Bike(BaseModel):
     tier: Tier
     score: float
     reason: Optional[str] = None
-    distKm: float
+    distKm: Optional[float] = None
     durH: Optional[float] = None
-    aging: float
+    aging: Optional[float] = None
     history: list[str]
 
 

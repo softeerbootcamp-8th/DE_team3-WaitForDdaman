@@ -25,7 +25,7 @@ function passesFilter(bike: Bike, query: string, tiers: Set<string>, urgencies: 
   if (tiers.size && !tiers.has(bike.tier)) return false;
   if (urgencies.size && bike.stationUrgency !== "정보없음" && !urgencies.has(bike.stationUrgency)) return false;
   if (query) {
-    const hay = (bike.id + " " + bike.station + " " + bike.district).toLowerCase();
+    const hay = (bike.id + " " + (bike.station ?? "") + " " + (bike.district ?? "")).toLowerCase();
     if (!hay.includes(query)) return false;
   }
   return true;
