@@ -31,18 +31,31 @@ _FETCH_DEPLOY_TARGETS_SQL = """
     WITH latest AS (
         SELECT DISTINCT ON (bike_id) bike_id, event_type, station_id, occurred_at
         FROM bikeman.fact_worker_event
+        WHERE occurred_at < %(target_date)s::date
         ORDER BY bike_id, occurred_at DESC, (event_type = 'COLLECT') DESC
     )
     SELECT bike_id, station_id FROM latest
     WHERE event_type = 'COLLECT' AND occurred_at::date = %(target_date)s::date - INTERVAL '1 day'
 """
-# ORDER BY의 세 번째 키: event_builder가 COLLECT/DEPLOY 모두 occurred_at을 target_date
-# 09:00로 고정 부여하므로(event_builder.py 참고), 같은 자전거가 어제 COLLECT되고 오늘
-# 다시 "수거" 목록에 올라 오늘 DEPLOY+COLLECT가 동시에 발생하면 둘의 occurred_at이
-# 정확히 같아진다. DISTINCT ON은 동률일 때 어느 행이 남을지 보장하지 않으므로(Task 9
-# E2E 백필에서 실측: 이 타이브레이커 없이는 둘째 날 이후 DEPLOY 건수가 700이 아니라
-# 매일 376~512 사이로 들쭉날쭉했다) "오늘 COLLECT 목록에 다시 올랐다"는 사실이 "오늘
-# 재배치됐다"보다 더 최신 상태를 나타낸다고 보고 동률에서 COLLECT가 이기도록 강제한다.
+# WHERE occurred_at < target_date (최종 리뷰에서 발견): 이 절이 없으면 "이 자전거의
+# 가장 최근 이벤트"가 target_date 이후에 쌓인 어떤 행(예: 재백필로 나중에 채워진 미래
+# 날짜, 혹은 단순히 이미 처리된 다른 날짜)에도 잡힐 수 있어, 이미 지난 날짜를 재실행하면
+# "어제 COLLECT"가 더 이상 최신이 아니게 되어 DEPLOY 대상이 매번 조용히 0건이 된다
+# (실측: 2026-07-25 재실행 시 이 절 없이 0건 -> 절 추가 후 700건). Task 9에서 발견한
+# 두 버그(태스크 순서 강제, 동률 타이브레이커)는 이 근본 원인의 증상에 대한 우회였다 -
+# 이 날짜 경계가 생기면서 이번 실행 자신의 COLLECT 행이 이 CTE에 아예 들어올 수 없으므로
+# deploy_returned_bikes >> generate_collect_events 순서 의존성은 이제 방어적 안전장치일
+# 뿐 필수는 아니다(그래도 유지 - 굳이 제거할 이유가 없음).
+#
+# ORDER BY의 세 번째 키(동률 타이브레이커): event_builder가 COLLECT/DEPLOY 모두
+# occurred_at을 target_date 09:00로 고정 부여하므로(event_builder.py 참고), 같은
+# 자전거가 어제 COLLECT되고 오늘 다시 "수거" 목록에 올라 오늘 DEPLOY+COLLECT가 동시에
+# 발생하면(위 날짜 경계 안에서, 즉 target_date 이전의 다른 날짜들 사이에서) 둘의
+# occurred_at이 정확히 같아질 수 있다. DISTINCT ON은 동률일 때 어느 행이 남을지
+# 보장하지 않으므로(Task 9 E2E 백필에서 실측: 이 타이브레이커 없이는 둘째 날 이후
+# DEPLOY 건수가 700이 아니라 매일 376~512 사이로 들쭉날쭉했다) "그 날 COLLECT 목록에
+# 다시 올랐다"는 사실이 "그 날 재배치됐다"보다 더 최신 상태를 나타낸다고 보고 동률에서
+# COLLECT가 이기도록 강제한다.
 
 
 def fetch_collect_targets(conn, target_date: str) -> list[dict]:

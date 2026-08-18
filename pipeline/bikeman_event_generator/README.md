@@ -29,7 +29,9 @@ Connection `bikeman_postgres` + `PostgresHook`을 사용한다 (사용자 확정
 - DAG: `bikeman_event_generator` (`airflow/dags/bikeman_event_generator_dag.py`)
   - `gold_to_serving_sync`의 `verify_bike_risk_daily_sync` 직후
     `TriggerDagRunOperator(wait_for_completion=False)`로 트리거됨 (station_daily 브랜치와는 무관)
-  - `generate_collect_events`/`deploy_returned_bikes` 두 태스크는 서로 독립이라 병렬 실행
+  - `deploy_returned_bikes >> generate_collect_events` 순서로 실행됨 (병렬 아님) - `fetch_deploy_targets`가
+    이제 `occurred_at < target_date`로 날짜 경계를 두므로 필수는 아니지만, 방어적 안전장치로 유지한다.
+    자세한 배경은 `E2E_VERIFICATION.md` 참고
   - `target_date`는 `dag_run.conf.get("snapshot_date") or ds`
 
 ## 로컬/컨테이너 실행
