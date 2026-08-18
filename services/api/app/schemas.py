@@ -44,7 +44,7 @@ class District(BaseModel):
 
 
 class Station(BaseModel):
-    id: int
+    id: str
     name: str
     district: str
     region: Region

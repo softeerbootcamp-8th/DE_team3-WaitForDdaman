@@ -37,7 +37,7 @@ export interface District {
 }
 
 export interface MapStation {
-  id: number;
+  id: string;
   name: string;
   district: string;
   region: Side;
