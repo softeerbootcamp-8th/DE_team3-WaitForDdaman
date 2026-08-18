@@ -24,23 +24,6 @@
 Connection `bikeman_postgres` + `PostgresHook`을 사용한다 (사용자 확정 사항). Connection
 필드는 `docs/superpowers/specs/2026-08-18-bikeman-event-generator-design.md` 참고.
 
-**이 Connection은 docker-compose/초기화 스크립트 어디에도 자동 생성되지 않는다** - 새
-환경에서는 아래처럼 직접 등록해야 한다 (Airflow UI: Admin → Connections에서 등록해도 동일):
-
-```bash
-docker exec airflow-scheduler airflow connections add bikeman_postgres \
-  --conn-type postgres \
-  --conn-host postgres \
-  --conn-schema hamzzi \
-  --conn-login bikeman_writer \
-  --conn-password bikeman_writer_pw \
-  --conn-port 5432
-```
-
-(`bikeman_writer` 롤/비밀번호는 `sql/bike_man/bikeman_seed_init.sql`에서 생성되므로, 그
-스크립트를 먼저 실행해야 한다.) 등록 안 하고 DAG를 트리거하면 태스크가
-`AirflowNotFoundException: The conn_id 'bikeman_postgres' isn't defined`로 실패한다.
-
 ## Airflow
 
 - DAG: `bikeman_event_generator` (`airflow/dags/bikeman_event_generator_dag.py`)
@@ -53,15 +36,14 @@ docker exec airflow-scheduler airflow connections add bikeman_postgres \
 
 ## 로컬/컨테이너 실행
 
-**주의**: `PostgresHook`이 쓰는 Airflow Connection은 실제 태스크 실행 컨텍스트(Execution
-API) 안에서만 resolve된다 - 이 저장소의 다른 job들과 달리 `docker exec ... python3 -c
-"..."`처럼 Airflow 밖에서 직접 `generate_collect_events.run(...)`/`deploy_returned_bikes.run(...)`을
-호출하면 `AirflowNotFoundException: The conn_id 'bikeman_postgres' isn't defined`로 실패한다
-(Task 5/6 개발 중 실측 확인). 반드시 실제 DAG 트리거로 실행해야 한다:
-
 ```bash
-docker exec airflow-scheduler airflow dags trigger bikeman_event_generator \
-  --conf '{"snapshot_date": "2026-07-01"}'
+docker exec airflow-scheduler python3 -c "
+import sys
+sys.path.insert(0, '/opt/airflow/pipeline/bikeman_event_generator/jobs')
+import generate_collect_events, deploy_returned_bikes
+deploy_returned_bikes.run('2026-07-01')
+generate_collect_events.run('2026-07-01')
+"
 ```
 
 ## 테스트
