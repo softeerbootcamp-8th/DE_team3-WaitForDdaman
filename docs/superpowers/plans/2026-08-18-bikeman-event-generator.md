@@ -432,7 +432,7 @@ _FETCH_COLLECT_TARGETS_SQL = """
 
 _FETCH_DEPLOY_TARGETS_SQL = """
     WITH latest AS (
-        SELECT DISTINCT ON (bike_id) bike_id, event_type, station_id, occurred_at
+        SELECT DISTINCT ON (bike_id) bike_id, event_type, station_id
         FROM bikeman.fact_worker_event
         ORDER BY bike_id, occurred_at DESC
     )
