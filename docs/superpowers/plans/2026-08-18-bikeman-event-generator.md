@@ -921,12 +921,13 @@ Inside the `gold_to_serving_sync()` function body, after the `verify_bike_risk_d
     trigger_bikeman_event_generator = TriggerDagRunOperator(
         task_id="trigger_bikeman_event_generator",
         trigger_dag_id="bikeman_event_generator",
-        logical_date="{{ logical_date }}",
         conf={"snapshot_date": "{{ dag_run.conf.get(\"snapshot_date\") or ds }}"},
         wait_for_completion=False,
         reset_dag_run=True,
     )
 ```
+
+**Post-execution note (found live, not a plan typo):** the original draft here included `logical_date="{{ logical_date }}"` (copied from `dag_risk_decision.py`'s existing `trigger_serving_sync` task). Live testing surfaced a real bug: for a manually-triggered run with only `--conf` (no explicit logical date), Airflow 3.3's Task SDK omits `logical_date` from the Jinja context entirely (rather than setting it to `None`), so rendering `"{{ logical_date }}"` raises `UndefinedError: 'logical_date' is undefined` and the task fails. Fix: omit the `logical_date` kwarg — `TriggerDagRunOperator` defaults it safely (to the trigger time), and the child DAG only ever reads `conf.snapshot_date`, never `logical_date`, so this has no functional effect. **Note:** `dag_risk_decision.py`'s pre-existing `trigger_serving_sync` task likely has this same latent bug under manual `--conf`-only triggers — that's pre-existing code from an already-merged, different feature and out of this plan's scope to fix, but worth flagging to whoever owns that DAG.
 
 Then change the final dependency lines from:
 
