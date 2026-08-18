@@ -3,7 +3,7 @@
 대여소 수거 우선순위 리스트 생성을 위한 Gold 데이터 파이프라인
 
 - 수거 우선순위 계산에 필요한 Gold 스키마(dim_bike / bike_location / station_active / fact_station_inventory)를 만든다
-- 우선순위 산정 로직(모델 학습/추론)은 이 폴더의 책임이 아니다 - `pipeline/risk_model`이 그쪽을 담당하고, 여기는 그 입력이 되는 데이터를 만드는 ETL 잡만 둔다
+- 우선순위 산정 로직(모델 학습/추론)은 이 폴더의 책임이 아니다 - `pipeline/train_risk_model`이 그쪽을 담당하고, 여기는 그 입력이 되는 데이터를 만드는 ETL 잡만 둔다
 
 ## jobs
 

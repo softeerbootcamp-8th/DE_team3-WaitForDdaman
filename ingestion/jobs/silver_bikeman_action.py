@@ -35,7 +35,7 @@ from pyspark.sql import functions as F
 import config
 from common.dq_utils import DEEQU_EXCLUDE, DEEQU_MAVEN_PACKAGE, ensure_dq_result_table, verify_bike_man_action
 from common.s3_utils import ensure_bucket
-from common.spark_session import build_spark_session
+from common.spark_session import build_spark_session, stop_spark_session_with_deequ
 from common.watermark import read_watermark, write_watermark
 from config.watermark_keys import SILVER_BIKE_MAN_ACTION
 from schema.bikeman_action_schema import FINAL_COLUMNS, SERVICE_START_DATE, classify_rows, dedup_rows
@@ -134,7 +134,10 @@ def _process_one_day(spark, target_date: date) -> tuple[int, bool]:
         logger.info("%s: Bronze에 신규 데이터 없음", date_str)
         return 0, True
 
-    now = datetime.now(timezone.utc)
+    # bronze의 occurred_at은 Spark TIMESTAMP -> naive datetime으로 넘어오므로,
+    # classify_rows의 미래시각 비교(occurred_at > now)가 tz-aware/naive 비교 TypeError를
+    # 내지 않도록 now도 naive UTC로 맞춘다.
+    now = datetime.utcnow()
     valid_rows, quarantine_rows = classify_rows(bronze_rows, now)
     valid_rows = dedup_rows(valid_rows)
 
@@ -177,38 +180,45 @@ def run() -> None:
         extra_packages=[DEEQU_MAVEN_PACKAGE],
         extra_excludes=[DEEQU_EXCLUDE],
     )
-    _ensure_silver_tables(spark)
-    ensure_dq_result_table(spark)
+    try:
+        _ensure_silver_tables(spark)
+        ensure_dq_result_table(spark)
 
-    last_processed = read_watermark(watermark_key=WATERMARK_KEY)
-    start_date = last_processed + timedelta(days=1)
-    end_date = date.today() - timedelta(days=1)
+        last_processed = read_watermark(watermark_key=WATERMARK_KEY)
+        start_date = last_processed + timedelta(days=1)
+        end_date = date.today() - timedelta(days=1)
 
-    max_days = os.getenv("MAX_DAYS_PER_RUN")
-    if max_days:
-        capped_end = start_date + timedelta(days=int(max_days) - 1)
-        if capped_end < end_date:
-            end_date = capped_end
+        max_days = os.getenv("MAX_DAYS_PER_RUN")
+        if max_days:
+            capped_end = start_date + timedelta(days=int(max_days) - 1)
+            if capped_end < end_date:
+                end_date = capped_end
 
-    if start_date > end_date:
-        logger.info("처리할 신규 날짜 없음 (워터마크=%s)", last_processed)
-        return
+        if start_date > end_date:
+            logger.info("처리할 신규 날짜 없음 (워터마크=%s)", last_processed)
+            return
 
-    reprocess_start = max(start_date - timedelta(days=LOOKBACK_DAYS), SERVICE_START_DATE)
+        reprocess_start = max(start_date - timedelta(days=LOOKBACK_DAYS), SERVICE_START_DATE)
 
-    current = reprocess_start
-    while current <= end_date:
-        try:
-            _, passed = _process_one_day(spark, current)
-            if not passed:
-                logger.error("%s 처리 실패(PyDeequ), 배치 중단: 워터마크 유지", current)
+        current = reprocess_start
+        while current <= end_date:
+            try:
+                _, passed = _process_one_day(spark, current)
+                if not passed:
+                    logger.error("%s 처리 실패(PyDeequ), 배치 중단: 워터마크 유지", current)
+                    sys.exit(1)
+                if current >= start_date:
+                    write_watermark(current, watermark_key=WATERMARK_KEY)
+            except Exception as e:
+                logger.error("%s 처리 중 예외, 배치 중단: %s", current, e)
                 sys.exit(1)
-            if current >= start_date:
-                write_watermark(current, watermark_key=WATERMARK_KEY)
-        except Exception as e:
-            logger.error("%s 처리 중 예외, 배치 중단: %s", current, e)
-            sys.exit(1)
-        current += timedelta(days=1)
+            current += timedelta(days=1)
+    finally:
+        # verify_bike_man_action()가 PyDeequ VerificationSuite를 돌리면서 연 py4j
+        # 콜백 서버(non-daemon 스레드)를 안 내리면 run()이 정상 반환돼도 프로세스가
+        # 안 끝난다 - transform_silver_rental_history.py에서 실측된 것과 동일한 문제
+        # (common/spark_session.py의 stop_spark_session_with_deequ 참고).
+        stop_spark_session_with_deequ(spark)
 
 
 if __name__ == "__main__":

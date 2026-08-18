@@ -1,0 +1,92 @@
+# 위험도 모델 학습 파이프라인 설정
+# DAG 코드에는 상수를 두지 않는다. 값 변경은 전부 이 파일에서.
+# 로컬/운영 전환은 RISK_MODEL_CONFIG 환경변수로 다른 파일을 가리키게 한다.
+
+run:
+  window_days: 14          # 피처 집계 기간 (as_of 이전)
+  horizon_days: 14         # 라벨 관측 기간 (as_of 이후)
+  holdout_days: 60         # 홀드아웃 구간 길이 (일별 앵커)
+  anchor_step_days: 7      # 학습 앵커 간격
+  rolling_months: 24       # 학습 데이터 rolling 윈도우
+  exclude_recent_days: 30  # 직전 N일 신고 이력 있는 자전거 → 학습/평가/추론 제외
+  top_k: 500               # 메인지표 top-K (정비소 하루 capacity 근사)
+  fail_window_days: 150    # fail_150d 집계 창
+  fault_lookback_days: null # days_since_fail 계산 시 조회 범위. null = 전체 이력(노트북 동일)
+  min_rent_date: "2022-05-18"
+  saessak_min_num: 80000   # 이 번호 이상 = 새싹 자전거 (bike_class 라벨링용, 필터 아님)
+
+sources:
+  mode: parquet            # parquet | iceberg  (iceberg 전환 시 io.read_silver만 교체)
+  assume_silver_clean: false  # true면 이상치 필터를 재적용하지 않는다 (silver DAG이 이미 했다면)
+  rental_history: "/opt/airflow/data/silver/rental_history"
+  failure_report: "/opt/airflow/data/silver/failure_report"
+  # silver 실제 컬럼명 → 내부 표준명 매핑. null이면 파생 규칙 적용.
+  rental_columns:
+    bike_id: bike_id
+    rent_at: rent_dt
+    return_at: return_dt
+    dist_m: use_distance_m
+    rent_station: rent_station_id
+    return_station: return_station_id
+    dur_min: null          # null → (return_at - rent_at) 분으로 파생
+  fault_columns:
+    bike_id: bike_no
+    reported_at: reg_dttm
+
+cleaning:
+  max_speed_kmh: 45
+  max_dist_m: 50000
+  zero_dur_max_dist: 5000
+  instant_return_max_dist_m: 10
+
+paths:
+  train_sample: "/opt/airflow/data/gold/fact_bike_train_sample"
+  label_pos_new: "/opt/airflow/data/gold/fact_bike_label_pos_new"
+  model_root: "/opt/airflow/data/models/risk_model"
+  # LocalStack S3로 바꿀 때:
+  #   model_root: "s3://ttareungi-dev/models/risk_model"
+  #   AWS_ENDPOINT_URL=http://localstack:4566 환경변수만 추가
+
+quality:
+  min_train_rows: 5000
+  min_anchors: 10
+  min_pos_rate: 0.0005
+  max_pos_rate: 0.30
+  max_feature_null_rate: 0.0
+  min_holdout_anchors_with_pos: 5
+
+gate:
+  metric: capture_at_k
+  max_drop_pp: 2.0         # champion 대비 이 이상 하락하면 승격 보류
+
+models:
+  candidates: ["rule_trips", "logreg", "lgbm"]
+  primary: "lgbm"          # 동점/게이트 보류 시 저장 대상 기준
+  logreg:
+    max_iter: 1000
+  lgbm:
+    n_estimators: 100
+    learning_rate: 0.05
+    num_leaves: 7
+    min_child_samples: 500
+    subsample: 0.8
+    subsample_freq: 1
+    colsample_bytree: 0.8
+    reg_lambda: 10
+    random_state: 42
+    n_jobs: 1              # 결정론 확보 (스레드 수에 따라 결과가 흔들리지 않게)
+    verbose: -1
+
+spark:
+  master: "local[*]"
+  driver_memory: "6g"
+  shuffle_partitions: 16
+  timezone: "Asia/Seoul"
+  extra_conf: {}           # iceberg/s3a 전환 시 spark.jars.packages 등을 여기에
+
+mlflow:
+  enabled: false           # compose에 mlflow 서비스 추가 후 true
+  tracking_uri: "http://mlflow:5000"
+  experiment: "ttareungi-risk-model"
+  registered_model: "risk_model"
+  champion_alias: "champion"
