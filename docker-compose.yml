@@ -21,7 +21,10 @@ x-airflow-common:
     AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
     AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
     AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+    APP_ENV: ${APP_ENV:-local}
+    ICEBERG_CATALOG_TYPE: ${ICEBERG_CATALOG_TYPE:-hadoop}
   volumes:
+    - ./.env:/opt/airflow/.env:ro
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs
     - ./airflow/plugins:/opt/airflow/plugins

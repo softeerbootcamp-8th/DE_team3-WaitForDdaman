@@ -36,16 +36,29 @@ ingestion 의존성은 아래 파일에만 들어있다.
 
 ### 1. 환경변수 확인
 
-루트 `.env`는 Airflow/Postgres/LocalStack 컨테이너 설정에 사용된다.
+루트 `.env` 하나가 유일한 소스다 (Airflow/Postgres/LocalStack 컨테이너 설정 +
+ingestion/staging/pipeline 잡이 읽는 값 전부 포함).
 
-`ingestion/.env`는 DAG가 실행하는 ingestion 잡에서 읽는다. Airflow DAG의 bash command가
-컨테이너 안에서 `/opt/airflow/ingestion/.env`를 `source` 하므로, 로컬에서는 기본값이
-LocalStack 기준인지 확인한다.
+Airflow DAG의 bash command는 컨테이너 안에서 `/opt/airflow/ingestion/.env`를
+`source` 하는데, `ingestion/.env`는 실제 파일이 아니라 **루트 `.env`를 가리키는
+심볼릭 링크**다. 두 파일에 값을 따로 넣었다가 서로 어긋나서 실 AWS 전환 때 한참
+디버깅한 적이 있어서(#83) 이렇게 통합했다 - `ingestion/.env`에 절대 값을 직접
+쓰지 말 것.
 
-필수 확인값:
+처음 클론했다면 심볼릭 링크가 없으니 한 번 만들어준다:
 
 ```bash
-# ingestion/.env
+cd ingestion && ln -s ../.env .env && cd ..
+```
+
+`docker-compose.local.yml`/`docker-compose.yml`이 루트 `.env`를
+`/opt/airflow/.env`로 바인드 마운트하므로, 컨테이너 안에서 심볼릭 링크가
+정상적으로 풀린다.
+
+필수 확인값 (루트 `.env`):
+
+```bash
+# .env
 APP_ENV=local
 S3_ENDPOINT=http://localstack:4566
 RAW_BUCKET=ttareungyi-raw
@@ -274,7 +287,8 @@ pytest tests/test_station_master_schema.py -v
 
 ## AWS 배포 시 바꿔야 하는 것
 
-`ingestion/.env`에서 아래 값들을 AWS 기준으로 교체한다.
+루트 `.env`에서 아래 값들을 AWS 기준으로 교체한다 (`ingestion/.env`는 심볼릭
+링크라 따로 건드릴 필요 없음).
 
 ```bash
 APP_ENV=aws
