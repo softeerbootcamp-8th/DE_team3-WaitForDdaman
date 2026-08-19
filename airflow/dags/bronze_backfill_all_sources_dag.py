@@ -13,8 +13,9 @@ Bronze 백필 DAG (2개 원천) - 1회성, 수동 트리거
 대여이력과 고장신고는 서로 의존관계가 없어서 병렬로 둔다. 각 소스는 백필 성공 직후
 자기 워터마크를 찍는다.
 
-    rental_history ─> set_watermark_rental_history
-    failure_report ─> set_watermark_failure_report
+    rental_history ─┬─> set_watermark_rental_history
+                     └─> bootstrap_silver_watermark_rental_history
+    failure_report ──> set_watermark_failure_report
 
 ### 왜 워터마크 태스크가 DAG 안에 있는가
 워터마크가 없으면 daily_batch가 .env의 BACKFILL_START_DATE(기본 2015-01-01)부터 API로
@@ -128,9 +129,23 @@ def bronze_backfill_all_sources():
         execution_timeout=timedelta(minutes=5),
     )
 
+    # Silver 워터마크 부트스트랩 (#76) - Bronze rental_history의 실제 MIN(partition)을
+    # 직접 읽어서 자동 계산한다 (사람이 날짜를 세어 넘길 필요 없음). failure_report는
+    # silver 쪽이 워터마크 자체가 없는 구조라(매번 전체 재처리) 대상이 아니다.
+    # Spark로 테이블을 읽으므로 BRONZE_POOL에 넣는다 (set_watermark_*와 달리 JSON 한
+    # 개만 쓰는 게 아니라 Iceberg 테이블을 직접 조회한다).
+    bootstrap_silver_watermark_rental_history = BashOperator(
+        task_id="bootstrap_silver_watermark_rental_history",
+        bash_command=bash_job("bootstrap_silver_watermark", "DATASET=rental_history "),
+        retries=0,
+        execution_timeout=timedelta(minutes=10),
+        pool=BRONZE_POOL,
+    )
+
     # 두 소스 사이에는 의존관계를 걸지 않는다. 서로 참조하지 않는 원천이고,
     # 동시 실행 부하는 max_active_tasks=2가 제한한다.
     rental_history >> set_watermark_rental_history
+    rental_history >> bootstrap_silver_watermark_rental_history
     failure_report >> set_watermark_failure_report
 
 
