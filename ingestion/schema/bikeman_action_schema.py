@@ -1,7 +1,7 @@
 """
-스키마 정의 - Silver 계층 bike_man_action (따맨/bikeman 행동 이력)
+스키마 정의 - Silver 계층 bikeman_action (따맨/bikeman 행동 이력)
 
-Bronze(bikeman_event) -> Silver(bike_man_action) 정제 시 적용하는 이상치 규칙.
+Bronze(bikeman_event) -> Silver(bikeman_action) 정제 시 적용하는 이상치 규칙.
 
 Bronze 레이어(schema/bikeman_event_schema.py)는 "필수 컬럼 존재 여부"와
 "event_type이 COLLECT/DEPLOY인지"만 검증했다. 시간 정합성(occurred_at vs

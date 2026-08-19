@@ -10,36 +10,36 @@ station_active/fact_station_inventory)를 만들어 S3(LocalStack)에 적재한�
     silver.rental_history  --> gold.dim_bike
     silver.rental_history  --> gold.bike_location
     silver.station_master + silver.station_active --> gold.station_active
-    silver.bike_man_action + gold.bike_location + gold.station_active
+    silver.bikeman_action + gold.bike_location + gold.station_active
         --> gold.fact_station_inventory
 
     wait_rental_history ──┬──> build_dim_bike
                           └──> build_bike_location ─────────┐
     wait_station_master ──┬──> build_station_active ────────┼──> build_fact_station_inventory
     wait_station_active ──┘                                 │
-    wait_bike_man_action ────────────────────────────────────┘
+    wait_bikeman_action ────────────────────────────────────┘
 
 ### wait_for_silver가 4개인 이유와 방식이 갈리는 이유
 이 DAG가 필요로 하는 Silver 소스는 rental_history / station_master /
-station_active / bike_man_action, 총 4개다(failure_report는 bike_features
+station_active / bikeman_action, 총 4개다(failure_report는 bike_features
 전용이라 이 DAG 범위에서 제외됨). 이 4개는 서로 다른 3개 DAG + 1개 Asset
 트리거 DAG에서 나온다.
 
-    - bike_man_action: silver_bike_man_action_daily가 Asset(bikeman_event_bronze)
+    - bikeman_action: silver_bikeman_action_daily가 Asset(bikeman_event_bronze)
       트리거라 logical_date가 매일 정해진 시각으로 정렬되지 않는다.
       ExternalTaskSensor의 execution_delta 매칭 전제(고정 스케줄)가 깨지므로,
       대신 실제 워터마크 파일을 직접 확인하는 BashSensor를 쓴다
-      (ingestion/jobs/check_silver_bike_man_action_watermark.py).
+      (ingestion/jobs/check_silver_bikeman_action_watermark.py).
 
 ### rental_history / station_master / station_active도 BashSensor로 전환 (2026-08-17, #50)
-이 3개 Silver DAG도 Bronze 완료 Asset 트리거로 전환되면서 bike_man_action과
+이 3개 Silver DAG도 Bronze 완료 Asset 트리거로 전환되면서 bikeman_action과
 동일한 문제를 겪는다 - DagRun의 logical_date가 고정 스케줄 그리드에 맞춰
 정렬되지 않고(수동 Asset 이벤트로 만든 DagRun은 logical_date가 아예 null인
 경우도 실측 확인됨), ExternalTaskSensor(execution_delta)가 상류 DagRun을 못
 찾아 매번 타임아웃난다. `DagRun.find()`로 메타데이터 DB를 직접 조회하는 대안도
 시도했으나 Airflow 3의 Task SDK가 태스크 코드의 ORM 직접 접근을 막아
 `RuntimeError: Direct database access via the ORM is not allowed in Airflow 3.0`로
-실패한다(실측). 그래서 bike_man_action과 같은 방식(실제 상태를 직접 확인하는
+실패한다(실측). 그래서 bikeman_action과 같은 방식(실제 상태를 직접 확인하는
 BashSensor)으로 통일한다.
 
     - rental_history: 워터마크가 있는 증분 소스라 check_silver_watermark.py로
@@ -49,7 +49,7 @@ BashSensor)으로 통일한다.
       (T-0 구조라 오프셋 없음)
 ### TARGET_DATE를 어제로 넘기는 이유 (2026-08-17 수정, #52)
 daily_batch_bikeman_event.py는 항상 "어제까지"만 처리하므로(오늘 데이터는
-작업자가 몰아서 제출하는 경우가 많아 항상 미확정) silver_bike_man_action의
+작업자가 몰아서 제출하는 경우가 많아 항상 미확정) silver_bikeman_action의
 워터마크는 구조적으로 실행일보다 하루 늦다. 예전엔 TARGET_DATE에 오늘({{ ds }})을
 그대로 넘겨서 이 센서가 워터마크를 영원히 못 따라잡고 매번 타임아웃났다
 (팀원 리뷰로 발견). `macros.ds_add(ds, -1)`로 하루 전 날짜를 넘겨서 고쳤다.
@@ -156,10 +156,10 @@ def dag_gold_dim_fact():
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,
     )
-    wait_bike_man_action = BashSensor(
-        task_id="wait_for_silver_bike_man_action",
+    wait_bikeman_action = BashSensor(
+        task_id="wait_for_silver_bikeman_action",
         bash_command=_ingestion_bash(
-            "check_silver_bike_man_action_watermark",
+            "check_silver_bikeman_action_watermark",
             "TARGET_DATE='{{ macros.ds_add(ds, -1) }}' ",
         ),
         mode="reschedule",
@@ -215,7 +215,7 @@ def dag_gold_dim_fact():
     # build_bike_location/build_station_active를 거쳐 간접 보장되므로 직접 연결하지 않음
     build_bike_location >> build_fact_station_inventory
     build_station_active >> build_fact_station_inventory
-    wait_bike_man_action >> build_fact_station_inventory
+    wait_bikeman_action >> build_fact_station_inventory
 
     build_fact_station_inventory >> trigger_risk_decision
 

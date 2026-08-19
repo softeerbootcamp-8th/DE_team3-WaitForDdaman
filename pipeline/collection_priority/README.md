@@ -14,10 +14,10 @@ silver.rental_history ─────┬──> gold.dim_bike
 silver.station_master ─────┐                                      │
 silver.station_active ─────┴──> gold.station_active ───────────────┼──> gold.fact_station_inventory
                                                                     │
-silver.bike_man_action ─────────> gold.bike_last_action ────────────┘
+silver.bikeman_action ─────────> gold.bike_last_action ────────────┘
 ```
 
-- `gold.bike_last_action`은 최종 산출물이 아니라 `gold.fact_station_inventory`를 만들기 위한 중간 상태 테이블이다 - `silver.bike_man_action`(계속 쌓이는 이벤트 로그)에서 자전거별 "가장 최근 수거/배치 이벤트가 뭐였나"만 증분으로 유지해둔 것 (자세한 이유는 아래 `build_fact_station_inventory.py` 항목 참고)
+- `gold.bike_last_action`은 최종 산출물이 아니라 `gold.fact_station_inventory`를 만들기 위한 중간 상태 테이블이다 - `silver.bikeman_action`(계속 쌓이는 이벤트 로그)에서 자전거별 "가장 최근 수거/배치 이벤트가 뭐였나"만 증분으로 유지해둔 것 (자세한 이유는 아래 `build_fact_station_inventory.py` 항목 참고)
 - 위 4개 build 잡 중 `gold.bike_location`을 만드는 `build_bike_location.py`와 `gold.bike_last_action`을 만드는 로직(`build_fact_station_inventory.py` 내부)만 baseline+delta 증분 처리이고, 나머지(`build_dim_bike.py`의 append, `build_station_active.py`/`build_fact_station_inventory.py`의 최종 집계)는 매번 전체 재계산/전체 덮어쓰기다
 
 ## jobs
@@ -39,12 +39,12 @@ silver.bike_man_action ─────────> gold.bike_last_action ──
   - station_master(전체 등록 대여소) 중 station_active(실시간 상태가 보고되는 대여소)에도 존재하는 것만 INNER JOIN으로 필터링
   - `silver.station_active`는 `station_id` 필터 테이블(컬럼 `snapshot_date`, `station_id` 2개뿐, `staging/jobs/silver_station_active.py`)이라 이 잡은 station_id만 뽑아 쓰고 나머지 속성은 전부 station_master에서 가져온다 - 대여소 수가 적어(수백~수천 건) `F.broadcast()`로 셔플 없이 조인한다
   - 적재 전 PyDeequ 검증(`station_id` 유일성/완전성) - 실패 시 적재 없이 배치 중단
-- `build_fact_station_inventory.py`: `gold.bike_location` + `gold.station_active` + `silver.bike_man_action` -> `gold.fact_station_inventory`
+- `build_fact_station_inventory.py`: `gold.bike_location` + `gold.station_active` + `silver.bikeman_action` -> `gold.fact_station_inventory`
   - 컬럼: `station_id`, `bike_cnt`, `hold_num`, `target_bike_cnt`, `snapshot_date`
   - 자전거의 최종 위치는 대여이력 기준 위치(`bike_location`)와 수거(COLLECT)/배치(DEPLOY) 이벤트 중 더 최신인 쪽을 따른다 - COLLECT가 최신이면 재고 집계에서 제외, DEPLOY가 최신이면 그 station_id로 위치를 덮어씀 (자세한 규칙은 파일 docstring 참고)
   - `target_bike_cnt`는 거치대 수(`hold_num`)를 목표치로 사용
   - `gold.station_active`(운영 중인 대여소만) 기준으로 집계하므로, 자전거가 0대인 대여소도 0으로 나온다 - `station_active`(left/outer 쪽)를 기준으로 `bike_cnt` 집계 결과(대여소당 최대 1행이라 더 작음)를 `F.broadcast()`로 왼쪽에 조인한다(left outer join은 build 대상이 오른쪽이어야 해서 작은 쪽을 오른쪽에 둠)
-  - `bike_cnt` 집계 자체는 매번 전체 재계산(자전거 하나만 바뀌어도 대여소 합계가 통째로 바뀌므로 carry-forward 불가). 대신 그 재료인 자전거별 최신 수거/배치 이벤트는 `gold.bike_last_action`(신규, 증분 유지 상태 테이블)에서 가져온다 - `silver.bike_man_action`(계속 커지는 이벤트 로그)을 매번 전체 스캔하지 않고, 아직 반영 안 된 구간만 스캔해서 병합(델타 구간 산정 방식은 `build_bike_location.py`와 동일한 self-tracking watermark 방식)
+  - `bike_cnt` 집계 자체는 매번 전체 재계산(자전거 하나만 바뀌어도 대여소 합계가 통째로 바뀌므로 carry-forward 불가). 대신 그 재료인 자전거별 최신 수거/배치 이벤트는 `gold.bike_last_action`(신규, 증분 유지 상태 테이블)에서 가져온다 - `silver.bikeman_action`(계속 커지는 이벤트 로그)을 매번 전체 스캔하지 않고, 아직 반영 안 된 구간만 스캔해서 병합(델타 구간 산정 방식은 `build_bike_location.py`와 동일한 self-tracking watermark 방식)
   - 적재 전 PyDeequ 검증 - `gold.bike_last_action`은 `bike_id` 유일성/완전성, `gold.fact_station_inventory`는 `station_id` 유일성/완전성 + `bike_cnt` 음수 아님 - 실패 시 적재 없이 배치 중단
 
 ## Airflow
@@ -52,7 +52,7 @@ silver.bike_man_action ─────────> gold.bike_last_action ──
 - DAG: `dag_gold_dim_fact` (`airflow/dags/gold_dim_fact_dag.py`)
   - `wait_for_silver_rental_history` -> `build_dim_bike` / `build_bike_location`
   - `wait_for_silver_station_master` + `wait_for_silver_station_active` -> `build_station_active`
-  - `build_bike_location` + `build_station_active` + `wait_for_silver_bike_man_action` -> `build_fact_station_inventory`
+  - `build_bike_location` + `build_station_active` + `wait_for_silver_bikeman_action` -> `build_fact_station_inventory`
   - 각 build 태스크는 실제로 읽는 Silver 소스의 센서에만 연결되어 있다 (이미 다른 태스크를 거쳐 간접 보장되는 센서는 중복 연결하지 않음 - 자세한 설계는 DAG 파일 docstring 참고)
   - 매일 08:00 KST
 - (구) `silver_gold_daily_batch_rental_history` DAG는 더 이상 `build_dim_bike`를 실행하지 않음 (2026-08-17, `dag_gold_dim_fact`로 이관)
