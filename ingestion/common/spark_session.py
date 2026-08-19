@@ -45,9 +45,6 @@ def build_spark_session(
         )
         .config(f"spark.sql.catalog.{catalog}", "org.apache.iceberg.spark.SparkCatalog")
         .config(f"spark.sql.catalog.{catalog}.warehouse", settings.iceberg_warehouse_path)
-        # ---- S3A 커넥터 (LocalStack / AWS 공통) ----
-        .config("spark.hadoop.fs.s3a.access.key", settings.s3_access_key)
-        .config("spark.hadoop.fs.s3a.secret.key", settings.s3_secret_key)
         .config("spark.hadoop.fs.s3a.path.style.access", "true")
         # 백필 시 재실행이 곧 "동일 날짜 파티션 덮어쓰기"가 되도록 dynamic overwrite 사용
         .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
@@ -57,12 +54,9 @@ def build_spark_session(
         builder = builder.config("spark.jars.excludes", ",".join(extra_excludes))
 
     if settings.iceberg_catalog_type == "hadoop":
-        # 로컬 개발: Hadoop Catalog (LocalStack S3 경로 기반, Glue 불필요)
-        builder = (
-            builder.config(f"spark.sql.catalog.{catalog}.type", "hadoop")
-            .config("spark.hadoop.fs.s3a.endpoint", settings.s3_endpoint)
-            .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
-        )
+        # Hadoop Catalog (S3 경로 기반 메타데이터, Glue 불필요) - 로컬 LocalStack뿐 아니라
+        # Glue 권한이 없는 AWS 계정(교육용 계정 등)에서 실 S3에 붙일 때도 이 분기를 쓴다.
+        builder = builder.config(f"spark.sql.catalog.{catalog}.type", "hadoop")
     else:
         # AWS 배포: Glue Data Catalog (Hive Metastore 자체 운영 불필요)
         builder = builder.config(f"spark.sql.catalog.{catalog}.type", "glue").config(
@@ -70,6 +64,23 @@ def build_spark_session(
         )
 
     if settings.env == "local":
+        # LocalStack은 더미 access/secret key(기본값 "test")로 인증한다. 세션 토큰이 없는
+        # SimpleAWSCredentialsProvider(access/secret key 명시 시 기본으로 붙는 provider)로 충분하다.
+        # AWS 배포에서는 이 config를 아예 안 넣어서 hadoop-aws의 기본 credential provider chain이
+        # 환경변수(AWS_ACCESS_KEY_ID/SECRET/SESSION_TOKEN, ASIA로 시작하는 임시 STS 자격증명 포함)나
+        # IAM Role을 그대로 읽게 한다 - 여기서 access/secret만 명시하면 세션 토큰이 빠져
+        # ExpiredToken/InvalidAccessKeyId로 실패한다.
+        builder = builder.config("spark.hadoop.fs.s3a.access.key", settings.s3_access_key).config(
+            "spark.hadoop.fs.s3a.secret.key", settings.s3_secret_key
+        )
+
+        # S3_ENDPOINT(LocalStack, 기본 http://localhost:4566)로 리다이렉트 + SSL 비활성화.
+        # 실 AWS S3(위 hadoop 분기가 Glue 미보유 계정에서 탄 경우 포함)는 이 설정이 없어야
+        # hadoop-aws가 리전에 맞는 실제 S3 https 엔드포인트를 기본값으로 쓴다.
+        builder = builder.config("spark.hadoop.fs.s3a.endpoint", settings.s3_endpoint).config(
+            "spark.hadoop.fs.s3a.connection.ssl.enabled", "false"
+        )
+
         # macOS 등 로컬 환경에서 호스트명이 바인딩 불가능한 주소로 풀리면
         # "BindException: Can't assign requested address"가 발생한다.
         # 로컬 드라이버는 127.0.0.1로 명시 바인딩 (EMR 등 실제 클러스터 실행에는 영향 없음 - local 분기 한정).

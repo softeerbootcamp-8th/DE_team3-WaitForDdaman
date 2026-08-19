@@ -22,10 +22,13 @@ x-airflow-common:
     AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
     AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
     S3_ENDPOINT: ${S3_ENDPOINT:-http://localstack:4566}
-    AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-http://localstack:4566}
+    AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-}
+    APP_ENV: ${APP_ENV:-local}
+    ICEBERG_CATALOG_TYPE: ${ICEBERG_CATALOG_TYPE:-hadoop}
     RISK_MODEL_CONFIG: ${RISK_MODEL_CONFIG:-/opt/airflow/pylib/config/risk_model.local.yaml}
     PYTHONPATH: /opt/airflow/pylib
   volumes:
+    - ./.env:/opt/airflow/.env:ro
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs
     - ./airflow/plugins:/opt/airflow/plugins
