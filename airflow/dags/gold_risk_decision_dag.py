@@ -21,7 +21,7 @@ wait_for_yesterday_decision을 soft_fail=True로 뒀다 - 최초 실행일(T-1 �
 상태를 check_cold_start가 보고 분기한다.
 
 ### 필터가 cold start를 안 타는 이유
-apply_lagged_filter는 실제로는 bike_man_action 최신 이벤트만 보고 fact_bike_decision
+apply_lagged_filter는 실제로는 bikeman_action 최신 이벤트만 보고 fact_bike_decision
 내용 자체는 안 읽는다 (매일 재계산이라 "어제 대여중단이었다"는 사실이 오늘 결과를
 바꾸지 않음 - 대여소 재고가 바뀌면 오늘 다시 대여중단/보류가 갈릴 수 있어서). 그래서
 4-a/4-b가 실제로는 같은 job을 부르지만, 계획 문서에 있는 이름 그대로 태스크는

@@ -27,7 +27,7 @@ from datetime import datetime, timedelta
 import config
 from common.s3_utils import ensure_bucket
 from common.watermark import write_watermark
-from config.watermark_keys import GOLD_DIM_BIKE, SILVER_BIKE_MAN_ACTION, SILVER_RENTAL_HISTORY
+from config.watermark_keys import GOLD_DIM_BIKE, SILVER_BIKEMAN_ACTION, SILVER_RENTAL_HISTORY
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ WATERMARK_KEYS = {
     "rental_history": "_meta/watermark/rental_history.json",
     "failure_report": "_meta/watermark/failure_report.json",
     "bikeman_event": "_meta/watermark/bikeman_event.json",
-    "silver_bike_man_action": SILVER_BIKE_MAN_ACTION,
+    "silver_bikeman_action": SILVER_BIKEMAN_ACTION,
     "silver_rental_history": SILVER_RENTAL_HISTORY,
     "gold_dim_bike": GOLD_DIM_BIKE,
 }

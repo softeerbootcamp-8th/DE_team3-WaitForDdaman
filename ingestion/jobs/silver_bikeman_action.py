@@ -1,5 +1,5 @@
 """
-Silver 변환 잡 - 따맨/bikeman 행동 이력 (bronze.bikeman_event -> silver.bike_man_action)
+Silver 변환 잡 - 따맨/bikeman 행동 이력 (bronze.bikeman_event -> silver.bikeman_action)
 
 ### 파티션 설계
 bike_id를 파티션 키로 쓰지 않는다 - bike_id는 카디널리티가 높고(계속 증가) 계속
@@ -14,7 +14,7 @@ Bronze(daily_batch_bikeman_event.py)가 자체적으로 3일 lookback을 돌며 
 "어제"만 보면 Bronze가 나중에 갱신한 정정분을 놓친다. 그래서 Silver도 동일한
 lookback 윈도우로 재계산한다 (Bronze의 정정이 Silver까지 전파되도록).
 
-### 이상치 처리 (schema/bike_man_action_schema.py)
+### 이상치 처리 (schema/bikeman_action_schema.py)
 1차: null/enum/시간 정합성(occurred_at vs received_at, 서비스 시작일, 미래 시각)
      검사로 valid/quarantine 분리 + (bike_id, event_type, occurred_at) 중복 제거.
 2차: PyDeequ로 valid 데이터셋 전체의 완전성/enum 준수율을 측정해 dq_check_result에
@@ -22,8 +22,8 @@ lookback 윈도우로 재계산한다 (Bronze의 정정이 Silver까지 전파�
      최종 게이트 - 실패하면 Silver에 쓰지 않고 배치를 중단한다(안전하게 실패).
 
 사용법:
-    python -m jobs.silver_bike_man_action
-    MAX_DAYS_PER_RUN=1 python -m jobs.silver_bike_man_action
+    python -m jobs.silver_bikeman_action
+    MAX_DAYS_PER_RUN=1 python -m jobs.silver_bikeman_action
 """
 import logging
 import os
@@ -33,18 +33,18 @@ from datetime import date, datetime, timedelta, timezone
 from pyspark.sql import functions as F
 
 import config
-from common.dq_utils import DEEQU_EXCLUDE, DEEQU_MAVEN_PACKAGE, ensure_dq_result_table, verify_bike_man_action
+from common.dq_utils import DEEQU_EXCLUDE, DEEQU_MAVEN_PACKAGE, ensure_dq_result_table, verify_bikeman_action
 from common.s3_utils import ensure_bucket
 from common.spark_session import build_spark_session, stop_spark_session_with_deequ
 from common.watermark import read_watermark, write_watermark
-from config.watermark_keys import SILVER_BIKE_MAN_ACTION
+from config.watermark_keys import SILVER_BIKEMAN_ACTION
 from schema.bikeman_action_schema import FINAL_COLUMNS, SERVICE_START_DATE, classify_rows, dedup_rows
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 # Bronze와 워터마크 키가 겹치면 안 되므로 Silver 전용 키를 쓴다
-WATERMARK_KEY = SILVER_BIKE_MAN_ACTION
+WATERMARK_KEY = SILVER_BIKEMAN_ACTION
 
 # Bronze의 3일 lookback을 그대로 따라간다 (Bronze의 정정이 Silver까지 전파되도록)
 LOOKBACK_DAYS = 3
@@ -55,11 +55,11 @@ def _bronze_table_name() -> str:
 
 
 def _silver_table_name() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.silver.bike_man_action"
+    return f"{config.SETTINGS.iceberg_catalog_name}.silver.bikeman_action"
 
 
 def _quarantine_table_name() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.silver.bike_man_action_quarantine"
+    return f"{config.SETTINGS.iceberg_catalog_name}.silver.bikeman_action_quarantine"
 
 
 def _ensure_silver_tables(spark) -> None:
@@ -151,7 +151,7 @@ def _process_one_day(spark, target_date: date) -> tuple[int, bool]:
     # 최종 Silver select에서 FINAL_COLUMNS로 좁힌다.
     valid_df = spark.createDataFrame(valid_rows).withColumn("ingested_at", F.current_timestamp())
 
-    passed = verify_bike_man_action(spark, valid_df, dataset="bike_man_action", occurred_date=date_str)
+    passed = verify_bikeman_action(spark, valid_df, dataset="bikeman_action", occurred_date=date_str)
     if not passed:
         # 안전하게 실패: 이 배치는 Silver에 쓰지 않는다. Bronze는 이미 안전하게
         # 보존돼 있으므로 데이터 손실은 없고, 원인 파악 후 재실행하면 된다.
@@ -214,7 +214,7 @@ def run() -> None:
                 sys.exit(1)
             current += timedelta(days=1)
     finally:
-        # verify_bike_man_action()가 PyDeequ VerificationSuite를 돌리면서 연 py4j
+        # verify_bikeman_action()가 PyDeequ VerificationSuite를 돌리면서 연 py4j
         # 콜백 서버(non-daemon 스레드)를 안 내리면 run()이 정상 반환돼도 프로세스가
         # 안 끝난다 - transform_silver_rental_history.py에서 실측된 것과 동일한 문제
         # (common/spark_session.py의 stop_spark_session_with_deequ 참고).

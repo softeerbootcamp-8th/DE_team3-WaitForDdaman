@@ -1,12 +1,12 @@
 """
 Gold - 대여소별 자전거 재고 (gold.bike_location + gold.station_active +
-silver.bike_man_action -> gold.fact_station_inventory)
+silver.bikeman_action -> gold.fact_station_inventory)
 
 ### 최종 위치 결정 규칙
 자전거의 "진짜 현재 위치"는 대여이력 기준 위치(gold.bike_location)와 수거/배치
-이벤트(silver.bike_man_action) 중 시각이 더 최신인 쪽을 따른다.
+이벤트(silver.bikeman_action) 중 시각이 더 최신인 쪽을 따른다.
 
-    1. bike_man_action에 해당 자전거 이벤트가 아예 없거나, 있어도
+    1. bikeman_action에 해당 자전거 이벤트가 아예 없거나, 있어도
        bike_location.last_event_at보다 오래됐다 -> bike_location 그대로 사용
     2. 가장 최신 이벤트가 COLLECT(수거)다 -> 필드에서 제거된 상태이므로
        재고 집계에서 제외 (어느 대여소에도 속하지 않음)
@@ -30,7 +30,7 @@ gold.station_active(운영 중인 대여소만)를 기준으로 대여소별 자
 최대 1행) 셔플 조인보다 확실히 저렴하다.
 
 ### gold.bike_last_action - 증분 유지되는 "자전거별 최신 수거/배치 이벤트"
-silver.bike_man_action은 매일 계속 쌓이는 이벤트 로그라, 매번 전체를 훑어서
+silver.bikeman_action은 매일 계속 쌓이는 이벤트 로그라, 매번 전체를 훑어서
 자전거별 최신 이벤트를 찾으면(예전 방식) 데이터가 쌓일수록 느려진다.
 gold.bike_location과 동일한 baseline+delta 패턴으로 증분 유지한다. 이 상태
 테이블도 "자전거 수만큼"으로 크기가 고정되므로 이후 join/집계 비용은
@@ -39,13 +39,13 @@ gold.bike_location과 동일한 baseline+delta 패턴으로 증분 유지한다.
 ### 델타 구간을 "어제 하루"로 고정하지 않고 자기 자신의 snapshot_date로 추적하는 이유
 gold.bike_location과 동일한 이유(자세한 설명은 build_bike_location.py 참고) -
 어제 하루로 고정하면 dag_gold_dim_fact가 하루라도 실행을 건너뛴 사이의
-bike_man_action 이벤트는 어떤 미래 실행에서도 다시는 스캔되지 않아 조용히
+bikeman_action 이벤트는 어떤 미래 실행에서도 다시는 스캔되지 않아 조용히
 유실된다. gold.bike_last_action 자신의 snapshot_date(MAX)를 워터마크로 재사용해서
 [직전 snapshot_date, 이번 snapshot_date - 1] 구간을 스캔한다 - 평소엔 하루뿐이라
 성능은 동일하고, 실행이 밀렸을 때만 구간이 넓어져 스스로 복구된다.
 
 occurred_at 비교는 `to_date(occurred_at) == 날짜` 대신 타임스탬프 범위
-(`occurred_at >= 시작 AND occurred_at < 끝+1일`)로 건다 - silver.bike_man_action은
+(`occurred_at >= 시작 AND occurred_at < 끝+1일`)로 건다 - silver.bikeman_action은
 Iceberg hidden partitioning(`days(occurred_at)`)을 쓰므로, 파생 표현식이 아니라
 원본 컬럼에 대한 범위 비교여야 파티션 프루닝이 확실히 걸린다.
 
@@ -86,8 +86,8 @@ def _station_active_table() -> str:
     return f"{config.SETTINGS.iceberg_catalog_name}.gold.station_active"
 
 
-def _bike_man_action_table() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.silver.bike_man_action"
+def _bikeman_action_table() -> str:
+    return f"{config.SETTINGS.iceberg_catalog_name}.silver.bikeman_action"
 
 
 def _bike_last_action_table() -> str:
@@ -139,26 +139,26 @@ def _bike_last_action_baseline(spark):
 
 def _bike_last_action_baseline_snapshot_date(spark) -> date | None:
     """gold.bike_last_action에 남아있는 MAX(snapshot_date) - 그 값보다 이전
-    bike_man_action 이벤트는 이미 baseline에 반영되어 있으므로, 이번 실행의
+    bikeman_action 이벤트는 이미 baseline에 반영되어 있으므로, 이번 실행의
     델타 시작일로 그대로 쓸 수 있다. 테이블이 비어있으면(cold start) None."""
     return spark.read.table(_bike_last_action_table()).agg(F.max("snapshot_date")).collect()[0][0]
 
 
 def _bike_last_action_delta(spark, start_date: date | None, end_date: date):
-    """bike_man_action에서 아직 baseline에 반영 안 된 구간 [start_date, end_date]만
+    """bikeman_action에서 아직 baseline에 반영 안 된 구간 [start_date, end_date]만
     스캔해서 자전거별 최신 이벤트 1건만 채택한다. start_date가 None이면(cold start)
     하한 없이 end_date까지 전체를 스캔한다."""
     end_exclusive = datetime.combine(end_date + timedelta(days=1), time.min)
-    bike_man_action_df = spark.read.table(_bike_man_action_table()).filter(
+    bikeman_action_df = spark.read.table(_bikeman_action_table()).filter(
         F.col("occurred_at") < F.lit(end_exclusive)
     )
     if start_date is not None:
         start_inclusive = datetime.combine(start_date, time.min)
-        bike_man_action_df = bike_man_action_df.filter(F.col("occurred_at") >= F.lit(start_inclusive))
+        bikeman_action_df = bikeman_action_df.filter(F.col("occurred_at") >= F.lit(start_inclusive))
 
     window = Window.partitionBy("bike_id").orderBy(F.col("occurred_at").desc())
     return (
-        bike_man_action_df.withColumn("_rn", F.row_number().over(window))
+        bikeman_action_df.withColumn("_rn", F.row_number().over(window))
         .filter(F.col("_rn") == 1)
         .select(
             "bike_id",
@@ -274,13 +274,13 @@ def build_fact_station_inventory(spark, snapshot_date: date, latest_action):
 
 
 def _validate_bike_last_action(spark, df) -> None:
-    # bike_man_action(수거/배치) 이벤트가 아직 하나도 없는 환경(신규 배포 직후 등)에서는
+    # bikeman_action(수거/배치) 이벤트가 아직 하나도 없는 환경(신규 배포 직후 등)에서는
     # 이 결과가 통째로 0행일 수 있다 - 정상 상태다. PyDeequ의 hasUniqueness/isComplete는
     # 빈 데이터셋에서 "값이 전부 NULL이었다"는 의미로 실패 처리해버리므로(실측으로 확인),
     # 빈 경우엔 검증 자체를 스킵한다 - 안 그러면 실제로는 문제 없는 정상 배치가
     # 이벤트 데이터가 아직 없다는 이유만으로 계속 막히게 된다.
     if df.isEmpty():
-        logger.info("gold.bike_last_action 결과가 비어있음(bike_man_action 이벤트 없음) - PyDeequ 검증 스킵")
+        logger.info("gold.bike_last_action 결과가 비어있음(bikeman_action 이벤트 없음) - PyDeequ 검증 스킵")
         return
 
     from pydeequ.checks import Check, CheckLevel
