@@ -109,12 +109,12 @@ docker compose -f docker-compose.local.yml config --quiet
 
 Airflow UI에서 DAG를 unpause한 뒤 실행한다.
 
-### Bronze 백필
+### Bronze 초기 적재
 
 DAG ID:
 
 ```text
-bronze_backfill_all_sources
+bronze_initial_load_all_sources
 ```
 
 실행 용도:
@@ -239,11 +239,11 @@ export $(grep -v '^#' .env | xargs)
 export PYTHONPATH=..:$PYTHONPATH  # ingestion/staging/pipeline이 공유하는 최상위 config/ 패키지를 찾기 위함
 ```
 
-백필:
+초기 적재 (각 디렉터리에 파일이 없으면 열린데이터광장에서 자동으로 받는다):
 
 ```bash
-INPUT_DIR=./data/rental_history python -m jobs.backfill_rental_history
-INPUT_DIR=./data/failure_report python -m jobs.backfill_failure_report
+INPUT_DIR=./data/rental_history python -m jobs.initial_load_rental_history
+INPUT_DIR=./data/failure_report python -m jobs.initial_load_failure_report
 INPUT_DIR=./data/station_master python -m jobs.backfill_station_master
 ```
 

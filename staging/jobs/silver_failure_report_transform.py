@@ -3,8 +3,8 @@ Silver transform - bronze.failure_report 원본 전체를 확정 스키마로 �
 staging 테이블(silver.failure_report_staging)에 적재한다.
 
 - reg_dttm: STRING -> TIMESTAMP. 원본 포맷이 'yyyy-MM-dd HH:mm:ss'(19자, 2026-01~06
-  API 수집분 실측 100%)와 'yyyyMMdd'(일부 backfill 파일, ingestion/jobs/
-  backfill_failure_report.py:_derive_date_partition 주석 참고) 둘 다 나타날 수
+  API 수집분 실측 100%)와 'yyyyMMdd'(일부 초기 적재 파일, ingestion/jobs/
+  initial_load_failure_report.py:_derive_date_partition 주석 참고) 둘 다 나타날 수
   있어 순서대로 시도한다.
 - failure_type: 뒤쪽 공백 제거(trim) - bronze CSV 파서가 ignoreTrailingWhiteSpace=false라
   '기타 ', '타이어 ' 같은 원본 공백이 그대로 살아있다.

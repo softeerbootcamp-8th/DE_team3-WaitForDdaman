@@ -29,7 +29,7 @@ INSERT OVERWRITE로 교체한다 (catchup=False, 날짜 구간 파라미터 없�
 ### 태스크 순서를 절대 바꾸지 않는다
 check(원천 완결성) -> transform -> validate(변환 결과 품질) -> overwrite -> metrics.
 check와 validate가 실버를 지키는 유일한 방어선이다. 특히 check: 브론즈 적재
-(ingestion/jobs/backfill_failure_report.py)가 파일 단위로 개별 커밋되고 배치
+(ingestion/jobs/initial_load_failure_report.py)가 파일 단위로 개별 커밋되고 배치
 전체를 감싸는 트랜잭션이 없어서, 배치 도중 실패하면 브론즈가 부분 적재 상태로
 남을 수 있다. 이 상태로 그대로 재처리하면 INSERT OVERWRITE가 멀쩡하던 실버를
 부분 데이터로 통째로 교체해버리므로, check가 브론즈 현재 행수를 직전 실버 행수와

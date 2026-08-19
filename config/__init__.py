@@ -46,6 +46,11 @@ class Settings:
     api_page_size: int = int(os.getenv("API_PAGE_SIZE", "1000"))  # 1회 최대 추정치
 
     # ---- 서울 열린데이터광장 파일 다운로드 (백필용, 반기/월별 CSV·XLSX) ----
+    # 실제 다운로드 URL(nio_download.do)에는 seq(파일별 내부 일련번호)가 필요한데
+    # 파일명에서 계산할 수 없다. seoul_data_list_base_url의 목록 페이지를 먼저 긁어서
+    # {파일명: seq}를 알아낸 뒤에만 seoul_data_file_base_url로 실제 다운로드가 가능하다
+    # (common/file_downloader.py 참고, 실측 확인 2026-08-19).
+    seoul_data_list_base_url: str = os.getenv("SEOUL_DATA_LIST_BASE_URL", "https://data.seoul.go.kr/dataList")
     seoul_data_file_base_url: str = os.getenv(
         "SEOUL_DATA_FILE_BASE_URL", "https://datafile.seoul.go.kr/bigfile/iot/inf/nio_download.do"
     )

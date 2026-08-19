@@ -1,8 +1,9 @@
 """
-Bronze 백필 잡 - 서울시 공공자전거 고장신고 내역 (OA-15644)
+Bronze 초기 적재 잡 - 서울시 공공자전거 고장신고 내역 (OA-15644)
 
-실행 방식: 열린데이터광장에서 반기별로 "대량 다운로드"한 원본 파일들을
-로컬 디렉토리(INPUT_DIR)에 모아두고 1회 실행한다.
+실행 방식: INPUT_DIR에 INPUT_FILE_PATTERN에 맞는 파일이 없으면 열린데이터광장에서
+자동으로 받는다 (common/file_downloader.py 참고). 이미 받아둔 파일이 있으면
+재다운로드하지 않고 그대로 쓴다.
 
 주의: 가장 오래된 파일(2015_2020.10)은 .xlsx 형식이고, 나머지는 .csv(일부는
 확장자만 .csv인 zip)다. 둘 다 이 잡에서 자동으로 처리한다.
@@ -11,8 +12,8 @@ Bronze 백필 잡 - 서울시 공공자전거 고장신고 내역 (OA-15644)
 안전한 실패: 파일 하나가 스키마 검증에 실패해도 전체 배치를 죽이지 않고 스킵한다.
 
 사용법:
-    INPUT_DIR=./raw_downloads python -m jobs.backfill_failure_report
-    INPUT_DIR=./raw_downloads INPUT_FILE_PATTERN="*2601*" python -m jobs.backfill_failure_report
+    INPUT_DIR=./raw_downloads python -m jobs.initial_load_failure_report
+    INPUT_DIR=./raw_downloads INPUT_FILE_PATTERN="*2601*" python -m jobs.initial_load_failure_report
 """
 import logging
 import os
@@ -25,6 +26,7 @@ from pyspark.sql import functions as F
 
 import config
 from common.encoding_utils import convert_euckr_file_to_utf8
+from common.file_downloader import ensure_backfill_files
 from common.file_utils import NotThisDatasetError, convert_xlsx_to_utf8_csv, is_xlsx, unzip_if_needed
 from common.s3_utils import ensure_bucket, upload_file
 from common.spark_session import build_spark_session
@@ -127,6 +129,7 @@ def run(input_dir: str) -> None:
     _ensure_bronze_table(spark)
 
     file_pattern = os.getenv("INPUT_FILE_PATTERN", "*")
+    ensure_backfill_files(config.SETTINGS.seoul_dataset_id_breakdown_report, Path(input_dir), file_pattern)
     input_files = sorted(Path(input_dir).glob(file_pattern))
     if not input_files:
         logger.error("입력 디렉토리에 파일이 없습니다: %s (패턴: %s)", input_dir, file_pattern)

@@ -44,7 +44,7 @@ bikeman만 lookback이 있는 이유: 오프라인 작업 후 몰아서 제출�
 3일치를 다시 계산해 overwritePartitions로 덮어쓰므로 DAG 레벨에서는 신경 쓸 게 없다.
 
 ### 최초 실행 전 필수 절차
-- 대여이력/고장신고: 백필 DAG(bronze_backfill_all_sources)가 백필 성공 직후 워터마크를 찍는다
+- 대여이력/고장신고: 초기 적재 DAG(bronze_initial_load_all_sources)가 성공 직후 워터마크를 찍는다
 - bikeman_event: 파일 백필이 없으므로 set_watermark DAG로 서비스 시작 전날을 1회 찍는다
       dataset=bikeman_event, watermark_date=2026-06-29
 - 대여소정보: 워터마크 자체가 없다 (증분 기준이 될 컬럼이 없음)

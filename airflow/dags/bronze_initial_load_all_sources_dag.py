@@ -1,17 +1,19 @@
 """
-Bronze 백필 DAG (2개 원천) - 1회성, 수동 트리거
+Bronze 초기 적재(initial load) DAG (2개 원천) - 1회성, 수동 트리거
 
-대여이력 / 고장신고 두 원천의 파일 기반 백필을 한 DAG에서 실행한다.
+대여이력 / 고장신고 두 원천의 파일 기반 초기 적재를 한 DAG에서 실행한다. 각 소스
+디렉터리에 파일이 없으면 열린데이터광장에서 자동으로 받는다(common/file_downloader.py,
+jobs/initial_load_*.py 참고) - 사람이 미리 내려받아 둘 필요가 없다.
 
 ### 대여소정보(station_master)가 여기 없는 이유
-이 원천은 파일 백필 대상이 아니다. tbCycleStationInfo는 날짜 파라미터를 받지 않고
-호출 시점의 전체 스냅샷만 주므로 과거를 소급 적재할 수 없고, 반기 파일에는 골드
+이 원천은 파일 기반 초기 적재 대상이 아니다. tbCycleStationInfo는 날짜 파라미터를 받지
+않고 호출 시점의 전체 스냅샷만 주므로 과거를 소급 적재할 수 없고, 반기 파일에는 골드
 조인 키인 station_id가 없다 (jobs/daily_batch_station_master.py 참고).
 대여소정보 적재는 bronze_daily_batch_all_sources DAG가 매일 스냅샷으로 담당한다.
 
 ### 태스크 의존성 설계
-대여이력과 고장신고는 서로 의존관계가 없어서 병렬로 둔다. 각 소스는 백필 성공 직후
-자기 워터마크를 찍는다.
+대여이력과 고장신고는 서로 의존관계가 없어서 병렬로 둔다. 각 소스는 초기 적재 성공
+직후 자기 워터마크를 찍는다.
 
     rental_history ─┬─> set_watermark_rental_history
                      └─> bootstrap_silver_watermark_rental_history
@@ -19,13 +21,13 @@ Bronze 백필 DAG (2개 원천) - 1회성, 수동 트리거
 
 ### 왜 워터마크 태스크가 DAG 안에 있는가
 워터마크가 없으면 daily_batch가 .env의 BACKFILL_START_DATE(기본 2015-01-01)부터 API로
-다시 긁는다. 파일로 방금 채운 기간을 중복 처리하게 되므로, 백필과 워터마크는 한 DAG에서
-이어져야 한다. 별도 set_watermark DAG를 손으로 트리거하는 방식은 빠뜨리기 쉽다.
+다시 긁는다. 파일로 방금 채운 기간을 중복 처리하게 되므로, 초기 적재와 워터마크는 한
+DAG에서 이어져야 한다. 별도 set_watermark DAG를 손으로 트리거하는 방식은 빠뜨리기 쉽다.
 
 업스트림 성공에만 걸어두는 게 중요하다. 워터마크는 "성공적으로 커밋된 마지막 날짜"만
 기록해야 하고 부분 실패 시 갱신하면 데이터 누락이 생긴다 (common/watermark.py 참고).
 
-⚠️ *_pattern으로 백필 범위를 좁히면 *_watermark_date도 그 범위의 마지막 날짜로 같이
+⚠️ *_pattern으로 적재 범위를 좁히면 *_watermark_date도 그 범위의 마지막 날짜로 같이
    바꿔야 한다. 안 그러면 실제로 적재하지 않은 기간을 처리 완료로 표시한다.
 
 ### 왜 병렬을 2개로 제한하는가
@@ -33,11 +35,11 @@ Bronze 백필 DAG (2개 원천) - 1회성, 수동 트리거
 "read of closed file" 레이스 컨디션이 발생하는 게 실측으로 확인됐다. 각 잡이 이미
 내부적으로 로컬 병렬도를 제한하고 있으므로, DAG 레벨에서도 동시 실행을 제한한다.
 
-max_active_tasks=2는 이 DAG 안에서만 유효하다. 백필은 몇 시간짜리라 도중에 일 배치
+max_active_tasks=2는 이 DAG 안에서만 유효하다. 초기 적재는 몇 시간짜리라 도중에 일 배치
 스케줄(06:00)과 겹치는 게 정상 케이스인데, DAG 단위 제한은 서로를 알지 못한다.
-그래서 Spark를 쓰는 두 백필 태스크는 일 배치와 같은 BRONZE_POOL에 넣어 전역으로 묶는다.
-워터마크 태스크는 S3에 JSON 한 개만 쓰고 Spark를 안 띄우므로 풀에서 제외한다
-(슬롯을 잡으면 정작 백필이 밀린다).
+그래서 Spark를 쓰는 두 초기 적재 태스크는 일 배치와 같은 BRONZE_POOL에 넣어 전역으로
+묶는다. 워터마크 태스크는 S3에 JSON 한 개만 쓰고 Spark를 안 띄우므로 풀에서 제외한다
+(슬롯을 잡으면 정작 초기 적재가 밀린다).
 
 ### 실행 방법
 Airflow UI에서 "Trigger DAG w/ config"로 각 소스의 input_dir / 파일 패턴을 조정할 수 있다.
@@ -51,7 +53,7 @@ from airflow.sdk import dag
 
 from dag_common import BRONZE_POOL, INGESTION_DIR, bash_job
 
-# 일 배치의 DEFAULT_ARGS를 그대로 쓰지 않는다. 백필은 수동 1회성이라 사람이 붙어서
+# 일 배치의 DEFAULT_ARGS를 그대로 쓰지 않는다. 초기 적재는 수동 1회성이라 사람이 붙어서
 # 보고 있고, 실패하면 빨리 알고 원인을 봐야 한다. 일 배치처럼 길게 백오프하면
 # 손으로 트리거해놓고 30분씩 기다리게 된다.
 default_args = {
@@ -63,14 +65,14 @@ default_args = {
 
 
 @dag(
-    dag_id="bronze_backfill_all_sources",
-    schedule=None,  # 백필은 반복 실행이 아니라 필요할 때 한 번 트리거하는 작업
+    dag_id="bronze_initial_load_all_sources",
+    schedule=None,  # 초기 적재는 반복 실행이 아니라 필요할 때 한 번 트리거하는 작업
     start_date=pendulum.datetime(2026, 1, 1, tz="Asia/Seoul"),
     catchup=False,
     max_active_runs=1,
     max_active_tasks=2,  # 로컬 LocalStack 동시 쓰기 부하 제한
     default_args=default_args,
-    tags=["backfill", "bronze", "all_sources"],
+    tags=["initial_load", "bronze", "all_sources"],
     params={
         "rental_history_dir": f"{INGESTION_DIR}/data/rental_history",
         "rental_history_pattern": "*",
@@ -81,12 +83,12 @@ default_args = {
     },
     doc_md=__doc__,
 )
-def bronze_backfill_all_sources():
+def bronze_initial_load_all_sources():
     # 대여이력: 반기 파일이 최대 700MB대라 가장 오래 걸림
     rental_history = BashOperator(
-        task_id="backfill_rental_history",
+        task_id="initial_load_rental_history",
         bash_command=bash_job(
-            "backfill_rental_history",
+            "initial_load_rental_history",
             "INPUT_DIR='{{ params.rental_history_dir }}' "
             "INPUT_FILE_PATTERN='{{ params.rental_history_pattern }}' ",
         ),
@@ -96,9 +98,9 @@ def bronze_backfill_all_sources():
 
     # 고장신고: zip/csv/xlsx 혼합 입력, 볼륨은 작음
     failure_report = BashOperator(
-        task_id="backfill_failure_report",
+        task_id="initial_load_failure_report",
         bash_command=bash_job(
-            "backfill_failure_report",
+            "initial_load_failure_report",
             "INPUT_DIR='{{ params.failure_report_dir }}' "
             "INPUT_FILE_PATTERN='{{ params.failure_report_pattern }}' ",
         ),
@@ -106,7 +108,7 @@ def bronze_backfill_all_sources():
         pool=BRONZE_POOL,
     )
 
-    # 워터마크는 해당 소스의 백필이 성공했을 때만 찍힌다 (재시도 소진 후 실패면 안 찍힘).
+    # 워터마크는 해당 소스의 초기 적재가 성공했을 때만 찍힌다 (재시도 소진 후 실패면 안 찍힘).
     set_watermark_rental_history = BashOperator(
         task_id="set_watermark_rental_history",
         bash_command=bash_job(
@@ -149,4 +151,4 @@ def bronze_backfill_all_sources():
     failure_report >> set_watermark_failure_report
 
 
-bronze_backfill_all_sources()
+bronze_initial_load_all_sources()

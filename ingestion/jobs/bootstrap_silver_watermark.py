@@ -1,17 +1,17 @@
 """
-Silver 워터마크 부트스트랩 - Bronze 백필이 커버한 실제 범위에서 자동으로 계산한다.
+Silver 워터마크 부트스트랩 - Bronze 초기 적재가 커버한 실제 범위에서 자동으로 계산한다.
 
 왜 필요한가: transform_silver_rental_history.py는 자체 SILVER_RENTAL_HISTORY 워터마크로
 "어디까지 처리했는지"를 관리한다. 이 워터마크가 없으면 config.BACKFILL_START_DATE(기본
-2015-01-01)부터 시작하려 드는데, 실제 Bronze 데이터는 파일 백필이 커버하는 기간(예:
+2015-01-01)부터 시작하려 드는데, 실제 Bronze 데이터는 초기 적재가 커버하는 기간(예:
 2026-06-01~)부터만 존재한다. 그 갭만큼 Silver가 존재하지도 않는 날짜를 헛되이 훑는다.
 
 이 잡은 Bronze 테이블의 실제 MIN(partition)을 직접 읽어서 그 전날을 Silver 워터마크로
 찍는다 - 사람이 날짜를 눈으로 세어 set_watermark.py에 넘기던 걸 없앤다.
 
-⚠️ 반드시 백필 직후 1회만 실행해야 한다. daily_batch처럼 매일 도는 잡에 넣으면 안 된다 -
+⚠️ 반드시 초기 적재 직후 1회만 실행해야 한다. daily_batch처럼 매일 도는 잡에 넣으면 안 된다 -
 그러면 정상 진행 중인 워터마크를 매번 (bronze MIN - 1일)로 되돌려버린다.
-bronze_backfill_all_sources_dag.py에서만 태스크로 연결한다.
+bronze_initial_load_all_sources_dag.py에서만 태스크로 연결한다.
 
 사용법:
     DATASET=rental_history python -m jobs.bootstrap_silver_watermark

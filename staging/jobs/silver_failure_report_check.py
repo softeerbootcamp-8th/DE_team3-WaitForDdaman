@@ -2,7 +2,7 @@
 Silver check - 전체 재처리 전, 브론즈가 부분 적재 상태가 아닌지 확인한다.
 
 단일 DAG(매일 브론즈 전체 재처리 + INSERT OVERWRITE)에서는 이 검증이 실버를 지키는
-첫 번째 방어선이다(두 번째는 validate). ingestion/jobs/backfill_failure_report.py의
+첫 번째 방어선이다(두 번째는 validate). ingestion/jobs/initial_load_failure_report.py의
 브론즈 적재는 파일 단위로 개별 커밋되고 배치 전체를 감싸는 트랜잭션이 없어서, 배치
 도중 실패하면 브론즈가 부분 적재 상태로 남을 수 있다. 이 상태로 그대로 재처리하면
 INSERT OVERWRITE가 멀쩡하던 실버를 부분 데이터로 통째로 교체해버린다(신규 키만
