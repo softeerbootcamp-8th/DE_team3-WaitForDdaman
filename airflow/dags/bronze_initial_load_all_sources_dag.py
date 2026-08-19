@@ -15,9 +15,20 @@ jobs/initial_load_*.py 참고) - 사람이 미리 내려받아 둘 필요가 없
 대여이력과 고장신고는 서로 의존관계가 없어서 병렬로 둔다. 각 소스는 초기 적재 성공
 직후 자기 워터마크를 찍는다.
 
-    rental_history ─┬─> set_watermark_rental_history
+    rental_history ─┬─> set_bronze_ingestion_watermark_rental_history
                      └─> bootstrap_silver_watermark_rental_history
-    failure_report ──> set_watermark_failure_report
+    failure_report ──> set_bronze_ingestion_watermark_failure_report
+
+### 왜 set_*과 bootstrap_*으로 동사가 다른가
+값을 "어떻게 얻는지"가 다르다. set_bronze_ingestion_watermark_*는 사람이 지정한
+고정 날짜(*_watermark_date 파라미터)를 그대로 기록해서, daily_batch(Bronze API 수집)가
+그 다음날부터 이어받게 한다. bootstrap_silver_watermark_rental_history는 입력 날짜가
+없고 Bronze 테이블의 실제 MIN(partition)을 직접 쿼리해서 Silver 처리 시작점을 자동으로
+계산한다 - 이름이 다른 이유를 유지해야 "이거 날짜를 내가 넣어줘야 하나?"를 task_id만
+보고 구분할 수 있다. task_id는 실행하는 jobs/<모듈명>.py와 최대한 맞춘다
+(set_bronze_ingestion_watermark_* -> jobs/set_watermark.py, bootstrap_silver_watermark_*
+-> jobs/bootstrap_silver_watermark.py) - 로그에서 실패를 봤을 때 바로 어떤 파일을
+찾아야 하는지 알 수 있게 하기 위함.
 
 ### 왜 워터마크 태스크가 DAG 안에 있는가
 워터마크가 없으면 daily_batch가 .env의 BACKFILL_START_DATE(기본 2015-01-01)부터 API로
@@ -109,8 +120,9 @@ def bronze_initial_load_all_sources():
     )
 
     # 워터마크는 해당 소스의 초기 적재가 성공했을 때만 찍힌다 (재시도 소진 후 실패면 안 찍힘).
-    set_watermark_rental_history = BashOperator(
-        task_id="set_watermark_rental_history",
+    # Bronze의 다음 API 수집(daily_batch)이 이어받을 지점 - 값은 *_watermark_date 파라미터를 그대로 기록.
+    set_bronze_ingestion_watermark_rental_history = BashOperator(
+        task_id="set_bronze_ingestion_watermark_rental_history",
         bash_command=bash_job(
             "set_watermark",
             "DATASET=rental_history "
@@ -120,8 +132,8 @@ def bronze_initial_load_all_sources():
         execution_timeout=timedelta(minutes=5),
     )
 
-    set_watermark_failure_report = BashOperator(
-        task_id="set_watermark_failure_report",
+    set_bronze_ingestion_watermark_failure_report = BashOperator(
+        task_id="set_bronze_ingestion_watermark_failure_report",
         bash_command=bash_job(
             "set_watermark",
             "DATASET=failure_report "
@@ -134,8 +146,8 @@ def bronze_initial_load_all_sources():
     # Silver 워터마크 부트스트랩 (#76) - Bronze rental_history의 실제 MIN(partition)을
     # 직접 읽어서 자동 계산한다 (사람이 날짜를 세어 넘길 필요 없음). failure_report는
     # silver 쪽이 워터마크 자체가 없는 구조라(매번 전체 재처리) 대상이 아니다.
-    # Spark로 테이블을 읽으므로 BRONZE_POOL에 넣는다 (set_watermark_*와 달리 JSON 한
-    # 개만 쓰는 게 아니라 Iceberg 테이블을 직접 조회한다).
+    # Spark로 테이블을 읽으므로 BRONZE_POOL에 넣는다 (set_bronze_ingestion_watermark_*와
+    # 달리 JSON 한 개만 쓰는 게 아니라 Iceberg 테이블을 직접 조회한다).
     bootstrap_silver_watermark_rental_history = BashOperator(
         task_id="bootstrap_silver_watermark_rental_history",
         bash_command=bash_job("bootstrap_silver_watermark", "DATASET=rental_history "),
@@ -146,9 +158,9 @@ def bronze_initial_load_all_sources():
 
     # 두 소스 사이에는 의존관계를 걸지 않는다. 서로 참조하지 않는 원천이고,
     # 동시 실행 부하는 max_active_tasks=2가 제한한다.
-    rental_history >> set_watermark_rental_history
+    rental_history >> set_bronze_ingestion_watermark_rental_history
     rental_history >> bootstrap_silver_watermark_rental_history
-    failure_report >> set_watermark_failure_report
+    failure_report >> set_bronze_ingestion_watermark_failure_report
 
 
 bronze_initial_load_all_sources()
