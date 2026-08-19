@@ -26,7 +26,7 @@
 
 ## Airflow
 
-- DAG: `dag_risk_decision` (`airflow/dags/dag_risk_decision.py`)
+- DAG: `dag_risk_decision` (`airflow/dags/gold_risk_decision_dag.py`)
   - `dag_gold_dim_fact` 완료 대기(`ExternalTaskSensor`) -> cold start 분기 -> `run_risk_scoring_model`(=`build_fact_bike_risk.py`) -> `build_fact_bike_decision`
   - `build_bike_features_daily`는 Silver만 있으면 되므로 `dag_gold_dim_fact` 대기와 무관하게 병렬로 실행, `run_risk_scoring_model` 직전에 합류
   - cold start 분기(`skip_filter_first_run`/`apply_lagged_filter`)는 실제로는 같은 필터 로직을 부른다 - `bike_man_action` 기반 필터가 이력 없는 최초 실행일에도 자연히 아무도 안 걸러서 별도 분기가 필요 없기 때문

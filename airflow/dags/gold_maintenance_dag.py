@@ -32,7 +32,7 @@ default_args = {
 
 def _compact_bash() -> str:
     # collection_priority 잡은 자체 common 패키지가 없다 -
-    # ingestion/common(config, spark_session 등)을 그대로 재사용한다 (dag_gold_dim_fact.py와 동일 패턴).
+    # ingestion/common(config, spark_session 등)을 그대로 재사용한다 (gold_dim_fact_dag.py와 동일 패턴).
     return (
         f"cd {COLLECTION_PRIORITY_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
         f"PYTHONPATH={INGESTION_DIR}:$PYTHONPATH PYTHONDONTWRITEBYTECODE=1 "

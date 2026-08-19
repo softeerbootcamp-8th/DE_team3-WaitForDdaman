@@ -49,7 +49,7 @@ silver.bike_man_action ─────────> gold.bike_last_action ──
 
 ## Airflow
 
-- DAG: `dag_gold_dim_fact` (`airflow/dags/dag_gold_dim_fact.py`)
+- DAG: `dag_gold_dim_fact` (`airflow/dags/gold_dim_fact_dag.py`)
   - `wait_for_silver_rental_history` -> `build_dim_bike` / `build_bike_location`
   - `wait_for_silver_station_master` + `wait_for_silver_station_active` -> `build_station_active`
   - `build_bike_location` + `build_station_active` + `wait_for_silver_bike_man_action` -> `build_fact_station_inventory`
@@ -110,7 +110,7 @@ Iceberg 테이블을 읽는 부분(`_baseline`/`_delta`/`_latest_snapshot` 등)�
 - `jobs/compact_gold_tables.py`: 위 4개 테이블에 대해 `expire_snapshots`(7일보다 오래된
   스냅샷 만료, 단 최소 3개는 나이와 무관하게 항상 보존 - 롤백 여지)를 먼저 돌리고
   `rewrite_data_files`를 그 뒤에 돌린다. 테이블이 아직 없으면 조용히 건너뛴다.
-- DAG: `dag_gold_maintenance` (`airflow/dags/dag_gold_maintenance.py`) - 매주 일요일
+- DAG: `dag_gold_maintenance` (`airflow/dags/gold_maintenance_dag.py`) - 매주 일요일
   03:00 KST. daily 배치(`dag_gold_dim_fact`, 08:00 KST)와 분리한 이유는 파일/스냅샷이
   하루에 1개씩만 늘어나 매일 돌릴 필요가 없고, 유지보수 실패가 daily 배치 SLA에
   영향을 주지 않게 하기 위함(자세한 설계는 두 파일의 docstring 참고).
