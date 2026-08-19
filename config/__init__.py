@@ -20,6 +20,20 @@ class Settings:
     # ---- 실행 환경 ----
     env: str = os.getenv("APP_ENV", "local")  # local | aws
 
+    # ---- Spark 로컬 실행 튜닝 여부 ----
+    # env(local/aws)와는 독립된 축이다. env는 "S3 엔드포인트/자격증명을 LocalStack용으로
+    # 쓰느냐"만 결정하고(spark_session.py 참고), 이 값은 "지금 이 프로세스가 자원이 작은
+    # 로컬 머신에서 도느냐"만 결정한다. Glue 권한이 없어 실 S3 + Hadoop Catalog를 쓰면서도
+    # 컨테이너는 여전히 로컬 macOS/CI 머신에서 도는 조합(APP_ENV=aws + 로컬 실행)이 실제로
+    # 있어서 분리했다 - 예전에는 env=="local"에 로컬 메모리 튜닝(local[2], driver 6g 등)까지
+    # 같이 묶여 있어서, 실 S3로 전환하면(APP_ENV=aws) 이 튜닝이 통째로 빠지고 반기 CSV
+    # (최대 700MB대) 처리 중 OOM이 재현됐다.
+    # 기본값은 APP_ENV=local이면 true, APP_ENV=aws면 false로 기존 동작과 동일하게 유지하되,
+    # SPARK_LOCAL_EXECUTION을 명시하면 env와 무관하게 강제로 켜고 끌 수 있다.
+    spark_local_execution: bool = os.getenv(
+        "SPARK_LOCAL_EXECUTION", "true" if os.getenv("APP_ENV", "local") == "local" else "false"
+    ).strip().lower() in ("1", "true", "yes")
+
     # ---- S3 / 객체 스토리지 ----
     # LocalStack 기본 포트는 4566. AWS에서는 이 값이 아예 안 쓰임(get_s3_client가 무시).
     s3_endpoint: str = os.getenv("S3_ENDPOINT", "http://localhost:4566")

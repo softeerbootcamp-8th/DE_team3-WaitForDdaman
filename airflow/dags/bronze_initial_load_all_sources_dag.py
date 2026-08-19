@@ -56,11 +56,12 @@ max_active_tasks=2는 이 DAG 안에서만 유효하다. 초기 적재는 몇 �
 Airflow UI에서 "Trigger DAG w/ config"로 각 소스의 input_dir / 파일 패턴을 조정할 수 있다.
 예) 로컬 검증 시 대여이력만 1개월치: rental_history_pattern = "*2601*"
 """
+import json
 from datetime import timedelta
 
 import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.sdk import dag
+from airflow.sdk import dag, task
 
 from dag_common import BRONZE_POOL, INGESTION_DIR, bash_job
 
@@ -95,28 +96,68 @@ default_args = {
     doc_md=__doc__,
 )
 def bronze_initial_load_all_sources():
-    # 대여이력: 반기 파일이 최대 700MB대라 가장 오래 걸림
-    rental_history = BashOperator(
-        task_id="initial_load_rental_history",
+    # 대여이력: 반기 파일이 최대 700MB대라, 폴더 전체를 세션 하나로 순회하면 임시 파일과
+    # 힙이 누적돼 OOM이 났다(#94). 그래서 "목록 나열(다운로드 포함) -> 파일별로 별도
+    # 프로세스(=새 JVM) 실행"으로 나눈다. list_input_files는 Spark를 안 띄우는 순수
+    # 다운로드+glob 작업이라 BRONZE_POOL에 넣지 않는다(워터마크 태스크와 동일한 이유).
+    list_rental_history_files = BashOperator(
+        task_id="list_rental_history_files",
         bash_command=bash_job(
-            "initial_load_rental_history",
+            "list_input_files",
+            "DATASET=rental_history "
             "INPUT_DIR='{{ params.rental_history_dir }}' "
             "INPUT_FILE_PATTERN='{{ params.rental_history_pattern }}' ",
         ),
-        execution_timeout=timedelta(hours=3),
-        pool=BRONZE_POOL,
+        do_xcom_push=True,
+        execution_timeout=timedelta(hours=1),  # 로컬에 캐시가 없으면 반기 파일 여러 개를 순차 다운로드
     )
 
-    # 고장신고: zip/csv/xlsx 혼합 입력, 볼륨은 작음
-    failure_report = BashOperator(
-        task_id="initial_load_failure_report",
+    @task(task_id="parse_rental_history_files")
+    def parse_rental_history_files(raw_json: str) -> list[str]:
+        return json.loads(raw_json)
+
+    rental_history_files = parse_rental_history_files(list_rental_history_files.output)
+
+    # 파일 개수만큼 태스크 인스턴스가 동적으로 생성된다(Dynamic Task Mapping) - 파일
+    # 하나 = spark-submit 프로세스 하나 = 새 JVM. 하나가 OOM으로 죽어도 그 인스턴스만
+    # 재시도되고 나머지 파일에는 영향이 없다.
+    rental_history = BashOperator.partial(
+        task_id="initial_load_rental_history_file",
+        execution_timeout=timedelta(minutes=30),  # 폴더 전체 기준(3시간) -> 파일 1개 기준으로 축소
+        pool=BRONZE_POOL,
+    ).expand(
+        bash_command=rental_history_files.map(
+            lambda f: bash_job("initial_load_rental_history", f"INPUT_FILE='{f}' ")
+        )
+    )
+
+    # 고장신고: zip/csv/xlsx 혼합 입력, 볼륨은 작지만 동일한 이유로 파일 단위로 나눈다.
+    list_failure_report_files = BashOperator(
+        task_id="list_failure_report_files",
         bash_command=bash_job(
-            "initial_load_failure_report",
+            "list_input_files",
+            "DATASET=failure_report "
             "INPUT_DIR='{{ params.failure_report_dir }}' "
             "INPUT_FILE_PATTERN='{{ params.failure_report_pattern }}' ",
         ),
-        execution_timeout=timedelta(hours=1),
+        do_xcom_push=True,
+        execution_timeout=timedelta(minutes=30),
+    )
+
+    @task(task_id="parse_failure_report_files")
+    def parse_failure_report_files(raw_json: str) -> list[str]:
+        return json.loads(raw_json)
+
+    failure_report_files = parse_failure_report_files(list_failure_report_files.output)
+
+    failure_report = BashOperator.partial(
+        task_id="initial_load_failure_report_file",
+        execution_timeout=timedelta(minutes=20),  # 폴더 전체 기준(1시간) -> 파일 1개 기준으로 축소
         pool=BRONZE_POOL,
+    ).expand(
+        bash_command=failure_report_files.map(
+            lambda f: bash_job("initial_load_failure_report", f"INPUT_FILE='{f}' ")
+        )
     )
 
     # 워터마크는 해당 소스의 초기 적재가 성공했을 때만 찍힌다 (재시도 소진 후 실패면 안 찍힘).

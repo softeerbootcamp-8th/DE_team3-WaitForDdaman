@@ -2,10 +2,22 @@
 Spark + Iceberg 세션 빌더
 
 로컬(LocalStack) / AWS 전환은 config.py의 환경변수로만 처리하고,
-이 모듈의 코드는 두 환경에서 동일하다.
+이 모듈의 코드는 두 환경에서 동일하다. 서로 독립된 두 축으로 나뉜다:
 
-    ICEBERG_CATALOG_TYPE=hadoop -> 로컬 개발 (LocalStack S3 기반 Hadoop Catalog)
-    ICEBERG_CATALOG_TYPE=glue   -> AWS 배포 (Glue Data Catalog)
+    ICEBERG_CATALOG_TYPE=hadoop -> Hadoop Catalog (S3/LocalStack 경로 기반, Glue 불필요)
+    ICEBERG_CATALOG_TYPE=glue   -> Glue Data Catalog
+
+    APP_ENV=local -> S3A 엔드포인트/자격증명을 LocalStack용으로 설정
+    APP_ENV=aws   -> S3A 엔드포인트/자격증명을 실 AWS 기본 체인에 맡김(IAM Role/STS 세션 토큰 포함)
+
+    SPARK_LOCAL_EXECUTION -> 이 프로세스가 자원이 작은 로컬 머신에서 도는지 (기본값은
+                             APP_ENV=local과 동일하되 독립적으로 켜고 끌 수 있음).
+                             local[N]/드라이버 메모리/셔플 파티션 수를 줄인다.
+
+Glue 권한이 없는 AWS 계정에서 실 S3에 Hadoop Catalog로 붙으면서도 컨테이너는 로컬
+머신에서 도는 조합(APP_ENV=aws + SPARK_LOCAL_EXECUTION=true)이 실제로 필요해서
+env와 spark_local_execution을 분리했다 - 합쳐져 있던 시절에는 실 S3로 전환하자마자
+로컬 메모리 튜닝이 통째로 빠지고 반기 CSV(최대 700MB대) 처리 중 OOM이 재현됐다.
 
 NOTE: spark.jars.packages로 지정한 Iceberg/Hadoop-AWS 패키지는 최초 실행 시
       Maven Central에서 다운로드된다 (인터넷 접속 필요, 이후에는 로컬 캐시 사용).
@@ -81,19 +93,29 @@ def build_spark_session(
             "spark.hadoop.fs.s3a.connection.ssl.enabled", "false"
         )
 
+    if settings.spark_local_execution:
+        # 이 블록은 "S3가 LocalStack이냐 실 AWS냐"와 무관하게, 지금 이 프로세스가 자원이
+        # 작은 로컬 머신(개발 노트북, 로컬 docker-compose 등)에서 도는지만 본다.
+        # Glue 권한이 없어 실 S3 + Hadoop Catalog(APP_ENV=aws)를 쓰면서도 컨테이너는 로컬
+        # 머신에서 그대로 도는 조합이 실제로 있어서 env(local/aws)와 분리했다 - 이 블록이
+        # env=="local"에 묶여 있던 시절에는, 실 S3로 전환하자마자 이 튜닝이 통째로 빠지고
+        # 반기 CSV(최대 700MB대) 처리 중 OOM이 재현됐다.
+
         # macOS 등 로컬 환경에서 호스트명이 바인딩 불가능한 주소로 풀리면
         # "BindException: Can't assign requested address"가 발생한다.
-        # 로컬 드라이버는 127.0.0.1로 명시 바인딩 (EMR 등 실제 클러스터 실행에는 영향 없음 - local 분기 한정).
+        # 로컬 드라이버는 127.0.0.1로 명시 바인딩 (EMR 등 실제 클러스터 실행에는 영향 없음).
         bind_address = os.getenv("SPARK_DRIVER_BIND_ADDRESS", "127.0.0.1")
         builder = builder.config("spark.driver.bindAddress", bind_address).config(
             "spark.driver.host", bind_address
         )
 
-        # LocalStack(특히 PERSISTENCE=1 파일 기반 백엔드)은 동시 PutObject 요청이
-        # 많아지면 "read of closed file" 레이스 컨디션으로 500을 뱉는 게 실측으로 확인됐다
-        # (반기 CSV 1개에 파티션 180개+ -> overwritePartitions가 한꺼번에 병렬 업로드 시도).
-        # 로컬 실행은 master를 명시적으로 낮은 병렬도로 고정해 동시 요청 수를 줄인다.
-        # (AWS/EMR 클러스터 실행은 spark-submit --master가 따로 지정되므로 이 분기는 영향 없음)
+        # LocalStack(특히 PERSISTENCE=1 파일 기반 백엔드)은 동시 PutObject 요청이 많아지면
+        # "read of closed file" 레이스 컨디션으로 500을 뱉는 게 실측으로 확인됐다(반기 CSV 1개에
+        # 파티션 180개+ -> overwritePartitions가 한꺼번에 병렬 업로드 시도). 실 S3에서는 이
+        # 레이스는 없지만, 로컬 머신의 대역폭/CPU도 한정적이라 동시 연결 수를 낮게 유지하는 게
+        # 여전히 안전하다. 로컬 실행은 master를 명시적으로 낮은 병렬도로 고정해 동시 요청 수를
+        # 줄인다. (AWS/EMR 클러스터 실행은 spark-submit --master가 따로 지정되므로 이 분기는
+        # 영향 없음 - spark_local_execution을 false로 둔다)
         local_master = os.getenv("SPARK_LOCAL_MASTER", "local[2]")
         # 로컬 모드는 driver == executor가 같은 JVM이라, 기본 힙(1g)으로는 반기 CSV
         # (최대 700MB대) 읽기 + repartition 셔플 + cache를 감당 못 해 OutOfMemoryError가
@@ -111,7 +133,12 @@ def build_spark_session(
 
     spark = builder.getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
-    logger.info("SparkSession 생성 완료 (catalog_type=%s)", settings.iceberg_catalog_type)
+    logger.info(
+        "SparkSession 생성 완료 (env=%s, catalog_type=%s, spark_local_execution=%s)",
+        settings.env,
+        settings.iceberg_catalog_type,
+        settings.spark_local_execution,
+    )
     return spark
 
 
