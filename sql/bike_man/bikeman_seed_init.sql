@@ -1,9 +1,9 @@
 -- ============================================================
 -- bikeman_seed_init.sql
 --
--- 실행 대상: 이미 떠 있는 postgres 컨테이너 (DB=airflow, USER=airflow)
+-- 실행 대상: 이미 떠 있는 postgres 컨테이너 (DB/USER는 루트 .env의 POSTGRES_DB/POSTGRES_USER)
 -- 실행 방법:
---   docker compose exec -T postgres psql -U airflow -d airflow < bikeman_seed_init.sql
+--   docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < sql/bike_man/bikeman_seed_init.sql
 --
 -- 이 파일 하나로:
 --   1) app / bikeman / serving 스키마 생성 (airflow 스키마는 건드리지 않음 -
@@ -32,8 +32,7 @@ GRANT USAGE ON SCHEMA bikeman TO airflow_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA bikeman TO airflow_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA bikeman GRANT SELECT ON TABLES TO airflow_reader;
 
--- bikeman_event_generator DAG 전용 최소권한 쓰기 롤. bikeman.fact_worker_event에는
--- SELECT(최근 이벤트 조회)+INSERT만, serving.bike_risk_daily에는 SELECT만 허용한다.
+-- bikeman_event_generator DAG 전용 최소권한 쓰기 롤.
 -- airflow_reader(읽기 전용)로는 이 DAG가 요구하는 INSERT를 할 수 없어 별도로 만든다.
 DO $$
 BEGIN
@@ -43,9 +42,7 @@ BEGIN
 END
 $$;
 GRANT USAGE ON SCHEMA bikeman TO bikeman_writer;
-GRANT SELECT, INSERT ON bikeman.fact_worker_event TO bikeman_writer;
 GRANT USAGE ON SCHEMA serving TO bikeman_writer;
-GRANT SELECT ON serving.bike_risk_daily TO bikeman_writer;
 
 -- 2) app 스키마 placeholder ---------------------------------------
 CREATE TABLE IF NOT EXISTS app.action_log (
@@ -72,7 +69,27 @@ CREATE INDEX IF NOT EXISTS idx_fact_worker_event_received_at
 CREATE INDEX IF NOT EXISTS idx_fact_worker_event_bike_id
     ON bikeman.fact_worker_event (bike_id);
 
+GRANT SELECT, INSERT ON bikeman.fact_worker_event TO bikeman_writer;
+
 -- 4) serving 스키마 placeholder -------------------------------------
+CREATE TABLE IF NOT EXISTS serving.bike_risk_daily (
+    snapshot_date  DATE NOT NULL,
+    bike_id        TEXT NOT NULL,
+    station_id     TEXT,
+    station_name   TEXT,
+    region         TEXT,
+    district       TEXT,
+    healthy_ratio  DOUBLE PRECISION NOT NULL,
+    risk_grade     TEXT NOT NULL,
+    risk_score     DOUBLE PRECISION NOT NULL,
+    dist_km        DOUBLE PRECISION,
+    start_year     INT,
+    aging          INT,
+    fail_history   TEXT[],
+    PRIMARY KEY (bike_id, snapshot_date)
+);
+ALTER TABLE serving.bike_risk_daily DROP COLUMN IF EXISTS action;
+
 CREATE TABLE IF NOT EXISTS serving.mart_bike_risk_current (
     bike_id        VARCHAR(20) PRIMARY KEY,
     risk_score     NUMERIC,
@@ -87,6 +104,8 @@ CREATE TABLE IF NOT EXISTS serving.fact_bike_urgent_store (
     flagged_at  TIMESTAMP,
     synced_at   TIMESTAMP DEFAULT now()
 );
+
+GRANT SELECT ON serving.bike_risk_daily TO bikeman_writer;
 
 -- 5) 6/30 초기 상태 시딩: 고장신고 기반 500건 COLLECT (DEPLOY 없음) ----
 --    7/1 06:00 파이프라인이 "전날 수거 & 미배치 = 오늘 무조건 배치" 룰로

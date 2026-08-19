@@ -1,9 +1,13 @@
 # bikeman_event_generator
 
-`gold_to_serving_sync`가 `serving.bike_risk_daily`를 갱신한 직후, 그 결과(action='수거')를
-근거로 bikeman(현장 작업자)의 수거/배치 행동을 시뮬레이션해 `bikeman.fact_worker_event`에
-이벤트를 적재하는 파이프라인. 이 이벤트는 이후 `ingestion/jobs/daily_batch_bikeman_event.py`가
-다시 읽어 Bronze로 수집하고, 위험도 모델의 레이블/피처로 재사용된다 (피드백 루프).
+`gold_to_serving_sync`가 `serving.bike_risk_daily`를 갱신한 직후, bikeman(현장 작업자)의
+수거/배치 행동을 시뮬레이션해 `bikeman.fact_worker_event`에 이벤트를 적재하는 파이프라인.
+이 이벤트는 이후 `ingestion/jobs/daily_batch_bikeman_event.py`가 다시 읽어 Bronze로
+수집하고, 위험도 모델의 레이블/피처로 재사용된다 (피드백 루프).
+
+`serving.bike_risk_daily.action` 컬럼이 제거된 뒤에는 최신 snapshot의 `risk_score`
+상위 500대를 COLLECT 대상으로 삼는다. DEPLOY 이벤트는 기존 `bikeman.fact_worker_event`
+이력 기준으로 계속 생성된다.
 
 ## jobs
 
@@ -13,8 +17,8 @@
 - `bikeman_db.py`: `serving.bike_risk_daily`/`bikeman.fact_worker_event` 조회·적재. psycopg2
   connection 객체를 인자로 받을 뿐 airflow를 import하지 않음 (DB 연결이 필요해 pytest
   대상이 아님 - E2E_VERIFICATION.md로 검증)
-- `generate_collect_events.py`: 최신 `snapshot_date`(<= target_date) 기준 action='수거'
-  자전거 전부에 COLLECT 이벤트 생성
+- `generate_collect_events.py`: 최신 `snapshot_date`(<= target_date) 기준 `risk_score`
+  상위 N대에 COLLECT 이벤트 생성. N은 `BIKEMAN_COLLECT_LIMIT`로 조정할 수 있고 기본값은 500
 - `deploy_returned_bikes.py`: 자전거별 가장 최근 이벤트가 COLLECT이고 그 발생일이
   `target_date`의 전날인 자전거에, 그 COLLECT 이벤트의 station_id로 DEPLOY 이벤트 생성
 

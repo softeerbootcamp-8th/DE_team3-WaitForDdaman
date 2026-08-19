@@ -2,13 +2,9 @@
 Gold - 자전거별 서빙 마트 (여러 gold 테이블 join -> gold.mart_bike_risk_daily,
 {{ ds }} 파티션 단위 OVERWRITE) -> postgres.bike_risk_daily로 넘어갈 최종 모양.
 
-### capacity 기반 수거/대여중단 분리
-gold.fact_bike_decision은 "대여중단" 여부만 정하고(build_fact_bike_decision.py docstring:
-"capacity 기준으로 오늘 몇 대를 실제로 수거할지 정하는 건 이 job 스코프 밖(mart 단계)"),
-오늘 실제로 몇 대를 수거할지는 여기서 정한다: "대여중단" 중 risk_score 상위
-capacity(SERVING_SYNC_CAPACITY, 기본 700 - services/api DEFAULT_CAPACITY와 동일한
-"초기 기준값"이라는 성격)대만 "수거", 나머지는 "대여중단" 그대로. "보류"는 "조치없음"으로
-바꾼다 - API/프론트가 원래 기대하던 3가지 action 값(수거/대여중단/조치없음)이 이렇게 나온다.
+gold.fact_bike_decision은 오늘자 위험 자전거 중 의사결정 대상 bike_id를 확정하는
+상위 산출물이다. mart_bike_risk_daily는 서빙 화면에 필요한 위험도/위치/이력 컬럼만
+노출하며, 의사결정 action은 이 mart와 postgres 서빙 테이블에 싣지 않는다.
 
 ### healthy_ratio 기본값
 risk-scored bike가 하나도 없는 대여소(station_risk_shared.station_risk_agg 결과에
@@ -22,6 +18,7 @@ import os
 from datetime import date
 
 from pyspark.sql import functions as F
+from pyspark.sql.utils import AnalysisException
 from pyspark.sql.window import Window
 
 import config
@@ -32,16 +29,10 @@ from station_risk_shared import read_station_risk_agg
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-SUSPEND = "대여중단"
-HOLD = "보류"
-COLLECT = "수거"
-NO_ACTION = "조치없음"
-CAPACITY_DEFAULT = int(os.getenv("SERVING_SYNC_CAPACITY", "700"))
-
 MART_COLUMNS = [
     "snapshot_date", "bike_id", "station_id", "station_name", "region", "district",
     "healthy_ratio", "risk_score", "risk_grade", "dist_km", "start_year", "aging",
-    "fail_history", "action",
+    "fail_history",
 ]
 
 
@@ -95,13 +86,23 @@ def _ensure_mart_table(spark) -> None:
             dist_km DOUBLE,
             start_year INT,
             aging INT,
-            fail_history ARRAY<STRING>,
-            action STRING
+            fail_history ARRAY<STRING>
         )
         USING iceberg
         PARTITIONED BY (snapshot_date)
         """
     )
+    try:
+        spark.sql(f"ALTER TABLE {_gold_table()} DROP COLUMN action")
+    except AnalysisException as e:
+        message = str(e)
+        missing_column = any(fragment in message for fragment in [
+            "Cannot delete missing field",
+            "Cannot find field",
+            "Missing field",
+        ])
+        if not missing_column:
+            raise
 
 
 def _fail_history_agg(failure_df, as_of_date, limit: int = 5):
@@ -121,26 +122,13 @@ def _fail_history_agg(failure_df, as_of_date, limit: int = 5):
     return ordered.select("bike_id", F.col("_hist.entry").alias("fail_history"))
 
 
-def _apply_capacity_split(df, capacity: int):
-    w = Window.orderBy(F.col("risk_score").desc(), F.col("bike_id").asc())
-    suspend = (
-        df.filter(F.col("action") == SUSPEND)
-        .withColumn("_rank", F.row_number().over(w))
-        .withColumn("action", F.when(F.col("_rank") <= capacity, F.lit(COLLECT)).otherwise(F.lit(SUSPEND)))
-        .drop("_rank")
-    )
-    hold = df.filter(F.col("action") == HOLD).withColumn("action", F.lit(NO_ACTION))
-    other = df.filter(~F.col("action").isin(SUSPEND, HOLD))
-    return suspend.unionByName(hold).unionByName(other)
-
-
 def build_mart_bike_risk_daily(
     risk_df, decision_df, location_df, station_active_df, dim_bike_df,
-    features_df, station_risk_df, failure_df, snapshot_date, capacity: int = CAPACITY_DEFAULT,
+    features_df, station_risk_df, failure_df, snapshot_date,
 ):
     base = (
         risk_df.select("bike_id", "risk_score", "risk_grade")
-        .join(decision_df.select("bike_id", "action"), on="bike_id", how="inner")
+        .join(decision_df.select("bike_id").dropDuplicates(["bike_id"]), on="bike_id", how="inner")
         .join(
             location_df.select("bike_id", F.col("last_station_id").alias("station_id")),
             on="bike_id",
@@ -158,7 +146,6 @@ def build_mart_bike_risk_daily(
 
     base = base.withColumn("healthy_ratio", F.coalesce(F.col("healthy_ratio"), F.lit(100.0)))
     base = base.withColumn("aging", (F.year(F.lit(str(snapshot_date))) - F.col("start_year")).cast("int"))
-    base = _apply_capacity_split(base, capacity)
 
     base = base.join(failure_df, on="bike_id", how="left")
     base = base.withColumn(

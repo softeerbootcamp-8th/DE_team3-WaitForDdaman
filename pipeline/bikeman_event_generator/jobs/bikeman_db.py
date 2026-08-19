@@ -15,6 +15,7 @@ import psycopg2.extras
 SCHEMA = "bikeman"
 TABLE = "fact_worker_event"
 BATCH_SIZE = 500
+COLLECT_LIMIT_DEFAULT = 500
 
 EVENT_COLUMNS = ["event_id", "event_type", "bike_id", "station_id", "worker_id", "occurred_at", "received_at"]
 
@@ -24,7 +25,8 @@ _FETCH_COLLECT_TARGETS_SQL = """
     WHERE snapshot_date = (
         SELECT MAX(snapshot_date) FROM serving.bike_risk_daily WHERE snapshot_date <= %(target_date)s
     )
-    AND action = '수거'
+    ORDER BY risk_score DESC NULLS LAST, bike_id ASC
+    LIMIT %(limit)s
 """
 
 _FETCH_DEPLOY_TARGETS_SQL = """
@@ -58,9 +60,9 @@ _FETCH_DEPLOY_TARGETS_SQL = """
 # COLLECT가 이기도록 강제한다.
 
 
-def fetch_collect_targets(conn, target_date: str) -> list[dict]:
+def fetch_collect_targets(conn, target_date: str, limit: int = COLLECT_LIMIT_DEFAULT) -> list[dict]:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(_FETCH_COLLECT_TARGETS_SQL, {"target_date": target_date})
+        cur.execute(_FETCH_COLLECT_TARGETS_SQL, {"target_date": target_date, "limit": limit})
         return [dict(r) for r in cur.fetchall()]
 
 

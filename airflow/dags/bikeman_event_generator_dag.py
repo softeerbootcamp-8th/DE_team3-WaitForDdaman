@@ -1,9 +1,12 @@
 """
-bikeman_event_generator - Gold 마트 동기화 결과(serving.bike_risk_daily.action='수거')를
-근거로 bikeman(현장 작업자)의 수거·배치 행동을 시뮬레이션해 bikeman.fact_worker_event에
-이벤트를 적재한다. gold_to_serving_sync의 verify_bike_risk_daily_sync가 끝나면
-TriggerDagRunOperator로 트리거된다 (station_daily 브랜치와는 무관 - 이 DAG가 읽는 건
-bike_risk_daily뿐이라 그 완료를 기다리지 않는다).
+bikeman_event_generator - Gold 마트 동기화 결과를 근거로 bikeman(현장 작업자)의
+수거·배치 행동을 시뮬레이션해 bikeman.fact_worker_event에 이벤트를 적재한다.
+gold_to_serving_sync의 verify_bike_risk_daily_sync가 끝나면 TriggerDagRunOperator로
+트리거된다.
+
+serving.bike_risk_daily에서 action 컬럼이 제거된 뒤에는 최신 snapshot의 risk_score
+상위 500대를 generate_collect_events의 COLLECT 대상으로 삼는다. DEPLOY 이벤트는
+기존 bikeman.fact_worker_event의 전날 COLLECT 이력 기준으로 계속 생성된다.
 
 generate_collect_events/deploy_returned_bikes는 애초에 서로 다른 event_type/자전거
 집합을 다루는 독립 작업으로 보고 병렬 실행했다. Task 9 E2E 백필 검증 중 deploy_

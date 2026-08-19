@@ -14,8 +14,8 @@ Gold Iceberg 마트를 서빙 Postgres(station_daily/bike_risk_daily)로 동기�
 ## jobs
 
 - `build_mart_bike_risk_daily.py`: 여러 gold 테이블 join -> `gold.mart_bike_risk_daily`
-  (`{{ ds }}` 파티션 단위 OVERWRITE). capacity(`SERVING_SYNC_CAPACITY`, 기본 700) 기준으로
-  "대여중단" 중 risk_score 상위만 "수거"로 승격
+  (`{{ ds }}` 파티션 단위 OVERWRITE). `action` 컬럼은 mart/serving 레이어에 싣지 않고,
+  수거 대상 선정은 `bikeman_event_generator`에서 `risk_score` 상위 N대 기준으로 처리한다
 - `build_mart_station_daily.py`: `station_active` + `fact_station_inventory` + 위험도
   집계 -> `gold.mart_station_daily` (`{{ ds }}` 파티션 단위 OVERWRITE)
 - `write_bike_risk_daily.py` / `write_station_daily.py`: 각 mart의 `SNAPSHOT_DATE`
@@ -44,7 +44,7 @@ SERVING_DB_NAME=<루트 .env의 POSTGRES_DB와 동일>
 SERVING_DB_USER=<루트 .env의 POSTGRES_USER와 동일>
 SERVING_DB_PASSWORD=<루트 .env의 POSTGRES_PASSWORD와 동일>
 SLACK_WEBHOOK_URL=<실패 알림용, 미설정 시 알림만 건너뜀>
-SERVING_SYNC_CAPACITY=700   # 미설정 시 기본값 700 (services/api DEFAULT_CAPACITY와 동일한 성격의 "초기 기준값")
+BIKEMAN_COLLECT_LIMIT=500   # 미설정 시 risk_score 상위 500대를 COLLECT 대상으로 사용
 ```
 
 ## Airflow
