@@ -32,6 +32,21 @@ GRANT USAGE ON SCHEMA bikeman TO airflow_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA bikeman TO airflow_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA bikeman GRANT SELECT ON TABLES TO airflow_reader;
 
+-- bikeman_event_generator DAG 전용 최소권한 쓰기 롤. bikeman.fact_worker_event에는
+-- SELECT(최근 이벤트 조회)+INSERT만, serving.bike_risk_daily에는 SELECT만 허용한다.
+-- airflow_reader(읽기 전용)로는 이 DAG가 요구하는 INSERT를 할 수 없어 별도로 만든다.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'bikeman_writer') THEN
+        CREATE ROLE bikeman_writer LOGIN PASSWORD 'bikeman_writer_pw';
+    END IF;
+END
+$$;
+GRANT USAGE ON SCHEMA bikeman TO bikeman_writer;
+GRANT SELECT, INSERT ON bikeman.fact_worker_event TO bikeman_writer;
+GRANT USAGE ON SCHEMA serving TO bikeman_writer;
+GRANT SELECT ON serving.bike_risk_daily TO bikeman_writer;
+
 -- 2) app 스키마 placeholder ---------------------------------------
 CREATE TABLE IF NOT EXISTS app.action_log (
     id            SERIAL PRIMARY KEY,
