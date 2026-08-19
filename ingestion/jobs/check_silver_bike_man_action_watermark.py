@@ -18,7 +18,7 @@ ingestion/jobs/daily_batch_bikeman_event.py는 "작업자가 몰아서 제출하
 처리한다(파일 docstring 참고) - 즉 silver_bike_man_action의 워터마크는 구조적으로
 실행일보다 항상 하루 늦다. 이 스크립트가 예전에 `TARGET_DATE={{ ds }}`(오늘)를
 그대로 받아 비교했을 때는, 워터마크가 절대 오늘에 도달할 수 없어 센서가 영원히
-"준비 안 됨"만 반복하다 타임아웃났다. 그래서 호출부(dag_gold_dim_fact.py)가
+"준비 안 됨"만 반복하다 타임아웃났다. 그래서 호출부(gold_dim_fact_dag.py)가
 `{{ macros.ds_add(ds, -1) }}`로 이미 하루 전 날짜를 넘기도록 고쳤고, 이 스크립트는
 그 값을 그대로(추가 보정 없이) 비교하면 된다.
 
