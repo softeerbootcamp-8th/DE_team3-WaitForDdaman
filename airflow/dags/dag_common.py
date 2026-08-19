@@ -21,6 +21,16 @@ INGESTION_PYTHON = "python"
 # 풀이 없으면 이 풀을 지정한 태스크는 스케줄되지 못하고 DAG가 조용히 멈춘다.
 BRONZE_POOL = "bronze_ingest"
 
+# Silver DAG 5개(station_master/rental_history/failure_report/station_active/
+# bikeman_action)는 전부 Bronze Asset 트리거라 언제 몇 개가 동시에 도는지
+# 서로 모른다. BRONZE_POOL과 같은 이유(LocalStack 동시 쓰기 경합)로 전역
+# 동시 실행 수를 제한한다 (#71).
+#
+# 풀 생성은 BRONZE_POOL과 동일하게 docker-compose*.yml의 airflow-init이
+# 기동 때마다 해준다. 풀이 없으면 이 풀을 지정한 태스크는 스케줄되지 못하고
+# DAG가 조용히 멈춘다.
+SILVER_POOL = "silver_process"
+
 DEFAULT_ARGS = {
     "retries": 3,
     "retry_delay": timedelta(minutes=5),

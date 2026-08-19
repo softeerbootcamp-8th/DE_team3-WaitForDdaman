@@ -49,7 +49,7 @@ from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag
 
 from dag_assets import FAILURE_REPORT_BRONZE
-from dag_common import DEFAULT_ARGS
+from dag_common import DEFAULT_ARGS, SILVER_POOL
 
 INGESTION_DIR = "/opt/airflow/ingestion"  # common/(config, spark_session), .env 출처
 STAGING_DIR = "/opt/airflow/staging"      # 잡 실행 위치
@@ -92,26 +92,31 @@ def silver_failure_report():
         task_id="check",
         bash_command=_staging_bash(SILVER_CHECK_MODULE),
         execution_timeout=timedelta(minutes=30),
+        pool=SILVER_POOL,
     )
     transform = BashOperator(
         task_id="transform",
         bash_command=_staging_bash(SILVER_TRANSFORM_MODULE),
         execution_timeout=timedelta(hours=1),
+        pool=SILVER_POOL,
     )
     validate = BashOperator(
         task_id="validate",
         bash_command=_staging_bash(SILVER_VALIDATE_MODULE),
         execution_timeout=timedelta(minutes=30),
+        pool=SILVER_POOL,
     )
     overwrite = BashOperator(
         task_id="overwrite",
         bash_command=_staging_bash(SILVER_OVERWRITE_MODULE),
         execution_timeout=timedelta(hours=1),
+        pool=SILVER_POOL,
     )
     metrics = BashOperator(
         task_id="metrics",
         bash_command=_staging_bash(SILVER_METRICS_MODULE),
         execution_timeout=timedelta(minutes=30),
+        pool=SILVER_POOL,
     )
 
     check >> transform >> validate >> overwrite >> metrics

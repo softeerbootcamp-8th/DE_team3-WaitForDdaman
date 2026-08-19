@@ -33,7 +33,7 @@ from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag
 
 from dag_assets import BIKEMAN_EVENT_BRONZE
-from dag_common import DEFAULT_ARGS
+from dag_common import DEFAULT_ARGS, SILVER_POOL
 
 INGESTION_DIR = "/opt/airflow/ingestion"
 INGESTION_PYTHON = "python"
@@ -61,6 +61,7 @@ def silver_bikeman_action_daily():
             f"{INGESTION_PYTHON} -m jobs.silver_bikeman_action"
         ),
         execution_timeout=timedelta(minutes=30),
+        pool=SILVER_POOL,
     )
 
 

@@ -73,6 +73,7 @@ from datetime import timedelta
 
 import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.providers.standard.sensors.bash import BashSensor
 from airflow.sdk import dag
 
@@ -189,6 +190,19 @@ def dag_gold_dim_fact():
         execution_timeout=timedelta(minutes=20),
     )
 
+    # dag_risk_decision의 wait_for_gold_facts(ExternalTaskSensor)는 logical_date가
+    # 정확히 같은 dag_gold_dim_fact run을 찾는데, 둘 다 수동 트리거(schedule=None
+    # 또는 별개 트리거)라 각자 트리거하면 logical_date가 어긋나 절대 못 찾는다
+    # (#69, 2026-08-18 실측). #64가 dag_risk_decision -> gold_to_serving_sync에
+    # 쓴 것과 동일한 패턴으로, 여기서 같은 logical_date를 그대로 넘겨 직접 트리거한다.
+    trigger_risk_decision = TriggerDagRunOperator(
+        task_id="trigger_risk_decision",
+        trigger_dag_id="dag_risk_decision",
+        logical_date="{{ logical_date }}",
+        wait_for_completion=False,
+        reset_dag_run=True,
+    )
+
     # rental_history: dim_bike/bike_location 둘 다 이 소스만 직접 읽는다
     wait_rental_history >> build_dim_bike
     wait_rental_history >> build_bike_location
@@ -202,6 +216,8 @@ def dag_gold_dim_fact():
     build_bike_location >> build_fact_station_inventory
     build_station_active >> build_fact_station_inventory
     wait_bike_man_action >> build_fact_station_inventory
+
+    build_fact_station_inventory >> trigger_risk_decision
 
 
 dag_gold_dim_fact()
