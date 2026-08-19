@@ -54,7 +54,7 @@ def ensure_dq_result_table(spark) -> None:
     )
 
 
-def verify_bike_man_action(spark, df, dataset: str, occurred_date: str) -> bool:
+def verify_bikeman_action(spark, df, dataset: str, occurred_date: str) -> bool:
     """
     Silver로 넘어갈 df(이미 1차 필터링된 valid_rows 기준)에 대해 데이터셋 단위
     품질 검증을 수행한다. 개별 행을 걸러내는 게 아니라 "이 배치 전체가 신뢰할
@@ -67,7 +67,7 @@ def verify_bike_man_action(spark, df, dataset: str, occurred_date: str) -> bool:
     from pydeequ.verification import VerificationResult, VerificationSuite
 
     check = (
-        Check(spark, CheckLevel.Error, "bike_man_action_silver_checks")
+        Check(spark, CheckLevel.Error, "bikeman_action_silver_checks")
         .isComplete("bike_id")
         .isComplete("event_type")
         .isComplete("occurred_at")

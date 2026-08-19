@@ -39,7 +39,7 @@ last_station_id가 null인 경우는 데이터 결측이 아니라, 대여소가
 자연스럽게 빠지는 게 의도된 동작이다.
 
 ### last_event_at을 함께 저장하는 이유
-gold.fact_station_inventory가 이 위치 정보와 silver.bike_man_action(수거/배치)
+gold.fact_station_inventory가 이 위치 정보와 silver.bikeman_action(수거/배치)
 이벤트 중 어느 쪽이 더 최신인지 비교해서 최종 위치를 정해야 한다. 그 비교
 기준 시각(반납 시각)을 여기서 같이 내려준다. 병합 시 baseline/delta 중
 최신 쪽을 고르는 기준으로도 재사용된다.

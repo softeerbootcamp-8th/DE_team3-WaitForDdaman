@@ -20,7 +20,7 @@ import config
 from ingestion.common.spark_session import build_spark_session
 from pyspark.sql import SparkSession
 
-SILVER_TABLES = ["rental_history", "failure_report", "station_master", "station_active", "bike_man_action"]
+SILVER_TABLES = ["rental_history", "failure_report", "station_master", "station_active", "bikeman_action"]
 GOLD_TABLES = ["dim_bike", "dim_station", "fact_bike_risk_store", "mart_bike_risk_current", "fact_bike_urgent_store"]
 
 

@@ -6,7 +6,7 @@ dag_risk_decision 원안의 "4-a/4-b 필터 + 5. run_risk_scoring_model + 6. bui
 수거(정비중이라 미배치) 자전거만 제외하고, 대여중단 상태였던 자전거도 매일 다시
 추론 대상에 포함시킨다 - 대여소 재고 상황이 바뀌면 어제 대여중단이었던 자전거가
 오늘은 보류로 풀릴 수도 있어서, "한 번 대여중단되면 고정" 구조로 만들면 안 된다.
-이 필터는 bike_man_action 최신 이벤트만 보므로 최초 실행일(cold start)에도 이력이
+이 필터는 bikeman_action 최신 이벤트만 보므로 최초 실행일(cold start)에도 이력이
 없으면 자연히 아무도 제외되지 않아 별도 분기가 필요 없다.
 
 dim_bike처럼 날짜 범위를 누적 처리하지 않고 하루치를 통째로 재계산해 OVERWRITE하므로
@@ -52,8 +52,8 @@ def _bike_features_table() -> str:
     return f"{config.SETTINGS.iceberg_catalog_name}.gold.bike_features_daily"
 
 
-def _bike_man_action_table() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.silver.bike_man_action"
+def _bikeman_action_table() -> str:
+    return f"{config.SETTINGS.iceberg_catalog_name}.silver.bikeman_action"
 
 
 def _gold_table() -> str:
@@ -113,15 +113,15 @@ def _validate_fact_bike_risk(spark, df) -> None:
 def _currently_collected_bike_ids(spark, as_of: date):
     """4-a/4-b (skip_filter_first_run / apply_lagged_filter) 구현.
 
-    bike_man_action에서 bike_id별 최신 이벤트가 '수거'인 자전거 = 아직 미배치(정비중).
+    bikeman_action에서 bike_id별 최신 이벤트가 '수거'인 자전거 = 아직 미배치(정비중).
     대여중단 상태는 여기서 제외되지 않는다 - 수거 이벤트가 없거나, 수거 뒤에 배치
     이벤트가 이미 찍혔으면 오늘도 추론 대상에 포함된다.
 
-    cold start(최초 실행일)에도 이 함수 하나로 충분하다 - bike_man_action 이력이
+    cold start(최초 실행일)에도 이 함수 하나로 충분하다 - bikeman_action 이력이
     아직 없으면 자연히 아무도 안 걸러지므로, 원안의 4-a(필터 스킵)와 4-b(필터 적용)가
     실질적으로 같은 코드가 된다. 그래서 DAG에는 두 이름이 남아있지만 여기 함수는 하나뿐이다.
     """
-    actions = spark.read.table(_bike_man_action_table()).filter(F.col("occurred_at") <= F.lit(str(as_of)))
+    actions = spark.read.table(_bikeman_action_table()).filter(F.col("occurred_at") <= F.lit(str(as_of)))
     w = Window.partitionBy("bike_id").orderBy(F.col("occurred_at").desc())
     latest = (
         actions.withColumn("rn", F.row_number().over(w))

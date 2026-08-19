@@ -17,7 +17,7 @@
   - 독립 job이 아니라 `build_fact_bike_risk.py`가 라이브러리로 불러 쓴다
 - `build_fact_bike_risk.py`: `gold.bike_features_daily` -> `gold.fact_bike_risk` (하루치 통째로 재계산, OVERWRITE + PyDeequ 검증)
   - 컬럼: `snapshot_date`(파티션), `bike_id`, `risk_score`, `risk_grade`, `model_version`
-  - `bike_man_action` 최신 이벤트가 "수거"(미배치)인 자전거만 제외 - 대여중단 상태는 재고 상황에 따라 다시 바뀔 수 있어 매일 재포함
+  - `bikeman_action` 최신 이벤트가 "수거"(미배치)인 자전거만 제외 - 대여중단 상태는 재고 상황에 따라 다시 바뀔 수 있어 매일 재포함
   - 날짜 범위를 누적 처리하지 않아 워터마크 없음, `SNAPSHOT_DATE` 환경변수(기본값 오늘)로 대상일 지정
 - `build_fact_bike_decision.py`: `gold.fact_bike_risk` + `gold.fact_station_inventory` -> `gold.fact_bike_decision` (OVERWRITE + PyDeequ 검증)
   - 컬럼: `snapshot_date`(파티션), `bike_id`, `action`(`대여중단`/`보류` 2종 - `수거`는 이 job 스코프 밖)
@@ -29,7 +29,7 @@
 - DAG: `dag_risk_decision` (`airflow/dags/gold_risk_decision_dag.py`)
   - `dag_gold_dim_fact` 완료 대기(`ExternalTaskSensor`) -> cold start 분기 -> `run_risk_scoring_model`(=`build_fact_bike_risk.py`) -> `build_fact_bike_decision`
   - `build_bike_features_daily`는 Silver만 있으면 되므로 `dag_gold_dim_fact` 대기와 무관하게 병렬로 실행, `run_risk_scoring_model` 직전에 합류
-  - cold start 분기(`skip_filter_first_run`/`apply_lagged_filter`)는 실제로는 같은 필터 로직을 부른다 - `bike_man_action` 기반 필터가 이력 없는 최초 실행일에도 자연히 아무도 안 걸러서 별도 분기가 필요 없기 때문
+  - cold start 분기(`skip_filter_first_run`/`apply_lagged_filter`)는 실제로는 같은 필터 로직을 부른다 - `bikeman_action` 기반 필터가 이력 없는 최초 실행일에도 자연히 아무도 안 걸러서 별도 분기가 필요 없기 때문
 
 ## 로컬 실행
 
