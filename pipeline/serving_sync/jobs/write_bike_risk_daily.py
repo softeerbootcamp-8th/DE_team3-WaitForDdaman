@@ -28,7 +28,7 @@ TABLE = "bike_risk_daily"
 COLUMNS = [
     "snapshot_date", "bike_id", "station_id", "station_name", "region", "district",
     "healthy_ratio", "risk_grade", "risk_score", "dist_km", "start_year", "aging",
-    "fail_history", "action",
+    "fail_history",
 ]
 
 

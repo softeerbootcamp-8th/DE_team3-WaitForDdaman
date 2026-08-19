@@ -67,7 +67,7 @@ def spark():
     session.stop()
 
 
-def build(spark, risk_rows, decision_rows, capacity=100):
+def build(spark, risk_rows, decision_rows):
     risk_df = spark.createDataFrame(risk_rows, RISK_SCHEMA)
     decision_df = spark.createDataFrame(decision_rows, DECISION_SCHEMA)
     location_df = spark.createDataFrame(
@@ -84,29 +84,23 @@ def build(spark, risk_rows, decision_rows, capacity=100):
         r["bike_id"]: r
         for r in build_mart_bike_risk_daily(
             risk_df, decision_df, location_df, station_active_df, dim_bike_df,
-            features_df, station_risk_df, failure_df, date(2026, 8, 18), capacity=capacity,
+            features_df, station_risk_df, failure_df, date(2026, 8, 18),
         ).collect()
     }
 
 
-def test_hold_becomes_no_action(spark):
+def test_mart_omits_action_column(spark):
     result = build(spark, [("B1", 10.0, "Normal")], [("B1", "보류")])
-    assert result["B1"]["action"] == "조치없음"
+    assert "action" not in result["B1"].asDict()
 
 
-def test_suspend_within_capacity_becomes_collect(spark):
-    result = build(spark, [("B1", 90.0, "Critical")], [("B1", "대여중단")], capacity=100)
-    assert result["B1"]["action"] == "수거"
-
-
-def test_suspend_beyond_capacity_stays_suspend(spark):
-    rows = [(f"B{i}", float(100 - i), "Critical") for i in range(5)]
-    decisions = [(f"B{i}", "대여중단") for i in range(5)]
-    result = build(spark, rows, decisions, capacity=3)
-    collected = [bid for bid, r in result.items() if r["action"] == "수거"]
-    suspended = [bid for bid, r in result.items() if r["action"] == "대여중단"]
-    assert sorted(collected) == ["B0", "B1", "B2"]  # risk_score 상위 3대
-    assert sorted(suspended) == ["B3", "B4"]
+def test_mart_keeps_only_decided_bikes(spark):
+    result = build(
+        spark,
+        [("B1", 90.0, "Critical"), ("B2", 10.0, "Normal")],
+        [("B1", "대여중단")],
+    )
+    assert sorted(result) == ["B1"]
 
 
 def test_aging_is_snapshot_year_minus_start_year(spark):

@@ -124,11 +124,11 @@ def ensure_serving_tables() -> None:
                     start_year     INT,
                     aging          INT,
                     fail_history   TEXT[],
-                    action         TEXT NOT NULL,
                     PRIMARY KEY (bike_id, snapshot_date)
                 )
                 """
             )
+            cur.execute(f"ALTER TABLE {SCHEMA}.bike_risk_daily DROP COLUMN IF EXISTS action")
         conn.commit()
     except psycopg2.Error as e:
         raise ServingDbError(f"serving 테이블 생성 실패: {e}") from e

@@ -88,8 +88,8 @@ SELECT snapshot_date, count(*) FROM serving.station_daily GROUP BY snapshot_date
 | `bike_risk_daily` (2026-07-01) | 37,079행 | 37,079행 | 통과 |
 | `station_daily` (2026-07-01) | 2,735행 | 2,735행 | 통과 |
 
-`serving.bike_risk_daily` 샘플 조회로 `risk_grade`/`action` 등 실제 값이 정상적으로
-채워졌음을 확인 (예: `대여중단`/`수거`/`조치없음` 3가지 action이 모두 존재).
+`serving.bike_risk_daily` 샘플 조회로 `risk_grade` 등 실제 값이 정상적으로
+채워졌음을 확인.
 
 ## 진행 중 발견/수정한 이슈
 

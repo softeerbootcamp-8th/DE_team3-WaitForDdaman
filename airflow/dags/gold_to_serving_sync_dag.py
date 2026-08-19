@@ -15,9 +15,9 @@ Slack 알림을 건다 (CloudWatch/SNS는 이 프로젝트에 대응 AWS 인프�
 spec §2/§3 참고).
 
 ### trigger_bikeman_event_generator (2026-08-18 추가)
-verify_bike_risk_daily_sync가 끝나면 bikeman_event_generator를 트리거한다
-(station_daily 브랜치와는 무관 - 그 DAG가 읽는 건 bike_risk_daily뿐이라 완료를
-기다리지 않는다). 세부 설계는
+verify_bike_risk_daily_sync가 끝나면 bikeman_event_generator를 트리거한다.
+serving.bike_risk_daily에서 action 컬럼이 제거된 뒤에는 최신 snapshot의 risk_score
+상위 500대를 COLLECT 대상으로 삼는다. 세부 설계는
 docs/superpowers/specs/2026-08-18-bikeman-event-generator-design.md 참고.
 """
 from datetime import timedelta
