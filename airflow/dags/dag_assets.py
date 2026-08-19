@@ -16,7 +16,7 @@ STATION_MASTER_BRONZE = Asset("station_master_bronze")
 
 # rental_history Bronze 적재가 성공적으로 끝났음을 나타내는 Asset.
 # bronze_daily_batch_all_sources_dag.py의 daily_batch_rental_history 태스크가
-# outlets로 이 Asset을 갱신하고, silver_daily_batch_rental_history_dag.py가
+# outlets로 이 Asset을 갱신하고, silver_rental_history_dag.py가
 # 이 Asset의 갱신을 스케줄 트리거로 사용한다.
 RENTAL_HISTORY_BRONZE = Asset("rental_history_bronze")
 
