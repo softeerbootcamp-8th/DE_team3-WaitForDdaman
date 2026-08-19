@@ -15,17 +15,18 @@ gold.bike_features_daily(추론용 feature)는 dag_gold_dim_fact 소관이 아�
 시각이 매일 일정하지 않음)로 Asset이 더 안전하다. 다만 지금은 계획 문서에 적힌 대로
 ExternalTaskSensor로 먼저 만들어두고, 필요해지면 Asset으로 바꾼다.
 
-### check_cold_start
-wait_for_yesterday_decision을 soft_fail=True로 뒀다 - 최초 실행일(T-1 파티션이
-아예 없음)엔 타임아웃이 나도 DAG 전체를 실패시키지 않고 skipped로 남기고, 그
-상태를 check_cold_start가 보고 분기한다.
-
-### 필터가 cold start를 안 타는 이유
-apply_lagged_filter는 실제로는 bikeman_action 최신 이벤트만 보고 fact_bike_decision
-내용 자체는 안 읽는다 (매일 재계산이라 "어제 대여중단이었다"는 사실이 오늘 결과를
-바꾸지 않음 - 대여소 재고가 바뀌면 오늘 다시 대여중단/보류가 갈릴 수 있어서). 그래서
-4-a/4-b가 실제로는 같은 job을 부르지만, 계획 문서에 있는 이름 그대로 태스크는
-남겨뒀다.
+### 콜드스타트 분기 제거 (2026-08-19, #90)
+원안은 "최초 실행일엔 어제 fact_bike_decision이 없으니 필터를 스킵한다"는 걸
+wait_for_yesterday_decision(센서) + check_cold_start(분기) +
+skip_filter_first_run/apply_lagged_filter(둘 다 EmptyOperator)로 구현하려 했다.
+그런데 4-a/4-b가 실행해도 아무 일도 안 하는 EmptyOperator라 분기 결과를 쓰는
+곳이 실제로는 없었다 - 어느 쪽으로 가든 다음 태스크(run_risk_scoring_model)는
+동일하게 실행됨. 콜드스타트는 대신 각 job 안에서 tableExists 체크로 안전하게
+처리된다: bikeman_action 콜드스타트는 build_fact_bike_risk.py의
+_currently_collected_bike_ids, fact_bike_decision 콜드스타트는
+build_bike_features_daily.py의 _suspended_bike_days(#85)가 센서 없이 직접
+처리한다. 그래서 4개 태스크(및 이걸 위해 있던 trigger_rule=
+none_failed_min_one_success)를 전부 제거했다.
 
 ### trigger_serving_sync (2026-08-18 추가)
 build_fact_bike_decision이 끝나면 gold_to_serving_sync(gold_to_serving_sync_dag.py)를
@@ -37,8 +38,6 @@ from datetime import timedelta
 
 import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.providers.standard.operators.empty import EmptyOperator
-from airflow.providers.standard.operators.python import BranchPythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.providers.standard.sensors.external_task import ExternalTaskSensor
 from airflow.sdk import dag
@@ -68,23 +67,6 @@ def _bash(job_module: str, extra_env: str = "") -> str:
     )
 
 
-def _branch_on_cold_start(**context) -> str:
-    # Airflow 3 Task SDK에서는 dag_run이 Pydantic 모델이라 get_task_instance() 같은
-    # 2.x ORM 메서드가 없고, 태스크 실행 중 직접 DB(ORM) 접근도 금지돼 있다
-    # (RuntimeError: Direct database access via the ORM is not allowed).
-    # 공식 대안은 ti.get_task_states() - Execution API를 통해 형제 태스크 상태를 조회한다.
-    dag_run = context["dag_run"]
-    ti = context["ti"]
-    states = ti.get_task_states(
-        dag_id=DAG_ID,
-        task_ids=["wait_for_yesterday_decision"],
-        run_ids=[dag_run.run_id],
-    )
-    if states.get(dag_run.run_id, {}).get("wait_for_yesterday_decision") == "skipped":
-        return "skip_filter_first_run"
-    return "apply_lagged_filter"
-
-
 @dag(
     dag_id=DAG_ID,
     schedule=None,  # TODO: dag_gold_dim_fact 완료 후 트리거 (고정 시간 없음 - 센서가 대기)
@@ -109,33 +91,7 @@ def dag_risk_decision():
         timeout=timedelta(hours=3).total_seconds(),
     )
 
-    # 2. wait_for_yesterday_decision
-    wait_for_yesterday_decision = ExternalTaskSensor(
-        task_id="wait_for_yesterday_decision",
-        external_dag_id=DAG_ID,
-        external_task_id="build_fact_bike_decision",
-        execution_date_fn=lambda dt: dt - timedelta(days=1),
-        mode="reschedule",
-        timeout=timedelta(minutes=10).total_seconds(),
-        soft_fail=True,  # 최초 실행일엔 T-1이 없어서 타임아웃 -> skipped로 처리 (DAG 안 죽음)
-    )
-
-    # 3. check_cold_start
-    # 기본 trigger_rule(all_success)이면 바로 위(wait_for_yesterday_decision)가 cold
-    # start로 skipped됐을 때 이 태스크까지 자동으로 skip되어 분기 판단 자체가 안 된다.
-    # skip도 "실패는 아님"으로 취급해 계속 진행해야 하므로 none_failed로 바꾼다.
-    check_cold_start = BranchPythonOperator(
-        task_id="check_cold_start",
-        python_callable=_branch_on_cold_start,
-        trigger_rule="none_failed",
-    )
-
-    # 4-a / 4-b. 둘 다 EmptyOperator - 실제 필터 분기는 없고(아래 5+6 참고),
-    # 원안의 태스크 이름/구조만 유지하기 위한 자리표시.
-    skip_filter_first_run = EmptyOperator(task_id="skip_filter_first_run")
-    apply_lagged_filter = EmptyOperator(task_id="apply_lagged_filter")
-
-    # bike_features_daily는 Silver(rental_history/failure_report)만 있으면 되고
+    # 2. build_bike_features_daily - Silver(rental_history/failure_report)만 있으면 되고
     # dag_gold_dim_fact의 Gold 산출물엔 의존하지 않아, gold_facts 대기와 별도로 병렬 실행한다.
     build_bike_features_daily = BashOperator(
         task_id="build_bike_features_daily",
@@ -143,30 +99,23 @@ def dag_risk_decision():
         execution_timeout=timedelta(minutes=30),
     )
 
-    # 5+6. run_risk_scoring_model + build_fact_bike_risk
+    # 3. run_risk_scoring_model + build_fact_bike_risk
     # 원안엔 별도 태스크였지만, 모델 로드/추론 -> UPSERT가 하나의 Spark 세션 안에서
     # 자연스럽게 이어지는 처리라(build_fact_bike_risk.py) 태스크도 하나로 합쳤다.
-    #
-    # trigger_rule=none_failed_min_one_success: 이 태스크는 check_cold_start 분기의
-    # 합류 지점이다 - skip_filter_first_run/apply_lagged_filter 중 하나는 분기 설계상
-    # 항상 skipped라서, 기본 trigger_rule(all_success)이면 이 조건이 영원히 안 맞아
-    # run_risk_scoring_model 이하가 전부 자동 skip되고 DAG는 그대로 success로 표시된다
-    # (실제로는 스코어링도 결정도 안 만들어졌는데 겉보기엔 성공 - 가장 위험한 실패 모드).
     run_risk_scoring_model = BashOperator(
         task_id="run_risk_scoring_model",
         bash_command=_bash("build_fact_bike_risk", "SNAPSHOT_DATE='{{ params.snapshot_date }}' "),
         execution_timeout=timedelta(minutes=30),
-        trigger_rule="none_failed_min_one_success",
     )
 
-    # 7. build_fact_bike_decision
+    # 4. build_fact_bike_decision
     build_fact_bike_decision = BashOperator(
         task_id="build_fact_bike_decision",
         bash_command=_bash("build_fact_bike_decision", "SNAPSHOT_DATE='{{ params.snapshot_date }}' "),
         execution_timeout=timedelta(minutes=30),
     )
 
-    # 8. gold_to_serving_sync 트리거 - wait_for_completion=False로 걸어 sync 실패가
+    # 5. gold_to_serving_sync 트리거 - wait_for_completion=False로 걸어 sync 실패가
     # 이 DAG(이미 만들어진 gold 데이터는 그 자체로 유효함)를 실패로 만들지 않게 한다.
     #
     # conf로 이 DAG가 실제로 처리한 날짜(params.snapshot_date, 미지정이면 ds)를 명시적으로
@@ -182,10 +131,7 @@ def dag_risk_decision():
         reset_dag_run=True,
     )
 
-    wait_for_gold_facts >> wait_for_yesterday_decision >> check_cold_start
-    check_cold_start >> [skip_filter_first_run, apply_lagged_filter]
-    [skip_filter_first_run, apply_lagged_filter, build_bike_features_daily] >> run_risk_scoring_model >> build_fact_bike_decision
-    build_fact_bike_decision >> trigger_serving_sync
+    wait_for_gold_facts >> build_bike_features_daily >> run_risk_scoring_model >> build_fact_bike_decision >> trigger_serving_sync
 
 
 dag_risk_decision()
