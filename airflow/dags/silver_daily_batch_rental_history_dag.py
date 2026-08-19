@@ -8,7 +8,7 @@ from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag
 
 from dag_assets import RENTAL_HISTORY_BRONZE
-from dag_common import DEFAULT_ARGS
+from dag_common import DEFAULT_ARGS, SILVER_POOL
 
 INGESTION_DIR = "/opt/airflow/ingestion"
 STAGING_DIR = "/opt/airflow/staging"
@@ -47,6 +47,7 @@ def silver_daily_batch_rental_history():
             "MAX_DAYS_PER_RUN='{{ params.max_days_per_run }}' ",
         ),
         execution_timeout=timedelta(hours=1),
+        pool=SILVER_POOL,
     )
 
 

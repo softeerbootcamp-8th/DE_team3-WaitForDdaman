@@ -149,13 +149,14 @@ services:
     <<: *airflow-common
     container_name: airflow-init
     # DB 마이그레이션과 계정 생성은 이미지 엔트리포인트가 _AIRFLOW_* 환경변수를 보고 먼저 처리한다.
-    # 그 뒤 Bronze 적재용 풀을 만든다. dag_common.BRONZE_POOL이 이 이름을 참조하는데,
-    # 풀이 없으면 pool을 지정한 태스크가 스케줄되지 못해 DAG가 조용히 멈춘다.
+    # 그 뒤 Bronze/Silver 적재용 풀을 만든다. dag_common.BRONZE_POOL/SILVER_POOL이
+    # 이 이름을 참조하는데, 풀이 없으면 pool을 지정한 태스크가 스케줄되지 못해
+    # DAG가 조용히 멈춘다.
     # pools set은 있으면 갱신 / 없으면 생성이라 재기동해도 안전하다.
     command:
       - bash
       - -c
-      - airflow version && airflow pools set bronze_ingest 2 'Bronze 적재 동시 실행 제한 (LocalStack 쓰기 경합 방지)'
+      - airflow version && airflow pools set bronze_ingest 2 'Bronze 적재 동시 실행 제한 (LocalStack 쓰기 경합 방지)' && airflow pools set silver_process 2 'Silver 변환 동시 실행 제한 (LocalStack 쓰기 경합 방지)'
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'
