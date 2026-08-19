@@ -30,6 +30,17 @@ set_watermark_failure_report 태스크가 이미 세팅해 둔 브론즈 워터�
     airflow dags trigger bronze_catchup_all_sources
     # 구간을 제한하고 싶으면 conf로 override
     airflow dags trigger bronze_catchup_all_sources --conf '{"max_days_per_run": "10"}'
+
+### 트리거 시점 주의 (#74)
+이 DAG은 bronze_daily_batch_all_sources와 같은 BRONZE_POOL(슬롯 2)을 공유한다.
+백필 구간이 크면 몇 시간씩 걸리는데(실측 약 2시간 35분), 그 사이 06:00 KST
+daily_batch 크론이 걸리면 daily_batch의 5개 태스크가 슬롯을 못 잡고 이 DAG이
+끝날 때까지 대기한다 - execution_timeout은 태스크 실행 시작 후부터 재므로
+타임아웃 실패는 안 나지만, 그날 Silver/Gold/Risk 파이프라인 전체가 그만큼
+밀린다. BRONZE_POOL 슬롯을 늘리거나 이 DAG만 별도 pool로 분리하는 것도
+검토했으나, 애초에 슬롯을 2로 제한한 이유(LocalStack 동시 쓰기 3개 이상 시
+"read of closed file" 레이스, 실측 확인)가 재발할 수 있어 보류했다. 대신
+06:00 KST 전후로는 이 DAG을 새로 트리거하지 않는 것으로 회피한다.
 """
 from datetime import timedelta
 
