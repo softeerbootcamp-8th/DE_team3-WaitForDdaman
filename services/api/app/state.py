@@ -23,6 +23,11 @@ DEFAULT_CAPACITY = 700
 # (gold.mart_bike_risk_daily에는 action 컬럼 자체가 없다, #104) — 그래서 여기서는
 # action으로 걸러내지 않고 전부 source로 돌려준다.
 
+# 조치 대상이 아닌 등급. action 컬럼이 있던 시절엔 `action != '조치없음'`으로 걸렀는데
+# #95에서 그 컬럼이 사라진 뒤 조건을 안 넣어서, 정상 자전거까지 수거후보 Pool에 섞여
+# "총 대여중단 대수"가 34,586대(그중 32,922대가 Normal)로 잡히는 문제가 있었다.
+NO_ACTION_GRADE = "Normal"
+
 COLLECT_ACTION = "수거"
 # 이 앱에는 인증이 없어 운영자를 특정할 수 없다 — 실제 신원은 인증 도입 시 채운다.
 ACTIONED_BY = "console"
@@ -93,10 +98,12 @@ def get_map_data() -> dict:
 
 
 def get_bikes() -> tuple[list[dict], list[dict]]:
-    """위험 자전거 후보를 전부 source로 돌려준다 (dest는 항상 빈 배열).
+    """수거 후보 Pool을 전부 source로 돌려준다 (dest는 항상 빈 배열).
 
     gold.mart_bike_risk_daily에 action 컬럼이 없어(#104) 파이프라인이 정한 수거/대여중단
     구분 자체가 없다 — 그 승격은 프론트+백엔드가 capacity 기준으로 한다(useClassifiedPool).
+
+    Normal 등급은 조치 대상이 아니라 Pool에서 뺀다(NO_ACTION_GRADE 주석 참고).
     """
     snapshot_date = _latest_snapshot_date()
     with engine.connect() as conn:
@@ -110,10 +117,11 @@ def get_bikes() -> tuple[list[dict], list[dict]]:
                 LEFT JOIN serving.station_daily s
                   ON s.station_id = b.station_id AND s.snapshot_date = b.snapshot_date
                 WHERE b.snapshot_date = :d AND b.region IS NOT NULL
+                  AND b.risk_grade <> :no_action_grade
                 ORDER BY b.risk_score DESC
                 """
             ),
-            {"d": snapshot_date},
+            {"d": snapshot_date, "no_action_grade": NO_ACTION_GRADE},
         ).mappings().all()
 
     def to_bike(r) -> dict:
