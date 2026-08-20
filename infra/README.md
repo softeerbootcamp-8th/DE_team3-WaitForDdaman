@@ -81,14 +81,36 @@ docker compose -f docker-compose.prod.yml exec -T postgres \
 
 ## CI/CD (GitHub Actions)
 
-- `.github/workflows/ci.yml`: PR마다 pytest(ingestion/staging/pipeline) + web lint/build +
-  3개 prod Dockerfile 빌드 검증(push 없음).
-- `.github/workflows/cd.yml`: `production` 브랜치 push 시 OIDC로 AWS 인증 → 3개 이미지를
-  arm64로 크로스 빌드(QEMU+buildx) & ECR push(`:latest` + `:${{ github.sha }}`) → SSH로
-  EC2 접속해 `docker compose pull && up -d`.
-- 필요한 GitHub Secrets: `AWS_OIDC_ROLE_ARN`, `EC2_HOST`, `EC2_SSH_USER`, `EC2_SSH_PRIVATE_KEY`.
+이미지 push와 배포가 분리되어 있다. 계정 SCP가 MFA 없는 요청을 차단하고 IAM 역할 생성
+권한도 없어서, GitHub Actions(무인 실행)에서 ECR로 직접 push할 방법이 없기 때문이다.
+
+| 단계 | 실행 주체 | AWS 인증 |
+|---|---|---|
+| 테스트/린트/빌드 검증 | `ci.yml` (PR마다 자동) | 불필요 |
+| 이미지 빌드 & ECR push | **로컬 수동** `./infra/push-images.sh` | `aws login` 세션 |
+| EC2 배포 | `cd.yml` (production push 시 자동) | 불필요(SSH만) |
+
+**로컬 이미지 push:**
+```bash
+aws login --profile console   # 브라우저 인증, refresh token으로 자동 갱신
+./infra/push-images.sh        # 3개 이미지 arm64 빌드 + push
+```
+`aws login`은 MFA로 인증된 콘솔 세션 자격증명을 가져오므로 SCP 조건을 만족한다.
+`aws configure`로 넣은 정적 액세스 키는 MFA가 없어서 ECR이 거부된다.
+
+- `ci.yml`: PR마다 pytest(ingestion/staging/pipeline) + web lint/build + 3개 prod
+  Dockerfile 빌드 검증(push 없음).
+- `cd.yml`: `production` 브랜치 push 시 SSH로 EC2 접속해 `docker compose pull && up -d`.
+  EC2는 인스턴스 IAM 역할로 ECR pull하므로 워크플로우에 AWS 자격증명이 필요 없다.
+  `workflow_dispatch`로 수동 실행도 가능(이미지만 새로 올린 뒤 재배포할 때).
+- 필요한 GitHub Secrets: `EC2_HOST`, `EC2_SSH_USER`, `EC2_SSH_PRIVATE_KEY` (3개).
 - **주의**: `down -v`는 절대 CD/운영 스크립트에 넣지 않는다 — Postgres named volume이
   날아가면 Airflow 메타데이터 + bikeman/serving 데이터가 전부 소실된다.
+
+### 나중에 OIDC 권한을 받으면
+관리자가 IAM Identity Provider(`token.actions.githubusercontent.com`) + 역할을 만들어주면,
+`cd.yml`에 `build-and-push` 잡을 되살려(OIDC 인증 → QEMU/buildx로 arm64 크로스 빌드 →
+ECR push) 완전 자동화할 수 있다. 그때 `push-images.sh`는 삭제해도 된다.
 
 ## 알려진 제약 / 후속 작업
 

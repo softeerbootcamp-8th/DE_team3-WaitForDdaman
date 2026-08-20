@@ -1,77 +1,28 @@
 name: CD
 
+# 이미지 빌드/push는 이 워크플로우에 없다.
+#
+# GitHub Actions에서 ECR로 push하려면 OIDC IAM 역할이 필요한데, 계정 SCP가 MFA 없는
+# 요청을 차단하고 IAM 역할 생성 권한도 없어서 무인 실행으로는 인증이 불가능하다.
+# 그래서 이미지 push는 로컬에서 `./infra/push-images.sh`로 수동 실행하고
+# (aws login으로 받은 MFA 세션 사용), 이 워크플로우는 배포만 담당한다.
+#
+# EC2는 인스턴스 IAM 역할로 ECR pull이 되므로(MFA 조건 무관) 이 배포 단계에는
+# AWS 자격증명이 전혀 필요 없다 - SSH 시크릿 3개면 된다.
+#
+# 나중에 관리자가 OIDC 역할을 만들어주면 build-and-push 잡을 되살리고
+# 이 주석과 push-images.sh를 정리하면 된다.
+
 on:
   push:
     branches: [production]
-
-permissions:
-  id-token: write   # OIDC role assumption
-  contents: read
+  workflow_dispatch:   # 이미지만 새로 올린 뒤 재배포하고 싶을 때 수동 실행
 
 env:
   AWS_REGION: ap-northeast-2
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    outputs:
-      registry: ${{ steps.login-ecr.outputs.registry }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Login to ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Set up QEMU (arm64 cross-build - EC2는 t4g.large/Graviton)
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build & push airflow image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: airflow/Dockerfile.prod
-          platforms: linux/arm64
-          push: true
-          tags: |
-            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-airflow:latest
-            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-airflow:${{ github.sha }}
-
-      - name: Build & push api image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: services/api/Dockerfile.prod
-          platforms: linux/arm64
-          push: true
-          tags: |
-            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-api:latest
-            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-api:${{ github.sha }}
-
-      - name: Build & push web image
-        uses: docker/build-push-action@v6
-        with:
-          context: services/web
-          file: services/web/Dockerfile.prod
-          platforms: linux/arm64
-          push: true
-          tags: |
-            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-web:latest
-            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-web:${{ github.sha }}
-
   deploy:
-    needs: build-and-push
     runs-on: ubuntu-latest
     steps:
       - name: Deploy over SSH
@@ -83,9 +34,13 @@ jobs:
           script: |
             set -e
             cd /opt/waitforddaman
-            export ECR_REGISTRY=${{ needs.build-and-push.outputs.registry }}
-            export IMAGE_TAG=${{ github.sha }}
-            aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+            # ECR 로그인은 EC2 인스턴스 프로파일 IAM 역할로 처리된다(정적 키 없음)
+            aws ecr get-login-password --region ${{ env.AWS_REGION }} \
+              | docker login --username AWS --password-stdin \
+                "$(grep '^ECR_REGISTRY=' .env | cut -d= -f2)"
             docker compose -f docker-compose.prod.yml pull
+            # down -v 는 절대 쓰지 않는다 - postgres 볼륨(Airflow 메타데이터 +
+            # bikeman/serving 데이터)이 전부 날아간다. up -d는 컨테이너만 교체한다.
             docker compose -f docker-compose.prod.yml up -d
             docker image prune -f
+            docker compose -f docker-compose.prod.yml ps
