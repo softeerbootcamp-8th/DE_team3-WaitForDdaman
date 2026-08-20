@@ -20,7 +20,7 @@ ENV/
 
 # 환경변수 / 시크릿 (절대 커밋 금지)
 .env
-.env.*
+.env.prod
 *.pem
 *.key
 secrets.yaml
@@ -44,6 +44,7 @@ _SUCCESS
 
 # Docker
 docker-compose.override.yml
+localstack/volume/
 
 # 로컬 데이터 (원본/중간 산출물은 커밋하지 않음, 경로는 폴더 구조 확정 후 조정)
 data/
@@ -60,3 +61,8 @@ Thumbs.db
 
 # 로그
 *.log
+
+*.csv
+*.ini
+
+node_modules/

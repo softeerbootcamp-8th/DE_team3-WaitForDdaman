@@ -1,0 +1,150 @@
+name: CD
+
+on:
+  push:
+    branches: [production]
+  workflow_dispatch:   # 이미지 재빌드/재배포를 수동으로 돌리고 싶을 때
+
+permissions:
+  id-token: write   # OIDC 토큰 발급 (AWS 역할 assume에 필요)
+  contents: read
+
+env:
+  AWS_REGION: ap-northeast-2
+
+# 동시 실행되면 한쪽이 SSH 규칙을 회수하는 사이 다른 쪽이 배포 중일 수 있고,
+# 같은 컨테이너를 동시에 교체하게 되므로 배포는 직렬화한다.
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      registry: ${{ steps.login-ecr.outputs.registry }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 정적 AWS 키를 쓰지 않는다 - OIDC로 waitforddaman-gha-role을 assume한다.
+      # 이 역할의 trust policy가 production 브랜치로만 제한돼 있어서 다른
+      # 브랜치/저장소에서는 assume 자체가 실패한다.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # EC2가 t4g.large(arm64/Graviton)인데 GitHub 러너는 x86_64라서, RUN 스텝
+      # (pip install, apt-get, npm run build)을 실행하려면 QEMU 에뮬레이션이 필요하다.
+      # --platform만 지정하면 exec format error로 죽는다.
+      - name: Set up QEMU (arm64 cross-build)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # :latest 외에 커밋 SHA 태그도 붙인다 - 지금 서버에 어느 커밋이 떠 있는지
+      # 추적하고 문제 시 특정 버전으로 롤백할 수 있게.
+      - name: Build & push airflow image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: airflow/Dockerfile.prod
+          platforms: linux/arm64
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-airflow:latest
+            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-airflow:${{ github.sha }}
+
+      - name: Build & push api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/api/Dockerfile.prod
+          platforms: linux/arm64
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-api:latest
+            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-api:${{ github.sha }}
+
+      - name: Build & push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: services/web
+          file: services/web/Dockerfile.prod
+          platforms: linux/arm64
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-web:latest
+            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-web:${{ github.sha }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      # 보안그룹 22번 포트는 팀 IP만 허용하고 있어서 러너가 그냥은 SSH를 못 붙는다.
+      # GitHub 러너 IP는 매 실행마다 바뀌므로, 배포 직전에 이 실행의 IP만 열고
+      # 끝나면 반드시 닫는다(아래 revoke 스텝이 if: always()).
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get runner public IP
+        id: runner-ip
+        run: echo "ip=$(curl -sf --retry 3 https://checkip.amazonaws.com | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Open SSH for this runner
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ secrets.SSH_SECURITY_GROUP_ID }} \
+            --protocol tcp --port 22 \
+            --cidr ${{ steps.runner-ip.outputs.ip }}/32
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_SSH_USER }}
+          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          envs: ECR_REGISTRY,IMAGE_TAG
+          script: |
+            set -e
+            cd /opt/waitforddaman
+            # EC2는 자체 인스턴스 IAM 역할로 ECR pull한다(GitHub OIDC와는 별개 경로)
+            aws ecr get-login-password --region ap-northeast-2 \
+              | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+            docker compose -f docker-compose.prod.yml pull
+            # up -d로 컨테이너만 교체한다. DB는 RDS에 있어서 컨테이너 교체와
+            # 무관하지만, down -v는 airflow-logs-volume(DAG 실행 로그)을 날리므로
+            # 배포 경로에서는 쓰지 않는다.
+            docker compose -f docker-compose.prod.yml up -d
+            docker image prune -f
+            docker compose -f docker-compose.prod.yml ps
+        env:
+          ECR_REGISTRY: ${{ needs.build-and-push.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+
+      # if: always() - 배포가 실패해도 열어둔 22번 규칙은 반드시 회수한다.
+      # 이게 없으면 실패한 실행의 러너 IP가 영구히 남아 SG가 계속 오염된다.
+      - name: Close SSH for this runner
+        if: always() && steps.runner-ip.outputs.ip != ''
+        run: |
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ secrets.SSH_SECURITY_GROUP_ID }} \
+            --protocol tcp --port 22 \
+            --cidr ${{ steps.runner-ip.outputs.ip }}/32

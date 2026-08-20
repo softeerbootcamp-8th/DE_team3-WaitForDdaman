@@ -1,0 +1,23 @@
+.git
+.github
+.venv
+.DS_Store
+*.png
+
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
+**/node_modules
+**/dist
+**/.vite
+
+airflow/logs
+services/api/.venv
+
+# 백필용 원본 데이터 캐시 (수십 GB, 이미지에 들어가면 안 됨)
+ingestion/data
+
+*.md
