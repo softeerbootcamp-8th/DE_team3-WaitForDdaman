@@ -32,7 +32,7 @@ function passesFilter(bike: Bike, query: string, tiers: Set<string>, urgencies: 
 }
 
 export function DetailPage({
-  meta,
+  meta: _meta,
   mapData,
   districtNames,
   guToSide,

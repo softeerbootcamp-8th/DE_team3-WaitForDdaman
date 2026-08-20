@@ -24,7 +24,7 @@ export function MainPage({
   districtNames,
   guToSide,
   pool,
-  generatedAt,
+  generatedAt: _generatedAt,
   regionFilter,
   onRegionFilterChange,
   onOpenDetail,

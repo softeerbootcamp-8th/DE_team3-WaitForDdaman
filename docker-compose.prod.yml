@@ -1,0 +1,163 @@
+x-airflow-common:
+  &airflow-common
+  image: ${ECR_REGISTRY}/waitforddaman-airflow:${IMAGE_TAG:-latest}
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres/${POSTGRES_DB:-airflow}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow_jwt_secret}
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-ap-northeast-2}
+    # 정적 AWS 키는 의도적으로 설정하지 않는다 - EC2 인스턴스 프로파일 IAM Role로 인증한다
+    # (ingestion/README.md에 문서화된 설계). 여기서 빈 문자열 기본값조차 주면 STS
+    # 자격증명 체인을 오히려 방해할 수 있어 아예 생략한다.
+    APP_ENV: aws
+    ICEBERG_CATALOG_TYPE: hadoop  # Glue 권한이 없어 hadoop 카탈로그로 고정
+    ICEBERG_CATALOG_NAME: ${ICEBERG_CATALOG_NAME:-bike_catalog}
+    ICEBERG_WAREHOUSE_PATH: ${ICEBERG_WAREHOUSE_PATH}
+    RAW_BUCKET: ${RAW_BUCKET}
+    WAREHOUSE_BUCKET: ${WAREHOUSE_BUCKET}
+    # t4g.large(8GB)에서 6g 힙 JVM을 동시에 여러 개 띄우면 OOM 위험이 크므로
+    # 로컬 튜닝(local[2] 등)은 유지하되 driver 메모리는 낮춰서 사용한다.
+    # 실측 후 조정 필요 - ingestion/common/spark_session.py 참고.
+    SPARK_LOCAL_EXECUTION: 'true'
+    RISK_MODEL_CONFIG: ${RISK_MODEL_CONFIG:-/opt/airflow/pylib/config/risk_model.yaml}
+    PYTHONPATH: /opt/airflow/pylib
+  volumes:
+    - airflow-logs-volume:/opt/airflow/logs
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${POSTGRES_DB:-airflow}
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-airflow}"]
+      interval: 5s
+      retries: 5
+    restart: always
+    # 주의: host에 5432 포트를 노출하지 않는다 (prod에서는 컨테이너 내부망으로만 접근)
+
+  api:
+    container_name: service-api
+    image: ${ECR_REGISTRY}/waitforddaman-api:${IMAGE_TAG:-latest}
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres/${POSTGRES_DB:-airflow}
+    expose:
+      - "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: always
+    # 주의: host에 8000 포트를 노출하지 않는다 - web(nginx)이 내부망으로 /api를 프록시한다
+
+  web:
+    container_name: service-web
+    image: ${ECR_REGISTRY}/waitforddaman-web:${IMAGE_TAG:-latest}
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+    restart: always
+
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: airflow-apiserver
+    command: api-server
+    ports:
+      - "8080:8080"  # 보안그룹에서 관리자 IP만 허용
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: airflow-dag-processor
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: airflow-triggerer
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    # DB 마이그레이션/계정 생성은 이미지 엔트리포인트가 _AIRFLOW_* 환경변수를 보고
+    # 처리한 뒤, Bronze/Silver 적재용 풀을 만든다. t4g.large(8GB) 메모리 제약으로
+    # 동시성을 2가 아닌 1로 낮춘다 - 필요 시 실측 후 조정.
+    command:
+      - bash
+      - -c
+      - airflow version && airflow pools set bronze_ingest 1 'Bronze 적재 동시 실행 제한 (t4g.large 메모리 제약)' && airflow pools set silver_process 1 'Silver 변환 동시 실행 제한 (t4g.large 메모리 제약)'
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+
+volumes:
+  postgres-db-volume:
+  airflow-logs-volume:

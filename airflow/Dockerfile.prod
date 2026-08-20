@@ -1,0 +1,58 @@
+# ============================================================================
+# Airflow 프로덕션(EC2) 이미지
+#
+# Dockerfile.local과 동일하게 PySpark ingestion 잡을 Airflow 컨테이너 안에서
+# 직접 실행하기 위한 JVM을 포함한다. local과의 차이는 EC2에는 저장소 소스
+# 트리가 없으므로 bind mount 대신 ingestion/staging/pipeline/config/dags를
+# 이미지에 직접 COPY한다는 점뿐이다.
+# ============================================================================
+
+ARG AIRFLOW_VERSION=3.3.0
+ARG PYTHON_VERSION=3.11
+
+FROM apache/airflow:${AIRFLOW_VERSION}-python${PYTHON_VERSION}
+
+# ----------------------------------------------------------------------------
+# 1) Java(JVM) 설치 - PySpark 실행에 필요
+# ----------------------------------------------------------------------------
+USER root
+RUN apt-get update \
+    # libgomp1: lightgbm(risk_model_v1.joblib 추론용)이 내부적으로 OpenMP를 쓰는데,
+    # 이 공유 라이브러리가 없으면 "libgomp.so.1: cannot open shared object file"로 죽는다.
+    && apt-get install -y --no-install-recommends openjdk-17-jre-headless libgomp1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf "$(dirname "$(dirname "$(readlink -f "$(which java)")")")" /usr/lib/jvm/current-java
+
+ENV JAVA_HOME=/usr/lib/jvm/current-java
+
+USER airflow
+
+# ----------------------------------------------------------------------------
+# 2) Airflow 자체 의존성 + ingestion 파이프라인 의존성
+# ----------------------------------------------------------------------------
+COPY airflow/requirements.txt /requirements.txt
+RUN pip install --no-cache-dir -r /requirements.txt
+
+COPY ingestion/requirements.txt /ingestion-requirements.txt
+RUN pip install --no-cache-dir -r /ingestion-requirements.txt
+
+# ----------------------------------------------------------------------------
+# 3) 소스 코드 - EC2에는 bind mount 대상 소스 트리가 없으므로 이미지에 굽는다
+#    (airflow/logs는 런타임 상태라 named volume으로 유지, 여기서 COPY하지 않음)
+# ----------------------------------------------------------------------------
+ENV PYTHONPATH=/opt/airflow/pylib
+
+COPY --chown=airflow:0 airflow/dags /opt/airflow/dags
+COPY --chown=airflow:0 airflow/plugins /opt/airflow/plugins
+COPY --chown=airflow:0 airflow/config /opt/airflow/config
+COPY --chown=airflow:0 airflow/scripts /opt/airflow/scripts
+# ingestion/ 전체가 아니라 실제 실행에 필요한 서브디렉터리만 명시적으로 복사한다.
+# ingestion/data에는 로컬 백필 원본 데이터 캐시(수십 GB)가 들어있어 통째로
+# COPY하면 안 된다 - .dockerignore로도 막혀 있지만 여기서도 이중으로 방지한다.
+COPY --chown=airflow:0 ingestion/common /opt/airflow/ingestion/common
+COPY --chown=airflow:0 ingestion/jobs /opt/airflow/ingestion/jobs
+COPY --chown=airflow:0 ingestion/schema /opt/airflow/ingestion/schema
+COPY --chown=airflow:0 staging /opt/airflow/staging
+COPY --chown=airflow:0 pipeline /opt/airflow/pipeline
+COPY --chown=airflow:0 config /opt/airflow/pylib/config
