@@ -83,14 +83,33 @@ prod 전용 차이: `APP_ENV=aws`, `ICEBERG_CATALOG_TYPE=hadoop`, `SPARK_LOCAL_E
 `S3_ENDPOINT`/정적 AWS 키 미설정(인스턴스 IAM Role 사용), `AIRFLOW_DB_*`/`DOMAIN_DB_*`/
 `SERVING_DB_*`/`BIKEMAN_DB_*`는 RDS 엔드포인트.
 
-**파일 권한이 중요하다:**
+### .env 관리 방식
+
+`.env` 파일이 두 개라 혼동하기 쉽다:
+
+| 파일 | 용도 | git |
+|---|---|---|
+| `.env` (저장소 루트) | **로컬 개발용** (develop 브랜치 기준) | 무시됨 |
+| `.env.prod` (저장소 루트) | **프로덕션 값의 source of truth** | 무시됨 |
+| `/opt/waitforddaman/.env` (EC2) | 실제로 컨테이너가 읽는 파일 | - |
+| `.env.example` | 템플릿(플레이스홀더만) | **추적됨** |
+
+`.env.prod`를 편집한 뒤 아래로 반영한다. **서버에서 직접 편집하지 말 것** — 로컬과
+갈려서 다음 sync에 덮어써진다.
+
 ```bash
-sudo chown ec2-user:root /opt/waitforddaman/.env && chmod 640 /opt/waitforddaman/.env
+./infra/sync-env.sh              # 반영만 (DAG가 source하는 값은 다음 태스크에 바로 적용)
+./infra/sync-env.sh --restart    # compose environment: 블록 값을 바꿨을 때
 ```
-Airflow 컨테이너가 uid 50000 / **gid 0**으로 돌면서 이 파일을
+
+스크립트가 하는 일: 플레이스홀더 미기입 검사 → scp → **권한 640 설정** → 컨테이너에서
+실제로 읽히는지 확인.
+
+**권한이 왜 중요한가:** Airflow 컨테이너가 uid 50000 / **gid 0**으로 돌면서 이 파일을
 `/opt/airflow/ingestion/.env`로 마운트해 `source`한다. `chmod 600`으로 두면 컨테이너가
 읽지 못해 **모든 DAG 태스크가 "Permission denied"로 실패한다**(실제로 겪음). 그룹 root에
-읽기 권한을 주면 컨테이너는 읽고 호스트의 다른 사용자는 못 읽는 상태가 된다.
+읽기 권한을 주면 컨테이너는 읽고 호스트의 다른 사용자는 못 읽는 상태가 된다. 수동 scp로는
+이 단계를 빼먹기 쉬워서 스크립트로 굳혔다.
 
 ## 최초 수동 배포
 
