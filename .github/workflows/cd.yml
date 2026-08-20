@@ -26,6 +26,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Debug GitHub OIDC claims
+        run: |
+          set -euo pipefail
+
+          TOKEN="$(curl -sS \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" \
+            | jq -r '.value')"
+
+          TOKEN="$TOKEN" python - <<'PY'
+import os, json, base64
+
+token = os.environ["TOKEN"]
+payload = token.split(".")[1]
+payload += "=" * (-len(payload) % 4)
+claims = json.loads(base64.urlsafe_b64decode(payload))
+
+for key in ["sub", "aud", "repository", "repository_owner", "ref", "workflow", "event_name", "job_workflow_ref"]:
+    print(f"{key} = {claims.get(key)}")
+PY
+
       # 정적 AWS 키를 쓰지 않는다 - OIDC로 waitforddaman-gha-role을 assume한다.
       # 이 역할의 trust policy가 production 브랜치로만 제한돼 있어서 다른
       # 브랜치/저장소에서는 assume 자체가 실패한다.
