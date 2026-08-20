@@ -17,8 +17,17 @@ set -euo pipefail
 
 AWS_PROFILE_NAME="${AWS_PROFILE_NAME:-console}"
 AWS_REGION="${AWS_REGION:-ap-northeast-2}"
-ACCOUNT_ID="910534606964"
-REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+# 레지스트리 주소(=AWS 계정 ID 포함)는 저장소에 하드코딩하지 않는다.
+# gitignore되는 .env.prod에서 읽고, 없으면 환경변수로 받는다.
+if [[ -z "${ECR_REGISTRY:-}" && -f "$(dirname "${BASH_SOURCE[0]}")/../.env.prod" ]]; then
+  ECR_REGISTRY="$(grep -m1 '^ECR_REGISTRY=' "$(dirname "${BASH_SOURCE[0]}")/../.env.prod" | cut -d= -f2-)"
+fi
+if [[ -z "${ECR_REGISTRY:-}" ]]; then
+  echo "ECR_REGISTRY를 찾을 수 없다. .env.prod에 넣거나 환경변수로 지정하세요:" >&2
+  echo "  ECR_REGISTRY=<account-id>.dkr.ecr.ap-northeast-2.amazonaws.com $0" >&2
+  exit 1
+fi
+REGISTRY="$ECR_REGISTRY"
 EXTRA_TAG="${1:-}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

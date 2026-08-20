@@ -11,7 +11,6 @@ permissions:
 
 env:
   AWS_REGION: ap-northeast-2
-  SSH_SECURITY_GROUP_ID: sg-02e6dec021b39174f   # waitforddaman-prod-sg
 
 # 동시 실행되면 한쪽이 SSH 규칙을 회수하는 사이 다른 쪽이 배포 중일 수 있고,
 # 같은 컨테이너를 동시에 교체하게 되므로 배포는 직렬화한다.
@@ -112,7 +111,7 @@ jobs:
       - name: Open SSH for this runner
         run: |
           aws ec2 authorize-security-group-ingress \
-            --group-id ${{ env.SSH_SECURITY_GROUP_ID }} \
+            --group-id ${{ secrets.SSH_SECURITY_GROUP_ID }} \
             --protocol tcp --port 22 \
             --cidr ${{ steps.runner-ip.outputs.ip }}/32
 
@@ -130,8 +129,9 @@ jobs:
             aws ecr get-login-password --region ap-northeast-2 \
               | docker login --username AWS --password-stdin "$ECR_REGISTRY"
             docker compose -f docker-compose.prod.yml pull
-            # down -v 는 절대 쓰지 않는다 - postgres 볼륨(Airflow 메타데이터 +
-            # bikeman/serving 데이터)이 전부 날아간다. up -d는 컨테이너만 교체한다.
+            # up -d로 컨테이너만 교체한다. DB는 RDS에 있어서 컨테이너 교체와
+            # 무관하지만, down -v는 airflow-logs-volume(DAG 실행 로그)을 날리므로
+            # 배포 경로에서는 쓰지 않는다.
             docker compose -f docker-compose.prod.yml up -d
             docker image prune -f
             docker compose -f docker-compose.prod.yml ps
@@ -145,6 +145,6 @@ jobs:
         if: always() && steps.runner-ip.outputs.ip != ''
         run: |
           aws ec2 revoke-security-group-ingress \
-            --group-id ${{ env.SSH_SECURITY_GROUP_ID }} \
+            --group-id ${{ secrets.SSH_SECURITY_GROUP_ID }} \
             --protocol tcp --port 22 \
             --cidr ${{ steps.runner-ip.outputs.ip }}/32

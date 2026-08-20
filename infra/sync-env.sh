@@ -17,13 +17,21 @@
 #   scp -i "$SSH_KEY" ec2-user@"$EC2_HOST":/opt/waitforddaman/.env ./.env.prod
 set -euo pipefail
 
-EC2_HOST="${EC2_HOST:-43.203.235.73}"
 EC2_USER="${EC2_USER:-ec2-user}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/waitforddaman-prod-key.pem}"
 REMOTE_DIR="/opt/waitforddaman"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$REPO_ROOT/.env.prod"
+
+# 서버 주소는 저장소에 하드코딩하지 않는다. gitignore되는 .env.prod에서 읽는다.
+if [[ -z "${EC2_HOST:-}" && -f "$ENV_FILE" ]]; then
+  EC2_HOST="$(grep -m1 '^EC2_HOST=' "$ENV_FILE" | cut -d= -f2-)"
+fi
+if [[ -z "${EC2_HOST:-}" ]]; then
+  echo "EC2_HOST를 찾을 수 없다. .env.prod에 EC2_HOST=<주소> 를 넣거나 환경변수로 지정하세요." >&2
+  exit 1
+fi
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "없음: $ENV_FILE" >&2
