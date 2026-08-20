@@ -61,7 +61,17 @@ scp -i ~/.ssh/waitforddaman-prod-key.pem docker-compose.prod.yml ec2-user@<EC2_P
 
 `/opt/waitforddaman/.env`를 서버에서 직접 작성(레포에는 절대 커밋하지 않음, `.env.example` 참고).
 prod 전용 차이: `APP_ENV=aws`, `ICEBERG_CATALOG_TYPE=hadoop`, `SPARK_LOCAL_EXECUTION=true`,
-`S3_ENDPOINT`/정적 AWS 키 미설정(인스턴스 IAM Role 사용).
+`S3_ENDPOINT`/정적 AWS 키 미설정(인스턴스 IAM Role 사용), `AIRFLOW_DB_*`/`DOMAIN_DB_*`/
+`SERVING_DB_*`/`BIKEMAN_DB_*`는 RDS 엔드포인트.
+
+**파일 권한이 중요하다:**
+```bash
+sudo chown ec2-user:root /opt/waitforddaman/.env && chmod 640 /opt/waitforddaman/.env
+```
+Airflow 컨테이너가 uid 50000 / **gid 0**으로 돌면서 이 파일을
+`/opt/airflow/ingestion/.env`로 마운트해 `source`한다. `chmod 600`으로 두면 컨테이너가
+읽지 못해 **모든 DAG 태스크가 "Permission denied"로 실패한다**(실제로 겪음). 그룹 root에
+읽기 권한을 주면 컨테이너는 읽고 호스트의 다른 사용자는 못 읽는 상태가 된다.
 
 ## 최초 수동 배포
 
