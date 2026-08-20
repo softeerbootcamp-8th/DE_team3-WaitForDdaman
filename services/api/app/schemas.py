@@ -68,3 +68,5 @@ class ConfirmRequest(BaseModel):
 class ConfirmResponse(BaseModel):
     snapshot_date: str
     confirmed: int
+    # 마지막 확정 시각. 아직 확정한 적이 없으면 None (confirmed도 0)
+    actioned_at: Optional[str]

@@ -62,4 +62,6 @@ export interface BikeLists {
 export interface ConfirmResponse {
   snapshot_date: string;
   confirmed: number;
+  /** 마지막 확정 시각. 아직 확정한 적 없으면 null */
+  actioned_at: string | null;
 }

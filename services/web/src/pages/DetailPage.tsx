@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { BikeTable } from "../components/BikeTable";
-import { CapacityPanel, type ConfirmState } from "../components/CapacityPanel";
+import { CapacityPanel } from "../components/CapacityPanel";
 import { Controls } from "../components/Controls";
 import { DetailPanel } from "../components/DetailPanel";
 import { DistrictMap } from "../components/DistrictMap";
 import { RegionFilterBar } from "../components/RegionFilterBar";
 import type { UseCapacityResult } from "../hooks/useCapacity";
 import { useClassifiedPool } from "../hooks/useClassifiedPool";
-import type { Bike, MapData, RegionFilter, Side } from "../types";
+import type { Bike, ConfirmResponse, MapData, RegionFilter, Side } from "../types";
 import { ALL_FILTER, isDistrictActive, matchesRegion, regionLabel } from "../utils/regions";
 
 interface DetailPageProps {
@@ -44,7 +44,9 @@ export function DetailPage({
   const [tiers, setTiers] = useState<Set<string>>(new Set(["Critical", "Warning"]));
   const [urgencies, setUrgencies] = useState<Set<string>>(new Set(["여유있음", "부족함"]));
   const [activeDetailId, setActiveDetailId] = useState<string | null>(null);
-  const [confirmState, setConfirmState] = useState<ConfirmState>({ kind: "idle" });
+  // 서버에 저장된 확정 내역. 새로고침해도 남아야 하므로 로드 시 API에서 읽어온다.
+  const [confirmed, setConfirmed] = useState<ConfirmResponse | null>(null);
+  const [submitState, setSubmitState] = useState<"idle" | "saving" | "error">("idle");
 
   const { dest, source } = useClassifiedPool(pool, regionFilter, capacity);
 
@@ -52,16 +54,28 @@ export function DetailPage({
   // "총 수거대수"로 보여주는 것과 정확히 같은 집합(같은 useClassifiedPool + ALL_FILTER)이다.
   const { dest: confirmTargets } = useClassifiedPool(pool, ALL_FILTER, capacity);
 
-  // capacity를 다시 조절하면 직전 확정 표시는 더 이상 지금 목록을 뜻하지 않으므로 되돌린다.
-  useEffect(() => setConfirmState({ kind: "idle" }), [confirmTargets]);
+  useEffect(() => {
+    let alive = true;
+    api
+      .getConfirmation()
+      .then((c) => {
+        if (alive && c.confirmed > 0) setConfirmed(c);
+      })
+      .catch(() => {
+        // 확정 내역을 못 읽어도 화면 나머지는 그대로 쓸 수 있으므로 조용히 넘어간다.
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const handleConfirm = useCallback(async () => {
-    setConfirmState({ kind: "saving" });
+    setSubmitState("saving");
     try {
-      const result = await api.confirmCollection(confirmTargets.map((b) => b.bike_id));
-      setConfirmState({ kind: "done", count: result.confirmed });
+      setConfirmed(await api.confirmCollection(confirmTargets.map((b) => b.bike_id)));
+      setSubmitState("idle");
     } catch {
-      setConfirmState({ kind: "error" });
+      setSubmitState("error");
     }
   }, [confirmTargets]);
 
@@ -122,7 +136,8 @@ export function DetailPage({
         filter={regionFilter}
         capacity={capacity}
         confirmCount={confirmTargets.length}
-        confirmState={confirmState}
+        confirmed={confirmed}
+        submitState={submitState}
         onConfirm={handleConfirm}
       />
 

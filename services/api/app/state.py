@@ -177,6 +177,41 @@ def ensure_action_log_table() -> None:
         )
 
 
+def get_latest_confirmation() -> dict:
+    """오늘 스냅샷의 마지막 확정 상태. 새로고침해도 확정 여부가 보이도록 프론트가 이걸 읽는다.
+
+    append-only라 같은 날 여러 배치가 쌓일 수 있으므로 최신 배치(actioned_at 최대값)만 센다.
+    어제 확정이 남아있어도 오늘 스냅샷 기준으로만 보므로 오늘 것으로 오인되지 않는다.
+    """
+    ensure_action_log_table()
+    snapshot_date = _latest_snapshot_date()
+    if snapshot_date is None:
+        return {"snapshot_date": "", "confirmed": 0, "actioned_at": None}
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT count(*) AS confirmed, max(actioned_at) AS actioned_at
+                FROM app.action_log
+                WHERE snapshot_date = :d AND action_taken = :action
+                  AND actioned_at = (
+                      SELECT max(actioned_at) FROM app.action_log
+                      WHERE snapshot_date = :d AND action_taken = :action
+                  )
+                """
+            ),
+            {"d": snapshot_date, "action": COLLECT_ACTION},
+        ).mappings().first()
+
+    actioned_at = row["actioned_at"] if row else None
+    return {
+        "snapshot_date": snapshot_date.isoformat(),
+        "confirmed": row["confirmed"] if row else 0,
+        "actioned_at": actioned_at.isoformat() if actioned_at else None,
+    }
+
+
 def confirm_collection(bike_ids: list[str]) -> dict:
     """운영자가 확정한 수거 목록을 app.action_log에 기록한다.
 
@@ -206,13 +241,10 @@ def confirm_collection(bike_ids: list[str]) -> dict:
     ensure_action_log_table()
     snapshot_date = _latest_snapshot_date()
     if snapshot_date is None or not bike_ids:
-        return {
-            "snapshot_date": snapshot_date.isoformat() if snapshot_date else "",
-            "confirmed": 0,
-        }
+        return get_latest_confirmation()
 
     with engine.begin() as conn:
-        result = conn.execute(
+        conn.execute(
             text(
                 """
                 INSERT INTO app.action_log
@@ -230,7 +262,9 @@ def confirm_collection(bike_ids: list[str]) -> dict:
             },
         )
 
-    return {"snapshot_date": snapshot_date.isoformat(), "confirmed": result.rowcount}
+    # 방금 넣은 배치를 그대로 다시 읽어 돌려준다 — GET /api/actions/confirm과 항상 같은 값을
+    # 보게 되므로, 확정 직후 화면과 새로고침 후 화면이 어긋나지 않는다.
+    return get_latest_confirmation()
 
 
 class OperationState:
@@ -247,6 +281,10 @@ class OperationState:
 
     def confirm_collection(self, bike_ids: list[str]) -> dict:
         return confirm_collection(bike_ids)
+
+    @property
+    def latest_confirmation(self) -> dict:
+        return get_latest_confirmation()
 
 
 state = OperationState()
