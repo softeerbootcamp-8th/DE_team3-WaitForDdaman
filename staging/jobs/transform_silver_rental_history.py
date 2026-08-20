@@ -65,7 +65,7 @@ def _ensure_silver_table(spark) -> None:
     )
     # 여러 rent_date_partition에 걸친 구간을 한 번의 overwritePartitions()로 쓸 때,
     # 이 속성 없이는 Iceberg가 FanoutWriter를 써서 파티션마다 파일을 동시에 열어두다
-    # OOM 나는 걸 backfill_rental_history.py에서 실측으로 확인함 -> 여기도 동일 적용
+    # OOM 나는 걸 initial_load_rental_history.py에서 실측으로 확인함 -> 여기도 동일 적용
     spark.sql(
         f"ALTER TABLE {_silver_table()} SET TBLPROPERTIES ('write.distribution-mode'='hash')"
     )
@@ -93,8 +93,8 @@ def _dedup_bike_rent_dt(silver_df):
 
 
 # --- rent_dt/return_dt 날짜 파싱 ---
-# Bronze는 원본 문자열을 그대로 보존하므로 소스(API/CSV 백필)마다 포맷이 다를 수 있음
-# (rent_date_partition을 만들 때도 같은 이유로 포맷 편차에 대응함 - backfill_rental_history.py 참고)
+# Bronze는 원본 문자열을 그대로 보존하므로 소스(API/CSV 초기 적재)마다 포맷이 다를 수 있음
+# (rent_date_partition을 만들 때도 같은 이유로 포맷 편차에 대응함 - initial_load_rental_history.py 참고)
 _KNOWN_DATETIME_FORMATS = [
     "yyyy-MM-dd HH:mm:ss",
     "yyyyMMddHHmmss",

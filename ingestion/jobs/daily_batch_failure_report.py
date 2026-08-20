@@ -46,9 +46,9 @@ def _table_name() -> str:
 
 def _ensure_bronze_table(spark) -> None:
     """
-    backfill_failure_report.py와 동일한 DDL - 백필 없이 daily_batch만 단독으로
+    initial_load_failure_report.py와 동일한 DDL - 초기 적재 없이 daily_batch만 단독으로
     먼저 돌리는 경우에도 테이블이 없어서 writeTo().overwritePartitions()가
-    TABLE_OR_VIEW_NOT_FOUND로 실패하지 않게 한다. 이미 백필로 테이블이 있어도
+    TABLE_OR_VIEW_NOT_FOUND로 실패하지 않게 한다. 이미 초기 적재로 테이블이 있어도
     CREATE TABLE IF NOT EXISTS라 안전하다(no-op).
     """
     spark.sql(f"CREATE DATABASE IF NOT EXISTS {config.SETTINGS.iceberg_catalog_name}.bronze")

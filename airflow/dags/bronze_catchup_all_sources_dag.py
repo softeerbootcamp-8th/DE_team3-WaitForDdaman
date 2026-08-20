@@ -1,10 +1,10 @@
 """
-Bronze 갭 브릿지 DAG - 파일 백필과 오늘 사이의 남은 구간을 한 번에 메운다
+Bronze 갭 브릿지 DAG - 초기 적재와 오늘 사이의 남은 구간을 한 번에 메운다
 
 ### 왜 필요한가
 bronze_daily_batch_all_sources는 DEFAULT_MAX_DAYS_PER_RUN="3"으로 캡이 걸려 있어
 정상 운영(매일 크론) 중에는 절대 큰 구간을 한 번에 훑지 않는다. 신규 환경을
-부트스트랩할 때는 상황이 다르다 - 파일 백필(bronze_backfill_all_sources)이
+부트스트랩할 때는 상황이 다르다 - 초기 적재(bronze_initial_load_all_sources)가
 예를 들어 6월까지만 커버하고 "오늘"이 8월이면, 하루 3일씩 캡 걸린 크론이 그 갭을
 메우는 데 며칠이 걸린다.
 
@@ -12,17 +12,17 @@ bronze_daily_batch_all_sources는 DEFAULT_MAX_DAYS_PER_RUN="3"으로 캡이 걸�
 MAX_DAYS_PER_RUN만 무제한으로 넘겨 한 번에 실행한다. 새 잡 코드는 없다.
 
 station_master/station_active는 "그날 스냅샷"만 다루는 구조라 갭 개념이 없고,
-bikeman_event는 파일 백필이 없어 해당 없다 - 그래서 이 DAG의 대상은 rental_history/
+bikeman_event는 초기 적재가 없어 해당 없다 - 그래서 이 DAG의 대상은 rental_history/
 failure_report 둘뿐이다.
 
-### bronze_backfill_all_sources와의 관계
-완전히 독립적인 별개 DAG이다. 파일 백필 직후 부트스트랩에도 쓰지만, 나중에
-daily_batch가 며칠 밀리는 장애가 나도 파일 백필을 다시 돌릴 필요 없이 이 DAG만
+### bronze_initial_load_all_sources와의 관계
+완전히 독립적인 별개 DAG이다. 초기 적재 직후 부트스트랩에도 쓰지만, 나중에
+daily_batch가 며칠 밀리는 장애가 나도 초기 적재를 다시 돌릴 필요 없이 이 DAG만
 재트리거하면 된다.
 
 ### 워터마크
-별도로 세팅하지 않는다. bronze_backfill_all_sources의 set_watermark_rental_history/
-set_watermark_failure_report 태스크가 이미 세팅해 둔 브론즈 워터마크(파일 백필
+별도로 세팅하지 않는다. bronze_initial_load_all_sources의 set_watermark_rental_history/
+set_watermark_failure_report 태스크가 이미 세팅해 둔 브론즈 워터마크(초기 적재
 마지막 날짜)에서 그대로 이어받는다. outlets는 daily_batch와 동일하게 걸어서, 실행
 후 해당 Silver DAG(Asset 트리거)도 평소처럼 자동으로 이어지게 한다.
 

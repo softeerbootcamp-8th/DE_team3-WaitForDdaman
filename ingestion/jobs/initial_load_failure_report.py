@@ -1,18 +1,20 @@
 """
-Bronze 백필 잡 - 서울시 공공자전거 고장신고 내역 (OA-15644)
+Bronze 초기 적재 잡 - 서울시 공공자전거 고장신고 내역 (OA-15644)
 
-실행 방식: 열린데이터광장에서 반기별로 "대량 다운로드"한 원본 파일들을
-로컬 디렉토리(INPUT_DIR)에 모아두고 1회 실행한다.
+실행 방식: 파일 하나(INPUT_FILE)를 받아 독립된 프로세스(=하나의 Spark 세션/JVM)로
+처리하고 종료한다. 파일 다운로드와 대상 목록 나열은 jobs/list_input_files.py가
+먼저 수행한다 - Airflow DAG는 그 목록으로 Dynamic Task Mapping을 돌려 파일마다
+이 스크립트를 별도 프로세스로 실행한다.
 
 주의: 가장 오래된 파일(2015_2020.10)은 .xlsx 형식이고, 나머지는 .csv(일부는
 확장자만 .csv인 zip)다. 둘 다 이 잡에서 자동으로 처리한다.
 
 멱등성: 재실행 시 동일 날짜(reg_date_partition) 파티션을 덮어쓴다.
-안전한 실패: 파일 하나가 스키마 검증에 실패해도 전체 배치를 죽이지 않고 스킵한다.
+안전한 실패: 압축 파일 하나가 여러 CSV로 풀리는 경우, 그중 스키마 검증에 실패하는
+            CSV가 있어도 전체를 죽이지 않고 그 CSV만 스킵한다.
 
 사용법:
-    INPUT_DIR=./raw_downloads python -m jobs.backfill_failure_report
-    INPUT_DIR=./raw_downloads INPUT_FILE_PATTERN="*2601*" python -m jobs.backfill_failure_report
+    INPUT_FILE=./raw_downloads/failure_2601.csv python -m jobs.initial_load_failure_report
 """
 import logging
 import os
@@ -119,56 +121,55 @@ def _process_one_file(spark, raw_path: Path, workdir: Path):
     return bronze_df
 
 
-def run(input_dir: str) -> None:
+def run(input_file: str) -> None:
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
-    spark = build_spark_session("bronze-backfill-failure-report")
+    spark = build_spark_session("bronze-initial-load-failure-report")
     _ensure_bronze_table(spark)
 
-    file_pattern = os.getenv("INPUT_FILE_PATTERN", "*")
-    input_files = sorted(Path(input_dir).glob(file_pattern))
-    if not input_files:
-        logger.error("입력 디렉토리에 파일이 없습니다: %s (패턴: %s)", input_dir, file_pattern)
+    raw_path = Path(input_file)
+    if not raw_path.exists():
+        logger.error("입력 파일이 없습니다: %s", input_file)
         sys.exit(1)
 
-    total_files, total_rows, failed_files, skipped_files = 0, 0, [], []
+    total_rows, failed, skipped = 0, False, False
 
+    # 파일 1개 처리 범위로 한정된 TemporaryDirectory. 프로세스도 파일 1개만 처리하고
+    # 종료하므로, 정상/OOM 종료 여부와 무관하게 이 파일 하나 분량만 디스크에 남을 수 있다.
     with tempfile.TemporaryDirectory() as tmpdir:
         workdir = Path(tmpdir)
-        for raw_path in input_files:
-            for target_path in unzip_if_needed(raw_path, workdir):
-                total_files += 1
-                try:
-                    bronze_df = _process_one_file(spark, target_path, workdir).cache()
-                    row_count = bronze_df.count()
+        for target_path in unzip_if_needed(raw_path, workdir):
+            try:
+                bronze_df = _process_one_file(spark, target_path, workdir).cache()
+                row_count = bronze_df.count()
 
-                    bronze_df.writeTo(_table_name()).overwritePartitions()
-                    bronze_df.unpersist()
+                bronze_df.writeTo(_table_name()).overwritePartitions()
+                bronze_df.unpersist()
 
-                    total_rows += row_count
-                    logger.info("적재 완료: %s (%d행)", target_path.name, row_count)
-                except NotThisDatasetError as e:
-                    logger.info("고장신고 데이터셋이 아닌 것으로 보여 스킵: %s (%s)", target_path.name, e)
-                    skipped_files.append(target_path.name)
-                    continue
-                except SchemaValidationError as e:
-                    logger.error("스키마 검증 실패, 파일 스킵: %s (%s)", target_path.name, e)
-                    failed_files.append(target_path.name)
-                    continue
+                total_rows += row_count
+                logger.info("적재 완료: %s (%d행)", target_path.name, row_count)
+            except NotThisDatasetError as e:
+                logger.info("고장신고 데이터셋이 아닌 것으로 보여 스킵: %s (%s)", target_path.name, e)
+                skipped = True
+            except SchemaValidationError as e:
+                logger.error("스키마 검증 실패: %s (%s)", target_path.name, e)
+                failed = True
 
     logger.info(
-        "백필 종료 - 총 %d개 파일 중 적재 %d개(%d행), 다른 데이터셋으로 스킵 %d개, 스키마 실패 %d개 %s",
-        total_files,
-        total_files - len(failed_files) - len(skipped_files),
+        "파일 처리 종료: %s, 총 %d행, 다른 데이터셋으로 스킵=%s, 스키마 실패=%s",
+        input_file,
         total_rows,
-        len(skipped_files),
-        len(failed_files),
-        failed_files,
+        skipped,
+        failed,
     )
-    if failed_files:
+    if failed:
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    run(os.getenv("INPUT_DIR", "./raw_downloads"))
+    input_file = os.getenv("INPUT_FILE")
+    if not input_file:
+        logger.error("사용법: INPUT_FILE=./raw_downloads/failure_2601.csv python -m jobs.initial_load_failure_report")
+        sys.exit(1)
+    run(input_file)
