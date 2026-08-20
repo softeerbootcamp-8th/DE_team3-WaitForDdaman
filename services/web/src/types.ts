@@ -5,17 +5,17 @@ export type Side = "강남" | "강북";
 export type RegionFilter = { kind: "all" } | { kind: "side"; side: Side } | { kind: "gu"; name: string };
 
 export interface Bike {
-  bikeId: string;
-  stationName: string;
+  bike_id: string;
+  station_name: string;
   district: string;
   region: Side;
-  stationUrgency: Urgency;
-  healthyRatio: number | null;
-  riskGrade: Tier;
-  riskScore: number;
-  distKm: number;
+  station_urgency: Urgency;
+  healthy_ratio: number | null;
+  risk_grade: Tier;
+  risk_score: number;
+  dist_km: number;
   aging: number;
-  failHistory: string[];
+  fail_history: string[];
 }
 
 export interface Capacity {
@@ -23,7 +23,7 @@ export interface Capacity {
 }
 
 export interface SnapshotMeta {
-  snapshotDate: string;
+  snapshot_date: string;
   capacity: Capacity;
 }
 
@@ -35,21 +35,21 @@ export interface District {
 }
 
 export interface MapStation {
-  stationId: string;
-  stationName: string;
+  station_id: string;
+  station_name: string;
   district: string;
   region: Side;
   x: number;
   y: number;
-  holdNum: number;
-  bikeCnt: number;
-  riskCnt: number;
-  healthyRatio: number;
+  hold_num: number;
+  bike_cnt: number;
+  risk_cnt: number;
+  healthy_ratio: number;
   urgency: string;
 }
 
 export interface MapData {
-  viewBox: [number, number];
+  view_box: [number, number];
   districts: District[];
   stations: MapStation[];
 }

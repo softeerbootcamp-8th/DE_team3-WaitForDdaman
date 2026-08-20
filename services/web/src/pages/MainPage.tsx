@@ -28,9 +28,9 @@ export function MainPage({
   onOpenDetail,
   capacity,
 }: MainPageProps) {
-  const riskStations = useMemo(() => mapData.stations.filter((s) => s.riskCnt > 0), [mapData]);
+  const riskStations = useMemo(() => mapData.stations.filter((s) => s.risk_cnt > 0), [mapData]);
   const top10 = useMemo(
-    () => [...riskStations].sort((a, b) => b.riskCnt - a.riskCnt).slice(0, 10),
+    () => [...riskStations].sort((a, b) => b.risk_cnt - a.risk_cnt).slice(0, 10),
     [riskStations],
   );
 
@@ -57,7 +57,7 @@ export function MainPage({
 
       <div className="map-layout">
         <DistrictMap
-          viewBox={mapData.viewBox}
+          viewBox={mapData.view_box}
           districts={mapData.districts}
           stations={mapData.stations}
           variant="full"
@@ -90,14 +90,14 @@ export function MainPage({
             </div>
             <ol className="top-station-list">
               {top10.map((s, i) => (
-                <li key={s.stationId} onClick={() => handleDistrictClick(s.district)}>
+                <li key={s.station_id} onClick={() => handleDistrictClick(s.district)}>
                   <span className="rank">{i + 1}</span>
                   <span className="st-name">
-                    {s.stationName.trim()}
+                    {s.station_name.trim()}
                     <br />
                     <span className="st-gu">{s.district}</span>
                   </span>
-                  <span className="st-count">{s.riskCnt}대</span>
+                  <span className="st-count">{s.risk_cnt}대</span>
                 </li>
               ))}
             </ol>

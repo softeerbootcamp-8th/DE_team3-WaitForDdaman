@@ -7,17 +7,17 @@ Tier = Literal["Normal", "Warning", "Critical"]
 
 
 class Bike(BaseModel):
-    bikeId: str
-    stationName: str
+    bike_id: str
+    station_name: str
     district: str
     region: Region
-    stationUrgency: str
-    healthyRatio: Optional[float]
-    riskGrade: Tier
-    riskScore: float
-    distKm: float
+    station_urgency: str
+    healthy_ratio: Optional[float]
+    risk_grade: Tier
+    risk_score: float
+    dist_km: float
     aging: float
-    failHistory: list[str]
+    fail_history: list[str]
 
 
 class BikeLists(BaseModel):
@@ -30,7 +30,7 @@ class Capacity(BaseModel):
 
 
 class SnapshotMeta(BaseModel):
-    snapshotDate: str
+    snapshot_date: str
     capacity: Capacity
 
 
@@ -42,20 +42,20 @@ class District(BaseModel):
 
 
 class Station(BaseModel):
-    stationId: str
-    stationName: str
+    station_id: str
+    station_name: str
     district: str
     region: Region
     x: float
     y: float
-    holdNum: int
-    bikeCnt: int
-    riskCnt: int
-    healthyRatio: float
+    hold_num: int
+    bike_cnt: int
+    risk_cnt: int
+    healthy_ratio: float
     urgency: str
 
 
 class MapData(BaseModel):
-    viewBox: list[float]
+    view_box: list[float]
     districts: list[District]
     stations: list[Station]

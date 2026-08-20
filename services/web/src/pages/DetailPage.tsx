@@ -21,10 +21,10 @@ interface DetailPageProps {
 }
 
 function passesFilter(bike: Bike, query: string, tiers: Set<string>, urgencies: Set<string>): boolean {
-  if (tiers.size && !tiers.has(bike.riskGrade)) return false;
-  if (urgencies.size && bike.stationUrgency !== "정보없음" && !urgencies.has(bike.stationUrgency)) return false;
+  if (tiers.size && !tiers.has(bike.risk_grade)) return false;
+  if (urgencies.size && bike.station_urgency !== "정보없음" && !urgencies.has(bike.station_urgency)) return false;
   if (query) {
-    const hay = (bike.bikeId + " " + bike.stationName + " " + bike.district).toLowerCase();
+    const hay = (bike.bike_id + " " + bike.station_name + " " + bike.district).toLowerCase();
     if (!hay.includes(query)) return false;
   }
   return true;
@@ -48,7 +48,7 @@ export function DetailPage({
 
   const byId = useMemo(() => {
     const map = new Map<string, Bike>();
-    dest.concat(source).forEach((b) => map.set(b.bikeId, b));
+    dest.concat(source).forEach((b) => map.set(b.bike_id, b));
     return map;
   }, [dest, source]);
 
@@ -69,8 +69,8 @@ export function DetailPage({
     () =>
       regionPool.reduce(
         (acc, b) => {
-          if (b.riskGrade === "Critical") acc.critCount++;
-          else if (b.riskGrade === "Warning") acc.warningCount++;
+          if (b.risk_grade === "Critical") acc.critCount++;
+          else if (b.risk_grade === "Warning") acc.warningCount++;
           return acc;
         },
         { critCount: 0, warningCount: 0 },
@@ -90,7 +90,7 @@ export function DetailPage({
       <div className="detail-region-layout">
         <RegionFilterBar filter={regionFilter} onChange={onRegionFilterChange} districtNames={districtNames} />
         <DistrictMap
-          viewBox={mapData.viewBox}
+          viewBox={mapData.view_box}
           districts={mapData.districts}
           variant="mini"
           highlight={(gu) => isDistrictActive(gu, regionFilter, guToSide)}
@@ -118,7 +118,7 @@ export function DetailPage({
           </div>
           <div className="list-cap-note">Capacity 초과분 · 대여중단 유지, 다음날 재평가</div>
           <div className="list-scroll">
-            <BikeTable bikes={filteredSource} activeDetailId={activeDetailId} onRowClick={(bike) => setActiveDetailId(bike.bikeId)} />
+            <BikeTable bikes={filteredSource} activeDetailId={activeDetailId} onRowClick={(bike) => setActiveDetailId(bike.bike_id)} />
           </div>
         </div>
 
@@ -129,7 +129,7 @@ export function DetailPage({
           </div>
           <div className="list-cap-note">Capacity 내 우선 수거 대상</div>
           <div className="list-scroll">
-            <BikeTable bikes={filteredDest} activeDetailId={activeDetailId} onRowClick={(bike) => setActiveDetailId(bike.bikeId)} />
+            <BikeTable bikes={filteredDest} activeDetailId={activeDetailId} onRowClick={(bike) => setActiveDetailId(bike.bike_id)} />
           </div>
         </div>
 

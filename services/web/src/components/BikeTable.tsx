@@ -28,21 +28,21 @@ export function BikeTable({ bikes, activeDetailId, onRowClick }: BikeTableProps)
           </tr>
         )}
         {shown.map((bike) => {
-          const pct = bike.healthyRatio;
+          const pct = bike.healthy_ratio;
           const rc = rateClass(pct);
           const pctLabel = pct === null ? "정보없음" : fmtPct(pct);
           const barWidth = pct === null ? 0 : pct;
           return (
             <tr
-              key={bike.bikeId}
-              className={bike.bikeId === activeDetailId ? "active" : undefined}
+              key={bike.bike_id}
+              className={bike.bike_id === activeDetailId ? "active" : undefined}
               onClick={() => onRowClick(bike)}
             >
               <td className="bike-id">
-                {bike.bikeId}
-                <span className={`tier-pill ${bike.riskGrade}`}>{bike.riskGrade}</span>
+                {bike.bike_id}
+                <span className={`tier-pill ${bike.risk_grade}`}>{bike.risk_grade}</span>
               </td>
-              <td>{bike.stationName}</td>
+              <td>{bike.station_name}</td>
               <td className={`rate ${rc}`}>
                 {pctLabel}
                 <span className="rate-bar">

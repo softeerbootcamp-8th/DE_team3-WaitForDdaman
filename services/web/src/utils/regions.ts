@@ -33,5 +33,5 @@ export function regionLabel(filter: RegionFilter): string {
 }
 
 export function totalBikeCount(stations: MapStation[], filter: RegionFilter): number {
-  return stations.filter((s) => matchesRegion(s, filter)).reduce((sum, s) => sum + s.bikeCnt, 0);
+  return stations.filter((s) => matchesRegion(s, filter)).reduce((sum, s) => sum + s.bike_cnt, 0);
 }

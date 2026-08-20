@@ -32,7 +32,7 @@ def _latest_snapshot_date():
 def get_meta() -> dict:
     snapshot_date = _latest_snapshot_date()
     return {
-        "snapshotDate": snapshot_date.isoformat() if snapshot_date else "",
+        "snapshot_date": snapshot_date.isoformat() if snapshot_date else "",
         "capacity": {"max": DEFAULT_CAPACITY},
     }
 
@@ -67,20 +67,20 @@ def get_map_data() -> dict:
         return _latlon_to_xy(s["latitude"], s["longitude"])
 
     return {
-        "viewBox": view_box,
+        "view_box": view_box,
         "districts": [{"name": d["name"], "path": d["path"], "cx": d["cx"], "cy": d["cy"]} for d in districts],
         "stations": [
             {
-                "stationId": s["station_id"],
-                "stationName": s["station_name"],
+                "station_id": s["station_id"],
+                "station_name": s["station_name"],
                 "district": s["district"],
                 "region": s["region"],
                 "x": _xy(s)[0],
                 "y": _xy(s)[1],
-                "holdNum": s["hold_num"],
-                "bikeCnt": s["bike_cnt"],
-                "riskCnt": s["risk_cnt"],
-                "healthyRatio": s["healthy_ratio"],
+                "hold_num": s["hold_num"],
+                "bike_cnt": s["bike_cnt"],
+                "risk_cnt": s["risk_cnt"],
+                "healthy_ratio": s["healthy_ratio"],
                 "urgency": s["urgency"],
             }
             for s in stations
@@ -114,17 +114,17 @@ def get_bikes() -> tuple[list[dict], list[dict]]:
 
     def to_bike(r) -> dict:
         return {
-            "bikeId": r["bike_id"],
-            "stationName": r["station_name"],
+            "bike_id": r["bike_id"],
+            "station_name": r["station_name"],
             "district": r["district"],
             "region": r["region"],
-            "stationUrgency": r["station_urgency"] or "정보없음",
-            "healthyRatio": r["healthy_ratio"],
-            "riskGrade": r["risk_grade"],
-            "riskScore": r["risk_score"],
-            "distKm": r["dist_km"],
+            "station_urgency": r["station_urgency"] or "정보없음",
+            "healthy_ratio": r["healthy_ratio"],
+            "risk_grade": r["risk_grade"],
+            "risk_score": r["risk_score"],
+            "dist_km": r["dist_km"],
             "aging": r["aging"],
-            "failHistory": r["fail_history"] or [],
+            "fail_history": r["fail_history"] or [],
         }
 
     source = [to_bike(r) for r in rows]
