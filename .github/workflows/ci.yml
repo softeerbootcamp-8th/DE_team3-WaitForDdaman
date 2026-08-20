@@ -53,7 +53,7 @@ jobs:
 
           for mod in bikeman_event_generator serving_sync collection_priority; do
             echo "::group::pipeline/$mod"
-            (cd "pipeline/$mod" && PYTHONPATH="jobs:$ROOT:$ROOT/ingestion" pytest tests -q)
+            (cd "pipeline/$mod" && PYTHONPATH="$ROOT/pipeline/$mod:$ROOT/pipeline/$mod/jobs:$ROOT:$ROOT/ingestion" pytest tests -q)
             echo "::endgroup::"
           done
 
