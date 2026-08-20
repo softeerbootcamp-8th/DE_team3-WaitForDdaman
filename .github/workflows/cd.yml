@@ -1,28 +1,92 @@
 name: CD
 
-# 이미지 빌드/push는 이 워크플로우에 없다.
-#
-# GitHub Actions에서 ECR로 push하려면 OIDC IAM 역할이 필요한데, 계정 SCP가 MFA 없는
-# 요청을 차단하고 IAM 역할 생성 권한도 없어서 무인 실행으로는 인증이 불가능하다.
-# 그래서 이미지 push는 로컬에서 `./infra/push-images.sh`로 수동 실행하고
-# (aws login으로 받은 MFA 세션 사용), 이 워크플로우는 배포만 담당한다.
-#
-# EC2는 인스턴스 IAM 역할로 ECR pull이 되므로(MFA 조건 무관) 이 배포 단계에는
-# AWS 자격증명이 전혀 필요 없다 - SSH 시크릿 3개면 된다.
-#
-# 나중에 관리자가 OIDC 역할을 만들어주면 build-and-push 잡을 되살리고
-# 이 주석과 push-images.sh를 정리하면 된다.
-
 on:
   push:
     branches: [production]
-  workflow_dispatch:   # 이미지만 새로 올린 뒤 재배포하고 싶을 때 수동 실행
+  workflow_dispatch:   # 이미지 재빌드/재배포를 수동으로 돌리고 싶을 때
+
+permissions:
+  id-token: write   # OIDC 토큰 발급 (AWS 역할 assume에 필요)
+  contents: read
 
 env:
   AWS_REGION: ap-northeast-2
 
 jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      registry: ${{ steps.login-ecr.outputs.registry }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 정적 AWS 키를 쓰지 않는다 - OIDC로 waitforddaman-gha-role을 assume한다.
+      # 이 역할의 trust policy가 production 브랜치로만 제한돼 있어서 다른
+      # 브랜치/저장소에서는 assume 자체가 실패한다.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # EC2가 t4g.large(arm64/Graviton)인데 GitHub 러너는 x86_64라서, RUN 스텝
+      # (pip install, apt-get, npm run build)을 실행하려면 QEMU 에뮬레이션이 필요하다.
+      # --platform만 지정하면 exec format error로 죽는다.
+      - name: Set up QEMU (arm64 cross-build)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # :latest 외에 커밋 SHA 태그도 붙인다 - 지금 서버에 어느 커밋이 떠 있는지
+      # 추적하고 문제 시 특정 버전으로 롤백할 수 있게.
+      - name: Build & push airflow image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: airflow/Dockerfile.prod
+          platforms: linux/arm64
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-airflow:latest
+            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-airflow:${{ github.sha }}
+
+      - name: Build & push api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/api/Dockerfile.prod
+          platforms: linux/arm64
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-api:latest
+            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-api:${{ github.sha }}
+
+      - name: Build & push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: services/web
+          file: services/web/Dockerfile.prod
+          platforms: linux/arm64
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-web:latest
+            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-web:${{ github.sha }}
+
   deploy:
+    needs: build-and-push
     runs-on: ubuntu-latest
     steps:
       - name: Deploy over SSH
@@ -31,16 +95,19 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_SSH_USER }}
           key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          envs: ECR_REGISTRY,IMAGE_TAG
           script: |
             set -e
             cd /opt/waitforddaman
-            # ECR 로그인은 EC2 인스턴스 프로파일 IAM 역할로 처리된다(정적 키 없음)
-            aws ecr get-login-password --region ${{ env.AWS_REGION }} \
-              | docker login --username AWS --password-stdin \
-                "$(grep '^ECR_REGISTRY=' .env | cut -d= -f2)"
+            # EC2는 자체 인스턴스 IAM 역할로 ECR pull한다(GitHub OIDC와는 별개 경로)
+            aws ecr get-login-password --region ap-northeast-2 \
+              | docker login --username AWS --password-stdin "$ECR_REGISTRY"
             docker compose -f docker-compose.prod.yml pull
             # down -v 는 절대 쓰지 않는다 - postgres 볼륨(Airflow 메타데이터 +
             # bikeman/serving 데이터)이 전부 날아간다. up -d는 컨테이너만 교체한다.
             docker compose -f docker-compose.prod.yml up -d
             docker image prune -f
             docker compose -f docker-compose.prod.yml ps
+        env:
+          ECR_REGISTRY: ${{ needs.build-and-push.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}

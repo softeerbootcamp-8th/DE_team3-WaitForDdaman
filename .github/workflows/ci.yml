@@ -27,10 +27,35 @@ jobs:
           pip install --no-cache-dir -r ingestion/requirements.txt
           pip install --no-cache-dir -r airflow/requirements.txt
 
+      # 각 모듈 테스트는 해당 디렉터리를 cwd로 두고 import하도록 작성되어 있어서
+      # (ingestion/tests는 `from schema...`, staging/tests는 `from common...`,
+      # pipeline/*/tests는 jobs/ 안의 모듈을 직접 import) 저장소 루트에서 한 번에
+      # 돌리면 ModuleNotFoundError로 수집 자체가 실패한다. 모듈별로 cwd와
+      # PYTHONPATH를 맞춰 실행한다 - 각 모듈 README에 문서화된 방식과 동일.
+      #
+      # PYSPARK_PYTHON을 명시하는 이유: 안 잡아주면 Spark 워커가 드라이버와 다른
+      # 파이썬(시스템 기본)을 집어서 PYTHON_VERSION_MISMATCH로 전부 실패한다.
       - name: Run tests
         env:
-          PYTHONPATH: ${{ github.workspace }}
-        run: pytest ingestion/tests staging/tests pipeline -v
+          ROOT: ${{ github.workspace }}
+        run: |
+          set -e
+          export PYSPARK_PYTHON="$(which python)"
+          export PYSPARK_DRIVER_PYTHON="$PYSPARK_PYTHON"
+
+          echo "::group::ingestion"
+          (cd ingestion && PYTHONPATH="$ROOT" pytest tests -q)
+          echo "::endgroup::"
+
+          echo "::group::staging"
+          (cd staging && PYTHONPATH="$ROOT:$ROOT/ingestion" pytest tests -q)
+          echo "::endgroup::"
+
+          for mod in bikeman_event_generator serving_sync collection_priority; do
+            echo "::group::pipeline/$mod"
+            (cd "pipeline/$mod" && PYTHONPATH="jobs:$ROOT:$ROOT/ingestion" pytest tests -q)
+            echo "::endgroup::"
+          done
 
   web-lint-build:
     runs-on: ubuntu-latest
