@@ -1,3 +1,6 @@
+# 프로덕션 구성. 로컬(docker-compose.local.yml)과 달리 postgres 컨테이너가 없다 -
+# Airflow 메타데이터는 airflow-metadata-db RDS, 도메인/서빙 데이터는 domain-db RDS를 쓴다.
+# 연결 정보는 같은 디렉터리의 .env에서 온다(.env.example 참고).
 x-airflow-common:
   &airflow-common
   image: ${ECR_REGISTRY}/waitforddaman-airflow:${IMAGE_TAG:-latest}
@@ -5,7 +8,7 @@ x-airflow-common:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres/${POSTGRES_DB:-airflow}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@${AIRFLOW_DB_HOST}:${AIRFLOW_DB_PORT:-5432}/${AIRFLOW_DB_NAME}
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
@@ -33,42 +36,22 @@ x-airflow-common:
     # 모든 DAG의 BashOperator 커맨드가 `cd ingestion && source .env && python -m jobs.X`
     # 형태로 /opt/airflow/ingestion/.env를 직접 source한다(dag_common.py 등 참고) -
     # environment: 블록과는 별개 경로라 이 마운트가 없으면 모든 DAG 태스크가 실패한다.
-    # 여기 쓰는 .env는 docker-compose 변수 치환에도 쓰이는 바로 그 파일(같은 디렉터리의
-    # .env)이라 SEOUL_API_KEY, BIKEMAN_DB_*, WATERMARK_KEY 등도 전부 여기 채워야 한다.
+    # SERVING_DB_*, BIKEMAN_DB_*, SEOUL_API_KEY 등도 전부 이 파일에서 읽힌다.
     - ./.env:/opt/airflow/ingestion/.env:ro
   user: "${AIRFLOW_UID:-50000}:0"
-  depends_on:
-    &airflow-common-depends-on
-    postgres:
-      condition: service_healthy
 
 services:
-  postgres:
-    image: postgres:16
-    container_name: postgres
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-airflow}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
-      POSTGRES_DB: ${POSTGRES_DB:-airflow}
-    volumes:
-      - postgres-db-volume:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-airflow}"]
-      interval: 5s
-      retries: 5
-    restart: always
-    # 주의: host에 5432 포트를 노출하지 않는다 (prod에서는 컨테이너 내부망으로만 접근)
-
   api:
     container_name: service-api
     image: ${ECR_REGISTRY}/waitforddaman-api:${IMAGE_TAG:-latest}
     environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres/${POSTGRES_DB:-airflow}
+      # search_path에 serving을 넣는 이유: state.py의 쿼리가 station_daily /
+      # bike_risk_daily / dim_district를 스키마 한정 없이 조회하는데, 실제 테이블은
+      # serving 스키마에 있다(serving_db.py의 SCHEMA 상수). 이게 없으면
+      # "relation does not exist"로 500이 난다.
+      DATABASE_URL: postgresql+psycopg2://${DOMAIN_DB_USER}:${DOMAIN_DB_PASSWORD}@${DOMAIN_DB_HOST}:${DOMAIN_DB_PORT:-5432}/${DOMAIN_DB_NAME}?options=-csearch_path%3Dserving,public
     expose:
       - "8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
     restart: always
     # 주의: host에 8000 포트를 노출하지 않는다 - web(nginx)이 내부망으로 /api를 프록시한다
 
@@ -95,7 +78,6 @@ services:
       start_period: 30s
     restart: always
     depends_on:
-      <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
 
@@ -111,7 +93,6 @@ services:
       start_period: 30s
     restart: always
     depends_on:
-      <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
 
@@ -127,7 +108,6 @@ services:
       start_period: 30s
     restart: always
     depends_on:
-      <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
 
@@ -143,7 +123,6 @@ services:
       start_period: 30s
     restart: always
     depends_on:
-      <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
 
@@ -165,5 +144,4 @@ services:
       _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
 
 volumes:
-  postgres-db-volume:
   airflow-logs-volume:
