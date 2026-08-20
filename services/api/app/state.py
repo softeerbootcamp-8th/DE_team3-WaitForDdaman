@@ -2,8 +2,8 @@
 
 파이프라인의 gold_to_serving_sync가 매일 serving.station_daily / serving.bike_risk_daily를
 파티션 교체(UPSERT 아님)해두고, 여기서는 그중 최신 snapshot_date만 읽어 API 응답 모양으로
-옮긴다. serving.dim_district는 시드 데이터인데 아직 어디서도 만들어지지 않아 /api/map은
-당분간 계속 실패한다 (#102 범위 밖, 별도 처리 필요).
+옮긴다. serving.dim_district는 파이프라인 산출물이 아니라 시드 데이터라
+services/api/scripts/seed_dim_district.py로 별도 채워야 한다.
 
 상태를 메모리에 들고 바꾸던 예전 방식(OperationState의 mutable 리스트)은 없다 — 매 요청이
 그 시점의 DB를 그대로 본다.
@@ -40,11 +40,10 @@ def get_meta() -> dict:
 
 
 def get_map_data() -> dict:
-    # NOTE: dim_district는 원본이 사라져 복구 불가 — 구청 근방 대략적 위경도를 아래와
-    # 같은 방식으로 viewBox에 투영한 정사각형 플레이스홀더로 대체했다
-    # (services/api/scripts/seed_dim_district.py). station의 x/y도 같은 변환식(위경도
-    # 기준 범위 동일)을 써서, 점이 소속 구 사각형 안쪽에 오도록 맞췄다. 둘 다 실제 경계/
-    # 위치가 아니라 임시값이다.
+    # dim_district의 실제 구 경계 원본은 유실됐다 — 공개 GeoJSON(services/api/scripts/
+    # seed_dim_district.py 참고)으로 대체해서 미리 투영해둔 path/cx/cy를 그대로 쓴다.
+    # station의 x/y는 위경도를 geo.project()로 요청마다 투영한다 — dim_district를 만들 때
+    # 쓴 것과 같은 투영식이라 점이 소속 구 폴리곤 안에 놓인다.
     snapshot_date = _latest_snapshot_date()
     with engine.connect() as conn:
         districts = conn.execute(
