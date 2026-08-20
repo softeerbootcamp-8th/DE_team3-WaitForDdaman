@@ -19,8 +19,10 @@ AWS_PROFILE_NAME="${AWS_PROFILE_NAME:-console}"
 AWS_REGION="${AWS_REGION:-ap-northeast-2}"
 # 레지스트리 주소(=AWS 계정 ID 포함)는 저장소에 하드코딩하지 않는다.
 # gitignore되는 .env.prod에서 읽고, 없으면 환경변수로 받는다.
+# `|| true`가 필요하다: 키가 없으면 grep이 1을 반환하고, set -e + pipefail 때문에
+# 대입문에서 그대로 죽어버려 아래 안내 메시지에 도달하지 못한다.
 if [[ -z "${ECR_REGISTRY:-}" && -f "$(dirname "${BASH_SOURCE[0]}")/../.env.prod" ]]; then
-  ECR_REGISTRY="$(grep -m1 '^ECR_REGISTRY=' "$(dirname "${BASH_SOURCE[0]}")/../.env.prod" | cut -d= -f2-)"
+  ECR_REGISTRY="$(grep -m1 '^ECR_REGISTRY=' "$(dirname "${BASH_SOURCE[0]}")/../.env.prod" | cut -d= -f2- || true)"
 fi
 if [[ -z "${ECR_REGISTRY:-}" ]]; then
   echo "ECR_REGISTRY를 찾을 수 없다. .env.prod에 넣거나 환경변수로 지정하세요:" >&2

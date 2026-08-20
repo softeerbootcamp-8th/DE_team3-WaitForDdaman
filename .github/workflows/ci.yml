@@ -57,6 +57,13 @@ jobs:
             echo "::endgroup::"
           done
 
+          # train_risk_model만 규칙이 다르다: tests/ 디렉터리가 아니라 모듈 루트에
+          # test_risk_model.py가 있고, `from pipeline.train_risk_model...` 절대
+          # 임포트를 써서 저장소 루트를 cwd/PYTHONPATH로 둬야 한다.
+          echo "::group::pipeline/train_risk_model"
+          PYTHONPATH="$ROOT" pytest pipeline/train_risk_model/test_risk_model.py -q
+          echo "::endgroup::"
+
   web-lint-build:
     runs-on: ubuntu-latest
     defaults:

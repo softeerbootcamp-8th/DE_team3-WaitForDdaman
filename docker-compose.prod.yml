@@ -11,7 +11,12 @@ x-airflow-common:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@${AIRFLOW_DB_HOST}:${AIRFLOW_DB_PORT:-5432}/${AIRFLOW_DB_NAME}
+    # 비밀번호를 URL에 넣지 않고 PGPASSWORD로 넘긴다. URL에 그대로 끼우면 @ / :
+    # 같은 문자가 들어간 비밀번호가 에러 없이 "다른 host/db"로 파싱된다
+    # (실측: 'p@ss/w:rd#1' -> host='ss'). psycopg2가 libpq를 거치면서
+    # PGPASSWORD를 집어오므로 URL에서 빼도 정상 연결된다.
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}@${AIRFLOW_DB_HOST}:${AIRFLOW_DB_PORT:-5432}/${AIRFLOW_DB_NAME}
+    PGPASSWORD: ${AIRFLOW_DB_PASSWORD}
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
@@ -52,7 +57,9 @@ services:
       # bike_risk_daily / dim_district를 스키마 한정 없이 조회하는데, 실제 테이블은
       # serving 스키마에 있다(serving_db.py의 SCHEMA 상수). 이게 없으면
       # "relation does not exist"로 500이 난다.
-      DATABASE_URL: postgresql+psycopg2://${DOMAIN_DB_USER}:${DOMAIN_DB_PASSWORD}@${DOMAIN_DB_HOST}:${DOMAIN_DB_PORT:-5432}/${DOMAIN_DB_NAME}?options=-csearch_path%3Dserving,public
+      # 비밀번호는 URL이 아니라 PGPASSWORD로 넘긴다(위 airflow 쪽과 같은 이유).
+      DATABASE_URL: postgresql+psycopg2://${DOMAIN_DB_USER}@${DOMAIN_DB_HOST}:${DOMAIN_DB_PORT:-5432}/${DOMAIN_DB_NAME}?options=-csearch_path%3Dserving,public
+      PGPASSWORD: ${DOMAIN_DB_PASSWORD}
     expose:
       - "8000"
     restart: always

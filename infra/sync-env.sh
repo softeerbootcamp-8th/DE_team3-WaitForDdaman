@@ -25,8 +25,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$REPO_ROOT/.env.prod"
 
 # 서버 주소는 저장소에 하드코딩하지 않는다. gitignore되는 .env.prod에서 읽는다.
+# `|| true`가 필요하다: 키가 없으면 grep이 1을 반환하고, set -e + pipefail 때문에
+# 대입문에서 그대로 죽어버려 아래 안내 메시지에 도달하지 못한다.
 if [[ -z "${EC2_HOST:-}" && -f "$ENV_FILE" ]]; then
-  EC2_HOST="$(grep -m1 '^EC2_HOST=' "$ENV_FILE" | cut -d= -f2-)"
+  EC2_HOST="$(grep -m1 '^EC2_HOST=' "$ENV_FILE" | cut -d= -f2- || true)"
 fi
 if [[ -z "${EC2_HOST:-}" ]]; then
   echo "EC2_HOST를 찾을 수 없다. .env.prod에 EC2_HOST=<주소> 를 넣거나 환경변수로 지정하세요." >&2

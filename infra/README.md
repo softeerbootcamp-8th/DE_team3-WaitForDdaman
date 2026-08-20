@@ -105,6 +105,12 @@ prod 전용 차이: `APP_ENV=aws`, `ICEBERG_CATALOG_TYPE=hadoop`, `SPARK_LOCAL_E
 스크립트가 하는 일: 플레이스홀더 미기입 검사 → scp → **권한 640 설정** → 컨테이너에서
 실제로 읽히는지 확인.
 
+**DB 비밀번호는 URL에 넣지 않는다:** `docker-compose.prod.yml`은 접속 URL에서 비밀번호를
+빼고 `PGPASSWORD`로 따로 넘긴다. URL에 그대로 끼우면 `@` `/` `:` 가 들어간 비밀번호가
+**에러 없이 다른 host/db로 파싱된다**(실측: `p@ss/w:rd#1` → host=`ss`). psycopg2가
+libpq를 거치며 `PGPASSWORD`를 집어오므로 URL에서 빼도 정상 연결된다. 비밀번호를
+교체할 때 특수문자를 피할 필요가 없어진다.
+
 **권한이 왜 중요한가:** Airflow 컨테이너가 uid 50000 / **gid 0**으로 돌면서 이 파일을
 `/opt/airflow/ingestion/.env`로 마운트해 `source`한다. `chmod 600`으로 두면 컨테이너가
 읽지 못해 **모든 DAG 태스크가 "Permission denied"로 실패한다**(실제로 겪음). 그룹 root에
