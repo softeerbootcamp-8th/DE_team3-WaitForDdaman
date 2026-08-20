@@ -1,8 +1,12 @@
 """오늘자 콘솔 데이터 조회 계층.
 
-Airflow 파이프라인이 매일 dim_district / station_daily / bike_risk_daily를 UPSERT해두고,
-여기서는 그중 최신 snapshot_date만 읽어 API 응답 모양으로 옮긴다. 상태를 메모리에 들고
-바꾸던 예전 방식(OperationState의 mutable 리스트)은 없다 — 매 요청이 그 시점의 DB를 그대로 본다.
+파이프라인의 gold_to_serving_sync가 매일 serving.station_daily / serving.bike_risk_daily를
+파티션 교체(UPSERT 아님)해두고, 여기서는 그중 최신 snapshot_date만 읽어 API 응답 모양으로
+옮긴다. serving.dim_district는 시드 데이터인데 아직 어디서도 만들어지지 않아 /api/map은
+당분간 계속 실패한다 (#102 범위 밖, 별도 처리 필요).
+
+상태를 메모리에 들고 바꾸던 예전 방식(OperationState의 mutable 리스트)은 없다 — 매 요청이
+그 시점의 DB를 그대로 본다.
 """
 from __future__ import annotations
 
@@ -14,12 +18,16 @@ from services.api.app.db import engine
 # 조정하는 값이라 DB에는 저장하지 않는다 — 이 값은 그 조정의 초기 기준값일 뿐이다.
 DEFAULT_CAPACITY = 700
 
-NO_ACTION = "조치없음"
+# 수거/대여중단 승격은 파이프라인이 아니라 프론트+백엔드가 capacity 기준으로 정한다
+# (gold.mart_bike_risk_daily에는 action 컬럼 자체가 없다, #104) — 그래서 여기서는
+# action으로 걸러내지 않고 전부 source로 돌려준다.
+REASON_PLACEHOLDER = "정보없음"  # 아직 파이프라인이 안 만듦, #102 후속으로 원천 확인 예정
+DUR_H_PLACEHOLDER = 0.0
 
 
 def _latest_snapshot_date():
     with engine.connect() as conn:
-        return conn.execute(text("SELECT MAX(snapshot_date) FROM station_daily")).scalar()
+        return conn.execute(text("SELECT MAX(snapshot_date) FROM serving.station_daily")).scalar()
 
 
 def get_meta() -> dict:
@@ -31,18 +39,21 @@ def get_meta() -> dict:
 
 
 def get_map_data() -> dict:
+    # NOTE: dim_district가 아직 어디서도 만들어지지 않고(시드 데이터 미해결), station_daily도
+    # 지도 픽셀 좌표(x/y)가 아니라 위경도(latitude/longitude)만 갖고 있어 이 함수는 여전히
+    # 실패한다 — #102 범위 밖, 별도로 처리 필요.
     snapshot_date = _latest_snapshot_date()
     with engine.connect() as conn:
         districts = conn.execute(
-            text("SELECT name, path, cx, cy, view_box_w, view_box_h FROM dim_district WHERE snapshot_date = :d"),
+            text("SELECT name, path, cx, cy, view_box_w, view_box_h FROM serving.dim_district WHERE snapshot_date = :d"),
             {"d": snapshot_date},
         ).mappings().all()
         stations = conn.execute(
             text(
                 """
-                SELECT station_id, station_name, region, gu, x, y, hold_num,
-                       bike_count, risk_count, healthy_ratio, urgency
-                FROM station_daily
+                SELECT station_id, station_name, region, district AS gu, x, y, hold_num,
+                       bike_cnt AS bike_count, risk_cnt AS risk_count, healthy_ratio, urgency
+                FROM serving.station_daily
                 WHERE snapshot_date = :d
                 """
             ),
@@ -74,27 +85,27 @@ def get_map_data() -> dict:
 
 
 def get_bikes() -> tuple[list[dict], list[dict]]:
-    """수거 후보 Pool(조치없음이 아닌 자전거)을 파이프라인이 정한 action 기준으로
-    source(대여중단) / dest(수거) 두 묶음으로 나눠 돌려준다.
-    프론트는 이 둘을 다시 합쳐(`pool`) capacity 슬라이더로 직접 재분류하므로,
-    여기서의 source/dest 나눔은 파이프라인이 정한 초기값 역할만 한다.
+    """위험 자전거 후보를 전부 source로 돌려준다 (dest는 항상 빈 배열).
+
+    gold.mart_bike_risk_daily에 action 컬럼이 없어(#104) 파이프라인이 정한 수거/대여중단
+    구분 자체가 없다 — 그 승격은 프론트+백엔드가 capacity 기준으로 한다(useClassifiedPool).
     """
     snapshot_date = _latest_snapshot_date()
     with engine.connect() as conn:
         rows = conn.execute(
             text(
                 """
-                SELECT b.bike_id, b.station_name, b.gu, b.region, b.healthy_ratio,
-                       b.risk_grade, b.risk_score, b.dist_km, b.dur_h, b.aging,
-                       b.fail_history, b.reason, b.action, s.urgency AS station_urgency
-                FROM bike_risk_daily b
-                LEFT JOIN station_daily s
+                SELECT b.bike_id, b.station_name, b.district AS gu, b.region, b.healthy_ratio,
+                       b.risk_grade, b.risk_score, b.dist_km, b.aging,
+                       b.fail_history, s.urgency AS station_urgency
+                FROM serving.bike_risk_daily b
+                LEFT JOIN serving.station_daily s
                   ON s.station_id = b.station_id AND s.snapshot_date = b.snapshot_date
-                WHERE b.snapshot_date = :d AND b.action != :no_action
+                WHERE b.snapshot_date = :d
                 ORDER BY b.risk_score DESC
                 """
             ),
-            {"d": snapshot_date, "no_action": NO_ACTION},
+            {"d": snapshot_date},
         ).mappings().all()
 
     def to_bike(r) -> dict:
@@ -107,15 +118,15 @@ def get_bikes() -> tuple[list[dict], list[dict]]:
             "healthyRatio": r["healthy_ratio"],
             "tier": r["risk_grade"],
             "score": r["risk_score"],
-            "reason": r["reason"],
+            "reason": REASON_PLACEHOLDER,
             "distKm": r["dist_km"],
-            "durH": r["dur_h"],
+            "durH": DUR_H_PLACEHOLDER,
             "aging": r["aging"],
             "history": r["fail_history"] or [],
         }
 
-    dest = [to_bike(r) for r in rows if r["action"] == "수거"]
-    source = [to_bike(r) for r in rows if r["action"] == "대여중단"]
+    source = [to_bike(r) for r in rows]
+    dest: list[dict] = []
     return source, dest
 
 
