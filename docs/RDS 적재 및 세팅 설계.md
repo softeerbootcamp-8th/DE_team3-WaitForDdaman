@@ -13,8 +13,11 @@
   하나에 Airflow 메타데이터(`public` 스키마)와 도메인 데이터(`app`/`bikeman`/
   `serving` 스키마)를 함께 올린다.
 - `sql/bike_man/bikeman_seed_init.sql`이 스키마(`app`/`bikeman`/`serving`)와
-  최소권한 role(`airflow_reader`: bikeman 읽기 전용, `bikeman_writer`: bikeman
-  쓰기 + serving 읽기)을 이미 정의해 idempotent하게 실행 가능한 상태다.
+  최소권한 role(`airflow_reader`: public/bikeman 읽기 전용, `bikeman_writer`: bikeman
+  쓰기 + serving 읽기)을 이미 정의해 idempotent하게 실행 가능한 상태다. `airflow_reader`의
+  public 스키마 GRANT(`CONNECT ON DATABASE`, `USAGE`/`SELECT ON SCHEMA public`,
+  `ALTER DEFAULT PRIVILEGES`)는 DB명 하드코딩 없이 `current_database()` 기준으로
+  동작하도록 처리돼 있다 (이슈 #51).
 - 서비스 시작일이 2026-08-20이라 필요한 건 "서비스 시작 전날"인 **8/19
   하루치** `bikeman.fact_worker_event` 데이터다. `domain-db`가 준비되면
   `bikeman_event_generator`를 실제로 한 번 실행해 8/19치를 직접 만든다
@@ -64,7 +67,7 @@ SQLite(동시 writer/reader 환경에 부적합)와 캐시 레이어(Redis/Elast
 - 데이터: `bikeman.fact_worker_event`는 초기엔 비워두고, `domain-db` 준비 후
   `bikeman_event_generator`를 2026-08-19 대상으로 1회 실행해 실제 8/19치를
   만든다 (6절 참고)
-- 기존 role: `airflow_reader`(bikeman 읽기 전용), `bikeman_writer`(bikeman 쓰기 +
+- 기존 role: `airflow_reader`(public/bikeman 읽기 전용), `bikeman_writer`(bikeman 쓰기 +
   serving 읽기)
 - **신규 role 필요**: `serving_writer` - `serving.station_daily`/
   `serving.bike_risk_daily`/`serving.mart_bike_risk_current`에 대한

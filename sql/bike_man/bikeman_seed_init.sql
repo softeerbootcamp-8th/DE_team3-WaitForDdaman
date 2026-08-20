@@ -28,6 +28,20 @@ BEGIN
     END IF;
 END
 $$;
+
+-- public 스키마(Airflow 메타데이터가 위치)도 airflow_reader가 조회 가능하도록
+-- GRANT. 이게 없으면 Silver까지는 통과되지만 Gold 단계에서 조회 권한 부족으로
+-- 실패한다. DB명은 하드코딩하지 않고 현재 접속된 DB(current_database()) 기준으로
+-- 동작하게 처리.
+DO $$
+BEGIN
+    EXECUTE format('GRANT CONNECT ON DATABASE %I TO airflow_reader', current_database());
+END
+$$;
+GRANT USAGE ON SCHEMA public TO airflow_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO airflow_reader;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO airflow_reader;
+
 GRANT USAGE ON SCHEMA bikeman TO airflow_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA bikeman TO airflow_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA bikeman GRANT SELECT ON TABLES TO airflow_reader;
