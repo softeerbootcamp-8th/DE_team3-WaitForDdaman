@@ -115,6 +115,16 @@ body{
 }
 .list-panel.dest{border-color:#cfe0d7;}
 .list-panel.dest .list-head{background:var(--moss-tint);border-bottom-color:#cfe0d7;}
+/* .list-head가 space-between이라 카운트+버튼을 한 그룹으로 묶어 오른쪽에 붙인다. */
+.list-head-actions{display:flex;align-items:center;gap:8px;}
+.confirm-btn{
+  padding:5px 12px;border-radius:20px;border:1px solid var(--moss);
+  background:var(--moss);color:#fff;font-size:11.5px;font-weight:650;
+  font-family:inherit;letter-spacing:.02em;cursor:pointer;
+  font-variant-numeric:tabular-nums;
+}
+.confirm-btn:hover:enabled{background:var(--moss-deep);border-color:var(--moss-deep);}
+.confirm-btn:disabled{background:#c8d2cc;border-color:#c8d2cc;cursor:not-allowed;}
 .list-cap-note{font-size:11px;color:var(--ink-soft);padding:7px 16px;border-bottom:1px solid var(--line-soft);background:var(--paper);}
 
 .list-scroll{max-height:640px;overflow-y:auto;}

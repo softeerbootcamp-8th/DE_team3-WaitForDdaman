@@ -59,3 +59,12 @@ class MapData(BaseModel):
     view_box: list[float]
     districts: list[District]
     stations: list[Station]
+
+
+class ConfirmRequest(BaseModel):
+    bike_ids: list[str]
+
+
+class ConfirmResponse(BaseModel):
+    snapshot_date: str
+    confirmed: int

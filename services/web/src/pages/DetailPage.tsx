@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { api } from "../api";
 import { BikeTable } from "../components/BikeTable";
 import { CapacityPanel } from "../components/CapacityPanel";
 import { Controls } from "../components/Controls";
@@ -8,7 +9,10 @@ import { RegionFilterBar } from "../components/RegionFilterBar";
 import type { UseCapacityResult } from "../hooks/useCapacity";
 import { useClassifiedPool } from "../hooks/useClassifiedPool";
 import type { Bike, MapData, RegionFilter, Side } from "../types";
+import { collectConfirmTargets } from "../utils/capacity";
 import { isDistrictActive, matchesRegion, regionLabel } from "../utils/regions";
+
+type ConfirmState = { kind: "idle" } | { kind: "saving" } | { kind: "done"; count: number } | { kind: "error" };
 
 interface DetailPageProps {
   mapData: MapData;
@@ -43,8 +47,28 @@ export function DetailPage({
   const [tiers, setTiers] = useState<Set<string>>(new Set(["Critical", "Warning"]));
   const [urgencies, setUrgencies] = useState<Set<string>>(new Set(["여유있음", "부족함"]));
   const [activeDetailId, setActiveDetailId] = useState<string | null>(null);
+  const [confirmState, setConfirmState] = useState<ConfirmState>({ kind: "idle" });
 
   const { dest, source } = useClassifiedPool(pool, regionFilter, capacity);
+
+  // 확정 대상은 화면 필터와 무관하게 구별 capacity 기준으로만 정한다 (utils/capacity 주석 참고).
+  const confirmTargets = useMemo(
+    () => collectConfirmTargets(pool, districtNames, capacity.capacityFor),
+    [pool, districtNames, capacity],
+  );
+
+  // capacity를 다시 조절하면 직전 확정 표시는 더 이상 지금 목록을 뜻하지 않으므로 되돌린다.
+  useEffect(() => setConfirmState({ kind: "idle" }), [confirmTargets]);
+
+  const handleConfirm = useCallback(async () => {
+    setConfirmState({ kind: "saving" });
+    try {
+      const result = await api.confirmCollection(confirmTargets.map((b) => b.bike_id));
+      setConfirmState({ kind: "done", count: result.confirmed });
+    } catch {
+      setConfirmState({ kind: "error" });
+    }
+  }, [confirmTargets]);
 
   const byId = useMemo(() => {
     const map = new Map<string, Bike>();
@@ -125,9 +149,25 @@ export function DetailPage({
         <div className="list-panel dest">
           <div className="list-head">
             <h2>수거 대상</h2>
-            <span className="count">{filteredDest.length.toLocaleString()}건</span>
+            <div className="list-head-actions">
+              <span className="count">{filteredDest.length.toLocaleString()}건</span>
+              <button
+                className="confirm-btn"
+                disabled={confirmState.kind === "saving" || confirmTargets.length === 0}
+                onClick={handleConfirm}
+                title="구별 capacity 기준으로 정해진 수거 목록을 확정합니다 (화면 검색/필터와 무관)"
+              >
+                {confirmState.kind === "saving"
+                  ? "확정 중…"
+                  : `확인 (${confirmTargets.length.toLocaleString()}대)`}
+              </button>
+            </div>
           </div>
-          <div className="list-cap-note">Capacity 내 우선 수거 대상</div>
+          <div className="list-cap-note">
+            Capacity 내 우선 수거 대상
+            {confirmState.kind === "done" && ` · ${confirmState.count.toLocaleString()}대 확정 기록됨`}
+            {confirmState.kind === "error" && " · 확정 실패, 다시 시도해 주세요"}
+          </div>
           <div className="list-scroll">
             <BikeTable bikes={filteredDest} activeDetailId={activeDetailId} onRowClick={(bike) => setActiveDetailId(bike.bike_id)} />
           </div>

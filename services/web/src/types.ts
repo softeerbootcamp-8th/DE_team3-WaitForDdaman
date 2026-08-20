@@ -58,3 +58,8 @@ export interface BikeLists {
   source: Bike[];
   dest: Bike[];
 }
+
+export interface ConfirmResponse {
+  snapshot_date: string;
+  confirmed: number;
+}

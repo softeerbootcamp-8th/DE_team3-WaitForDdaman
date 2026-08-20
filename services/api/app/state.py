@@ -23,6 +23,10 @@ DEFAULT_CAPACITY = 700
 # (gold.mart_bike_risk_daily에는 action 컬럼 자체가 없다, #104) — 그래서 여기서는
 # action으로 걸러내지 않고 전부 source로 돌려준다.
 
+COLLECT_ACTION = "수거"
+# 이 앱에는 인증이 없어 운영자를 특정할 수 없다 — 실제 신원은 인증 도입 시 채운다.
+ACTIONED_BY = "console"
+
 
 def _latest_snapshot_date():
     with engine.connect() as conn:
@@ -132,6 +136,95 @@ def get_bikes() -> tuple[list[dict], list[dict]]:
     return source, dest
 
 
+def ensure_action_log_table() -> None:
+    """app.action_log 준비 (멱등).
+
+    이 테이블은 develop의 sql/bike_man/bikeman_seed_init.sql에 "app 스키마 placeholder"로
+    선언만 돼 있고 아무도 읽고 쓰지 않는다. 확정 기록에 쓰려면 어느 날짜 확정인지 구분할
+    snapshot_date와, 나중에 이벤트 생성기가 필요로 하는 station_id가 있어야 해서 여기서
+    덧붙인다 — ADD COLUMN IF NOT EXISTS라 seed SQL 실행 순서와 무관하게 안전하다.
+    """
+    with engine.begin() as conn:
+        conn.execute(text("CREATE SCHEMA IF NOT EXISTS app"))
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS app.action_log (
+                    id            SERIAL PRIMARY KEY,
+                    bike_id       VARCHAR(20) NOT NULL,
+                    action_taken  VARCHAR(50),
+                    actioned_by   VARCHAR(50),
+                    actioned_at   TIMESTAMP DEFAULT now()
+                )
+                """
+            )
+        )
+        conn.execute(text("ALTER TABLE app.action_log ADD COLUMN IF NOT EXISTS snapshot_date DATE"))
+        conn.execute(text("ALTER TABLE app.action_log ADD COLUMN IF NOT EXISTS station_id VARCHAR(20)"))
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS action_log_snapshot_idx "
+                "ON app.action_log (snapshot_date, bike_id)"
+            )
+        )
+
+
+def confirm_collection(bike_ids: list[str]) -> dict:
+    """운영자가 확정한 수거 목록을 app.action_log에 기록한다.
+
+    snapshot_date/station_id는 클라이언트를 믿지 않고 서버가 serving.bike_risk_daily에서
+    가져온다 — INSERT ... SELECT 한 문장이라 조회와 삽입 사이에 스냅샷이 바뀔 틈이 없고,
+    그 스냅샷에 없는 bike_id는 자연히 무시된다.
+
+    append-only 로그다(테이블의 SERIAL + actioned_at DEFAULT now() 설계 그대로). 같은 날
+    capacity를 바꿔 다시 확정하면 이전 배치를 지우지 않고 새 배치가 쌓인다.
+
+    ### 읽는 쪽 주의: bike_id별 최신이 아니라 "최신 배치" 기준으로 읽어야 한다
+    확정을 700대 -> 100대로 줄이고 다시 누르면, 빠진 600대는 이전 배치의 '수거' 행을 그대로
+    갖고 있고 그걸 취소하는 행은 없다. 그래서 bike_id별 최신 행을 집는 DISTINCT ON 방식은
+    600대를 여전히 확정된 것으로 잘못 읽는다(실측: 100대가 나와야 하는데 700대가 나옴).
+
+    한 번의 확정은 INSERT 한 문장이고 now()는 트랜잭션 내에서 고정이므로, 한 배치의 모든
+    행은 actioned_at이 정확히 같다. 따라서 최신 배치만 집으면 된다:
+
+        SELECT bike_id, station_id
+        FROM app.action_log
+        WHERE snapshot_date = %(d)s AND action_taken = '수거'
+          AND actioned_at = (
+              SELECT max(actioned_at) FROM app.action_log
+              WHERE snapshot_date = %(d)s AND action_taken = '수거'
+          )
+    """
+    ensure_action_log_table()
+    snapshot_date = _latest_snapshot_date()
+    if snapshot_date is None or not bike_ids:
+        return {
+            "snapshot_date": snapshot_date.isoformat() if snapshot_date else "",
+            "confirmed": 0,
+        }
+
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(
+                """
+                INSERT INTO app.action_log
+                    (snapshot_date, bike_id, station_id, action_taken, actioned_by)
+                SELECT snapshot_date, bike_id, station_id, :action, :actioned_by
+                FROM serving.bike_risk_daily
+                WHERE snapshot_date = :d AND bike_id = ANY(:bike_ids)
+                """
+            ),
+            {
+                "d": snapshot_date,
+                "bike_ids": list(bike_ids),
+                "action": COLLECT_ACTION,
+                "actioned_by": ACTIONED_BY,
+            },
+        )
+
+    return {"snapshot_date": snapshot_date.isoformat(), "confirmed": result.rowcount}
+
+
 class OperationState:
     @property
     def meta(self) -> dict:
@@ -143,6 +236,9 @@ class OperationState:
 
     def bikes(self) -> tuple[list[dict], list[dict]]:
         return get_bikes()
+
+    def confirm_collection(self, bike_ids: list[str]) -> dict:
+        return confirm_collection(bike_ids)
 
 
 state = OperationState()
