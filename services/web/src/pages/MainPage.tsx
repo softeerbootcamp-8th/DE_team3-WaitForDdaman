@@ -12,7 +12,6 @@ interface MainPageProps {
   districtNames: string[];
   guToSide: Record<string, Side>;
   pool: Bike[];
-  generatedAt?: string;
   regionFilter: RegionFilter;
   onRegionFilterChange: (filter: RegionFilter) => void;
   onOpenDetail: () => void;
@@ -24,15 +23,14 @@ export function MainPage({
   districtNames,
   guToSide,
   pool,
-  generatedAt,
   regionFilter,
   onRegionFilterChange,
   onOpenDetail,
   capacity,
 }: MainPageProps) {
-  const riskStations = useMemo(() => mapData.stations.filter((s) => s.riskCount > 0), [mapData]);
+  const riskStations = useMemo(() => mapData.stations.filter((s) => s.riskCnt > 0), [mapData]);
   const top10 = useMemo(
-    () => [...riskStations].sort((a, b) => b.riskCount - a.riskCount).slice(0, 10),
+    () => [...riskStations].sort((a, b) => b.riskCnt - a.riskCnt).slice(0, 10),
     [riskStations],
   );
 
@@ -92,14 +90,14 @@ export function MainPage({
             </div>
             <ol className="top-station-list">
               {top10.map((s, i) => (
-                <li key={s.id} onClick={() => handleDistrictClick(s.gu)}>
+                <li key={s.stationId} onClick={() => handleDistrictClick(s.district)}>
                   <span className="rank">{i + 1}</span>
                   <span className="st-name">
-                    {s.name.trim()}
+                    {s.stationName.trim()}
                     <br />
-                    <span className="st-gu">{s.gu}</span>
+                    <span className="st-gu">{s.district}</span>
                   </span>
-                  <span className="st-count">{s.riskCount}대</span>
+                  <span className="st-count">{s.riskCnt}대</span>
                 </li>
               ))}
             </ol>

@@ -7,15 +7,15 @@ export const SIDES: readonly Side[] = ["강남", "강북"];
 export function buildGuSideMap(stations: MapStation[]): Record<string, Side> {
   const map: Record<string, Side> = {};
   stations.forEach((s) => {
-    if (!(s.gu in map)) map[s.gu] = s.region;
+    if (!(s.district in map)) map[s.district] = s.region;
   });
   return map;
 }
 
-export function matchesRegion(entity: { gu: string; region: Side }, filter: RegionFilter): boolean {
+export function matchesRegion(entity: { district: string; region: Side }, filter: RegionFilter): boolean {
   if (filter.kind === "all") return true;
   if (filter.kind === "side") return entity.region === filter.side;
-  return entity.gu === filter.name;
+  return entity.district === filter.name;
 }
 
 // 지도에서 구를 강조 표시할지 여부 (구 이름만 알 때 — DistrictMap의 highlight 콜백용).
@@ -33,5 +33,5 @@ export function regionLabel(filter: RegionFilter): string {
 }
 
 export function totalBikeCount(stations: MapStation[], filter: RegionFilter): number {
-  return stations.filter((s) => matchesRegion(s, filter)).reduce((sum, s) => sum + s.bikeCount, 0);
+  return stations.filter((s) => matchesRegion(s, filter)).reduce((sum, s) => sum + s.bikeCnt, 0);
 }

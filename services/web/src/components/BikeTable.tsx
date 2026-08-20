@@ -34,15 +34,15 @@ export function BikeTable({ bikes, activeDetailId, onRowClick }: BikeTableProps)
           const barWidth = pct === null ? 0 : pct;
           return (
             <tr
-              key={bike.id}
-              className={bike.id === activeDetailId ? "active" : undefined}
+              key={bike.bikeId}
+              className={bike.bikeId === activeDetailId ? "active" : undefined}
               onClick={() => onRowClick(bike)}
             >
               <td className="bike-id">
-                {bike.id}
-                <span className={`tier-pill ${bike.tier}`}>{bike.tier}</span>
+                {bike.bikeId}
+                <span className={`tier-pill ${bike.riskGrade}`}>{bike.riskGrade}</span>
               </td>
-              <td>{bike.station}</td>
+              <td>{bike.stationName}</td>
               <td className={`rate ${rc}`}>
                 {pctLabel}
                 <span className="rate-bar">

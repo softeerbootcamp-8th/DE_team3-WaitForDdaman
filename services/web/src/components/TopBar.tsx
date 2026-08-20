@@ -1,4 +1,4 @@
-export function TopBar({ generatedAt }: { generatedAt?: string }) {
+export function TopBar() {
   return (
     <div className="topbar">
       <div className="brand">

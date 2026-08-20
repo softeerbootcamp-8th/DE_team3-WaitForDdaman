@@ -41,7 +41,7 @@ export default function App() {
 
   return (
     <>
-      <TopBar generatedAt={meta?.generatedAt} />
+      <TopBar />
       <div className="page">
         {meta && mapData ? <Dashboard meta={meta} mapData={mapData} pool={pool} /> : <div className="updated">로딩 중…</div>}
       </div>
@@ -91,7 +91,6 @@ function Dashboard({ meta, mapData, pool }: DashboardProps) {
           districtNames={districtNames}
           guToSide={guToSide}
           pool={pool}
-          generatedAt={meta.generatedAt}
           regionFilter={regionFilter}
           onRegionFilterChange={setRegionFilter}
           onOpenDetail={() => setView("detail")}
@@ -99,7 +98,6 @@ function Dashboard({ meta, mapData, pool }: DashboardProps) {
         />
       ) : (
         <DetailPage
-          meta={meta}
           mapData={mapData}
           districtNames={districtNames}
           guToSide={guToSide}

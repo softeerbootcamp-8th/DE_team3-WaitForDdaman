@@ -7,11 +7,10 @@ import { DistrictMap } from "../components/DistrictMap";
 import { RegionFilterBar } from "../components/RegionFilterBar";
 import type { UseCapacityResult } from "../hooks/useCapacity";
 import { useClassifiedPool } from "../hooks/useClassifiedPool";
-import type { Bike, MapData, RegionFilter, Side, SnapshotMeta } from "../types";
+import type { Bike, MapData, RegionFilter, Side } from "../types";
 import { isDistrictActive, matchesRegion, regionLabel } from "../utils/regions";
 
 interface DetailPageProps {
-  meta: SnapshotMeta;
   mapData: MapData;
   districtNames: string[];
   guToSide: Record<string, Side>;
@@ -22,17 +21,16 @@ interface DetailPageProps {
 }
 
 function passesFilter(bike: Bike, query: string, tiers: Set<string>, urgencies: Set<string>): boolean {
-  if (tiers.size && !tiers.has(bike.tier)) return false;
+  if (tiers.size && !tiers.has(bike.riskGrade)) return false;
   if (urgencies.size && bike.stationUrgency !== "정보없음" && !urgencies.has(bike.stationUrgency)) return false;
   if (query) {
-    const hay = (bike.id + " " + bike.station + " " + bike.gu).toLowerCase();
+    const hay = (bike.bikeId + " " + bike.stationName + " " + bike.district).toLowerCase();
     if (!hay.includes(query)) return false;
   }
   return true;
 }
 
 export function DetailPage({
-  meta,
   mapData,
   districtNames,
   guToSide,
@@ -50,7 +48,7 @@ export function DetailPage({
 
   const byId = useMemo(() => {
     const map = new Map<string, Bike>();
-    dest.concat(source).forEach((b) => map.set(b.id, b));
+    dest.concat(source).forEach((b) => map.set(b.bikeId, b));
     return map;
   }, [dest, source]);
 
@@ -71,8 +69,8 @@ export function DetailPage({
     () =>
       regionPool.reduce(
         (acc, b) => {
-          if (b.tier === "Critical") acc.critCount++;
-          else if (b.tier === "Warning") acc.warningCount++;
+          if (b.riskGrade === "Critical") acc.critCount++;
+          else if (b.riskGrade === "Warning") acc.warningCount++;
           return acc;
         },
         { critCount: 0, warningCount: 0 },
@@ -120,7 +118,7 @@ export function DetailPage({
           </div>
           <div className="list-cap-note">Capacity 초과분 · 대여중단 유지, 다음날 재평가</div>
           <div className="list-scroll">
-            <BikeTable bikes={filteredSource} activeDetailId={activeDetailId} onRowClick={(bike) => setActiveDetailId(bike.id)} />
+            <BikeTable bikes={filteredSource} activeDetailId={activeDetailId} onRowClick={(bike) => setActiveDetailId(bike.bikeId)} />
           </div>
         </div>
 
@@ -131,7 +129,7 @@ export function DetailPage({
           </div>
           <div className="list-cap-note">Capacity 내 우선 수거 대상</div>
           <div className="list-scroll">
-            <BikeTable bikes={filteredDest} activeDetailId={activeDetailId} onRowClick={(bike) => setActiveDetailId(bike.id)} />
+            <BikeTable bikes={filteredDest} activeDetailId={activeDetailId} onRowClick={(bike) => setActiveDetailId(bike.bikeId)} />
           </div>
         </div>
 

@@ -22,19 +22,19 @@ export function DetailPanel({ bike }: { bike: Bike | null }) {
     <div>
       <img
         className="detail-img"
-        src={bikeImageFor(bike.id)}
+        src={bikeImageFor(bike.bikeId)}
         onError={(e) => {
           (e.target as HTMLImageElement).src = FALLBACK_BIKE_IMG;
         }}
-        alt={`${bike.id} 참고 이미지`}
+        alt={`${bike.bikeId} 참고 이미지`}
       />
       <div className="detail-body">
         <div className="detail-id-row">
-          <span className="bike-id">{bike.id}</span>
-          <span className={`badge-type ${bike.tier}`}>{bike.tier}</span>
+          <span className="bike-id">{bike.bikeId}</span>
+          <span className={`badge-type ${bike.riskGrade}`}>{bike.riskGrade}</span>
         </div>
         <div className="detail-station">
-          {bike.station} · {bike.gu}
+          {bike.stationName} · {bike.district}
         </div>
 
         <div className="detail-grid">
@@ -54,7 +54,7 @@ export function DetailPanel({ bike }: { bike: Bike | null }) {
 
         <div className="score-block">
           <div className="score-num">
-            {bike.score}
+            {bike.riskScore}
             <sub>점</sub>
           </div>
           <div className="score-reason">
@@ -75,8 +75,8 @@ export function DetailPanel({ bike }: { bike: Bike | null }) {
 
         <div className="history-label">최근 고장신고 이력</div>
         <div className="history-list">
-          {bike.history.length ? (
-            bike.history.map((h, i) => (
+          {bike.failHistory.length ? (
+            bike.failHistory.map((h, i) => (
               <div className="history-item" key={i}>
                 <span className="dot" />
                 {h}

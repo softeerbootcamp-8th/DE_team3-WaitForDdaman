@@ -34,7 +34,7 @@ def _latest_snapshot_date():
 def get_meta() -> dict:
     snapshot_date = _latest_snapshot_date()
     return {
-        "generatedAt": snapshot_date.isoformat() if snapshot_date else "",
+        "snapshotDate": snapshot_date.isoformat() if snapshot_date else "",
         "capacity": {"max": DEFAULT_CAPACITY},
     }
 
@@ -53,9 +53,8 @@ def get_map_data() -> dict:
         stations = conn.execute(
             text(
                 """
-                SELECT station_id, station_name, region, district AS gu,
-                       longitude, latitude, hold_num,
-                       bike_cnt AS bike_count, risk_cnt AS risk_count, healthy_ratio, urgency
+                SELECT station_id, station_name, region, district,
+                       longitude, latitude, hold_num, bike_cnt, risk_cnt, healthy_ratio, urgency
                 FROM serving.station_daily
                 WHERE snapshot_date = :d
                 """
@@ -74,15 +73,15 @@ def get_map_data() -> dict:
         "districts": [{"name": d["name"], "path": d["path"], "cx": d["cx"], "cy": d["cy"]} for d in districts],
         "stations": [
             {
-                "id": s["station_id"],
-                "name": s["station_name"],
-                "gu": s["gu"],
+                "stationId": s["station_id"],
+                "stationName": s["station_name"],
+                "district": s["district"],
                 "region": s["region"],
                 "x": _xy(s)[0],
                 "y": _xy(s)[1],
                 "holdNum": s["hold_num"],
-                "bikeCount": s["bike_count"],
-                "riskCount": s["risk_count"],
+                "bikeCnt": s["bike_cnt"],
+                "riskCnt": s["risk_cnt"],
                 "healthyRatio": s["healthy_ratio"],
                 "urgency": s["urgency"],
             }
@@ -102,7 +101,7 @@ def get_bikes() -> tuple[list[dict], list[dict]]:
         rows = conn.execute(
             text(
                 """
-                SELECT b.bike_id, b.station_name, b.district AS gu, b.region, b.healthy_ratio,
+                SELECT b.bike_id, b.station_name, b.district, b.region, b.healthy_ratio,
                        b.risk_grade, b.risk_score, b.dist_km, b.aging,
                        b.fail_history, s.urgency AS station_urgency
                 FROM serving.bike_risk_daily b
@@ -117,19 +116,19 @@ def get_bikes() -> tuple[list[dict], list[dict]]:
 
     def to_bike(r) -> dict:
         return {
-            "id": r["bike_id"],
-            "station": r["station_name"],
-            "gu": r["gu"],
+            "bikeId": r["bike_id"],
+            "stationName": r["station_name"],
+            "district": r["district"],
             "region": r["region"],
             "stationUrgency": r["station_urgency"] or "정보없음",
             "healthyRatio": r["healthy_ratio"],
-            "tier": r["risk_grade"],
-            "score": r["risk_score"],
+            "riskGrade": r["risk_grade"],
+            "riskScore": r["risk_score"],
             "reason": REASON_PLACEHOLDER,
             "distKm": r["dist_km"],
             "durH": DUR_H_PLACEHOLDER,
             "aging": r["aging"],
-            "history": r["fail_history"] or [],
+            "failHistory": r["fail_history"] or [],
         }
 
     source = [to_bike(r) for r in rows]
