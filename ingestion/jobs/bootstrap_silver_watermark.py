@@ -48,7 +48,14 @@ def run(dataset: str) -> None:
 
     spark = build_spark_session(f"bootstrap-silver-watermark-{dataset}")
     try:
-        row = spark.sql(f"SELECT MIN({partition_col}) AS min_date FROM {catalog}.{table}").collect()[0]
+        # rent_dt가 NULL인 원본 행은 파티션 컬럼이 빈 문자열("")로 떨어진다(_derive_date_partition의
+        # concat_ws가 전부 NULL이면 NULL이 아니라 ""를 반환함). ""가 실제 날짜보다 사전식으로
+        # 작아서 걸러내지 않으면 MIN()이 그 값을 집어 "데이터 없음"으로 오판하게 된다
+        # (실측: rental_history에서 malformed 행 2개로 인해 재현됨, 2026-08-20).
+        row = spark.sql(
+            f"SELECT MIN({partition_col}) AS min_date FROM {catalog}.{table} "
+            f"WHERE {partition_col} IS NOT NULL AND {partition_col} != ''"
+        ).collect()[0]
     finally:
         spark.stop()
 
