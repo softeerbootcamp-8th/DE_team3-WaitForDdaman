@@ -14,6 +14,8 @@ import logging
 
 import config
 from common.spark_session import build_spark_session
+from common.watermark import read_watermark, write_watermark
+from config.watermark_keys import BRONZE_FAILURE_REPORT, SILVER_FAILURE_REPORT
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -47,7 +49,12 @@ def run() -> None:
     row_count = staging_df.count()
     staging_df.writeTo(SILVER_TABLE).overwritePartitions()
 
-    logger.info("INSERT OVERWRITE 완료: %d행", row_count)
+    # overwrite가 끝난 뒤에만 갱신 - 이 시점의 Bronze 워터마크까지 Silver에
+    # 반영됐다는 의미로 그대로 이어받는다
+    bronze_watermark = read_watermark(watermark_key=BRONZE_FAILURE_REPORT)
+    write_watermark(bronze_watermark, watermark_key=SILVER_FAILURE_REPORT)
+
+    logger.info("INSERT OVERWRITE 완료: %d행 (Silver 워터마크=%s)", row_count, bronze_watermark)
 
 
 if __name__ == "__main__":

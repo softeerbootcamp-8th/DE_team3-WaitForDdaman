@@ -38,7 +38,7 @@ gold.bike_location과 동일한 baseline+delta 패턴으로 증분 유지한다.
 
 ### 델타 구간을 "어제 하루"로 고정하지 않고 자기 자신의 snapshot_date로 추적하는 이유
 gold.bike_location과 동일한 이유(자세한 설명은 build_bike_location.py 참고) -
-어제 하루로 고정하면 dag_gold_dim_fact가 하루라도 실행을 건너뛴 사이의
+어제 하루로 고정하면 gold_dim_fact가 하루라도 실행을 건너뛴 사이의
 bikeman_action 이벤트는 어떤 미래 실행에서도 다시는 스캔되지 않아 조용히
 유실된다. gold.bike_last_action 자신의 snapshot_date(MAX)를 워터마크로 재사용해서
 [직전 snapshot_date, 이번 snapshot_date - 1] 구간을 스캔한다 - 평소엔 하루뿐이라

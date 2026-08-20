@@ -1,19 +1,13 @@
 """
-dag_risk_decision - 위험도 추론 + 대여중단 결정
+gold_risk_decision - 위험도 추론 + 대여중단 결정
 
-dag_gold_dim_fact(gold.bike_location, gold.fact_station_inventory 등)가 끝난 뒤, 저장된
+gold_dim_fact(gold.bike_location, gold.fact_station_inventory 등)가 끝난 뒤, 저장된
 위험도 모델로 매일 자전거별 risk_score/risk_grade를 추론하고(gold.fact_bike_risk), 대여소
 재고 상황을 반영해 대여중단/보류를 결정한다(gold.fact_bike_decision).
 
-gold.bike_features_daily(추론용 feature)는 dag_gold_dim_fact 소관이 아니라 이 DAG이
+gold.bike_features_daily(추론용 feature)는 gold_dim_fact 소관이 아니라 이 DAG이
 직접 만든다(build_bike_features_daily) - Silver(rental_history/failure_report)만
 있으면 되고 순수 이 모델 전용 입력이라 risk_model 스코프로 판단했다.
-
-### wait_for_gold_facts를 왜 ExternalTaskSensor로 뒀는가
-같은 리포의 silver_bikeman_action_daily_dag는 이미 Asset 기반 트리거(schedule=[Asset])로
-가있고, dag_gold_dim_fact -> dag_risk_decision도 구조적으로 같은 이유(업스트림 완료
-시각이 매일 일정하지 않음)로 Asset이 더 안전하다. 다만 지금은 계획 문서에 적힌 대로
-ExternalTaskSensor로 먼저 만들어두고, 필요해지면 Asset으로 바꾼다.
 
 ### 콜드스타트 분기 제거 (2026-08-19, #90)
 원안은 "최초 실행일엔 어제 fact_bike_decision이 없으니 필터를 스킵한다"는 걸
@@ -31,7 +25,7 @@ none_failed_min_one_success)를 전부 제거했다.
 ### trigger_serving_sync (2026-08-18 추가)
 build_fact_bike_decision이 끝나면 gold_to_serving_sync(gold_to_serving_sync_dag.py)를
 TriggerDagRunOperator로 트리거한다. bike_risk_daily 마트가 필요로 하는
-fact_bike_risk/fact_bike_decision은 이 DAG의 산출물이라, dag_gold_dim_fact가 아니라
+fact_bike_risk/fact_bike_decision은 이 DAG의 산출물이라, gold_dim_fact가 아니라
 여기서 트리거해야 두 마트(station_daily 포함) 모두 만들 재료가 갖춰진다.
 """
 from datetime import timedelta
@@ -39,7 +33,7 @@ from datetime import timedelta
 import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
-from airflow.providers.standard.sensors.external_task import ExternalTaskSensor
+from airflow.providers.standard.sensors.bash import BashSensor
 from airflow.sdk import dag
 
 RISK_MODEL_DIR = "/opt/airflow/pipeline/risk_model"
@@ -47,8 +41,12 @@ INGESTION_DIR = "/opt/airflow/ingestion"
 AIRFLOW_HOME_DIR = "/opt/airflow"
 PYTHON = "python"
 
-DAG_ID = "dag_risk_decision"
-UPSTREAM_DAG_ID = "dag_gold_dim_fact"
+DAG_ID = "gold_risk_decision"
+
+# gold_dim_fact의 wait_for_silver_rental_history와 동일한 값 - 상류가 이미
+# 검증된 타임아웃/간격이라 여기서도 그대로 맞춘다.
+SENSOR_TIMEOUT = timedelta(hours=6).total_seconds()
+POKE_INTERVAL = 300  # 5분
 
 default_args = {
     "retries": 2,
@@ -67,32 +65,45 @@ def _bash(job_module: str, extra_env: str = "") -> str:
     )
 
 
+def _ingestion_bash(job_module: str, extra_env: str = "") -> str:
+    # check_silver_watermark.py는 ingestion/jobs 소속 - gold_dim_fact_dag.py의
+    # wait_for_silver_rental_history와 동일한 커맨드 형태를 그대로 쓴다.
+    return (
+        f"cd {INGESTION_DIR} && set -a && source .env && set +a && "
+        f"PYTHONDONTWRITEBYTECODE=1 {extra_env}{PYTHON} -m jobs.{job_module}"
+    )
+
+
 @dag(
     dag_id=DAG_ID,
-    schedule=None,  # TODO: dag_gold_dim_fact 완료 후 트리거 (고정 시간 없음 - 센서가 대기)
+    schedule=None,  # gold_dim_fact.trigger_risk_decision(TriggerDagRunOperator)로만 실행
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Seoul"),
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
-    tags=["daily_batch", "gold", "risk_decision"],
+    tags=["gold", "trigger_only"],
     params={
         "snapshot_date": "",  # 미지정 시 각 job이 오늘 날짜로 기본 처리
     },
     doc_md=__doc__,
 )
-def dag_risk_decision():
-    # 1. wait_for_gold_facts
-    wait_for_gold_facts = ExternalTaskSensor(
-        task_id="wait_for_gold_facts",
-        external_dag_id=UPSTREAM_DAG_ID,
-        external_task_id=None,  # 그 DAG 전체 성공을 기다림 (태스크 이름 변경에 안전)
-        execution_date_fn=lambda dt: dt,
+def gold_risk_decision():
+    # 1. wait_for_silver_failure_report - rental_history는 gold_dim_fact가 이미
+    # 대기해줬지만 failure_report는 그 DAG 스코프 밖이라 여기서 직접 확인한다.
+    wait_for_silver_failure_report = BashSensor(
+        task_id="wait_for_silver_failure_report",
+        bash_command=_ingestion_bash(
+            "check_silver_watermark",
+            "DATASET=failure_report REQUIRED_OFFSET_DAYS=1 TARGET_DATE='{{ params.snapshot_date or ds }}' ",
+        ),
         mode="reschedule",
-        timeout=timedelta(hours=3).total_seconds(),
+        poke_interval=POKE_INTERVAL,
+        timeout=SENSOR_TIMEOUT,
     )
 
-    # 2. build_bike_features_daily - Silver(rental_history/failure_report)만 있으면 되고
-    # dag_gold_dim_fact의 Gold 산출물엔 의존하지 않아, gold_facts 대기와 별도로 병렬 실행한다.
+    # 2. build_bike_features_daily - Silver(rental_history/failure_report)만 있으면 됨.
+    # rental_history는 트리거 소스인 gold_dim_fact가 이미 대기했으므로, 여기선
+    # failure_report 대기 뒤에만 실행하면 된다.
     build_bike_features_daily = BashOperator(
         task_id="build_bike_features_daily",
         bash_command=_bash("build_bike_features_daily", "SNAPSHOT_DATE='{{ params.snapshot_date }}' "),
@@ -131,7 +142,7 @@ def dag_risk_decision():
         reset_dag_run=True,
     )
 
-    wait_for_gold_facts >> build_bike_features_daily >> run_risk_scoring_model >> build_fact_bike_decision >> trigger_serving_sync
+    wait_for_silver_failure_report >> build_bike_features_daily >> run_risk_scoring_model >> build_fact_bike_decision >> trigger_serving_sync
 
 
-dag_risk_decision()
+gold_risk_decision()

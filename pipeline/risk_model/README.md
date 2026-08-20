@@ -10,7 +10,7 @@
 - `build_bike_features_daily.py`: `silver.rental_history` + `silver.failure_report` -> `gold.bike_features_daily` (하루치 통째로 재계산, OVERWRITE + PyDeequ 검증)
   - 컬럼: `snapshot_date`(파티션), `bike_id`, `trips`, `dist_km`, `instant_ret`, `fail_150d`, `days_since_fail`, `days_since_last_rent`, `trend_ratio`
   - 기준일 이전 14일 rolling window로 집계. 피처 로직은 `pipeline/train_risk_model/features.py`의 `build_features_for_inference()`를 그대로 호출한다(학습·추론 공유, train-serving skew 방지) - `dim_bike`처럼 누적 처리 아님, 워터마크 없음
-  - `dag_gold_dim_fact` 산출물이 아니라 이 폴더가 직접 만든다 - 순수 추론 입력이라 risk_model 스코프
+  - `gold_dim_fact` 산출물이 아니라 이 폴더가 직접 만든다 - 순수 추론 입력이라 risk_model 스코프
 - `run_risk_scoring_model.py`: `pipeline/train_risk_model`의 `registry.get_champion()` + `train.score()`를 그대로 불러 쓰는 추론 라이브러리
   - champion은 `registry.json`에서 로드하고(`{model_root}/registry.json`), 승격 후보는 학습 쪽(`risk_model_train_dag.py`)에서 항상 `models.primary`(lgbm)로 고정돼 있어 여기서는 model_type 분기를 신경 쓸 필요가 없다
   - `risk_score`는 모델이 출력한 원본 확률(0~1)에 100을 곱한 값(0~100), `risk_grade`는 95/99 컷오프로 Normal/Warning/Critical 3등급 (이 컷오프 값은 champion의 확률 분포에 맞춰 재검증이 필요할 수 있음 - 재학습마다 드리프트 가능)
@@ -26,9 +26,9 @@
 
 ## Airflow
 
-- DAG: `dag_risk_decision` (`airflow/dags/gold_risk_decision_dag.py`)
-  - `dag_gold_dim_fact` 완료 대기(`ExternalTaskSensor`) -> cold start 분기 -> `run_risk_scoring_model`(=`build_fact_bike_risk.py`) -> `build_fact_bike_decision`
-  - `build_bike_features_daily`는 Silver만 있으면 되므로 `dag_gold_dim_fact` 대기와 무관하게 병렬로 실행, `run_risk_scoring_model` 직전에 합류
+- DAG: `gold_risk_decision` (`airflow/dags/gold_risk_decision_dag.py`)
+  - `gold_dim_fact` 완료 대기(`ExternalTaskSensor`) -> cold start 분기 -> `run_risk_scoring_model`(=`build_fact_bike_risk.py`) -> `build_fact_bike_decision`
+  - `build_bike_features_daily`는 Silver만 있으면 되므로 `gold_dim_fact` 대기와 무관하게 병렬로 실행, `run_risk_scoring_model` 직전에 합류
   - cold start 분기(`skip_filter_first_run`/`apply_lagged_filter`)는 실제로는 같은 필터 로직을 부른다 - `bikeman_action` 기반 필터가 이력 없는 최초 실행일에도 자연히 아무도 안 걸러서 별도 분기가 필요 없기 때문
 
 ## 로컬 실행

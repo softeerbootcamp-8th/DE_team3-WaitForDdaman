@@ -20,7 +20,7 @@ Bronze / Silver 생성
 ## Airflow
 
 - DAG: `silver_gold_daily_batch_rental_history` (`airflow/dags/silver_gold_daily_batch_rental_history_dag.py`)
-  - `transform_silver_rental_history`만 실행 (2026-08-17부터 `build_gold_dim_bike`는 `dag_gold_dim_fact`로 이관됨)
+  - `transform_silver_rental_history`만 실행 (2026-08-17부터 `build_gold_dim_bike`는 `gold_dim_fact`로 이관됨)
   - 매일 07:30 KST(Bronze 06:00 시작 이후로 고정 오프셋 - 실제 의존관계 아님)
 
 - DAG: `silver_station_active_daily` (`airflow/dags/silver_station_active_dag.py`)

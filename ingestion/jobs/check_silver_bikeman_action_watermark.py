@@ -1,5 +1,5 @@
 """
-Gold DAG(dag_gold_dim_fact)의 wait_for_silver 단계 - bikeman_action 준비 확인용
+Gold DAG(gold_dim_fact)의 wait_for_silver 단계 - bikeman_action 준비 확인용
 
 ### 왜 ExternalTaskSensor를 안 쓰는가
 silver_bikeman_action_daily DAG는 고정 cron이 아니라 Asset(bikeman_event_bronze)

@@ -1,16 +1,16 @@
 # airflow/dags/gold_to_serving_sync_dag.py
 """
 gold_to_serving_sync - Gold Iceberg 마트를 서빙 Postgres(station_daily/bike_risk_daily)로
-동기화한다. dag_risk_decision의 마지막 태스크(build_fact_bike_decision)가 끝나면
-TriggerDagRunOperator로 이 DAG를 트리거한다 (dag_gold_dim_fact가 아님 - bike_risk_daily가
-필요로 하는 fact_bike_risk/fact_bike_decision은 dag_risk_decision의 산출물이라 그게
+동기화한다. gold_risk_decision의 마지막 태스크(build_fact_bike_decision)가 끝나면
+TriggerDagRunOperator로 이 DAG를 트리거한다 (gold_dim_fact가 아님 - bike_risk_daily가
+필요로 하는 fact_bike_risk/fact_bike_decision은 gold_risk_decision의 산출물이라 그게
 끝나야 두 마트 모두 만들 재료가 갖춰짐).
 
 두 브랜치(bike_risk_daily / station_daily)는 서로 의존하지 않아 병렬 실행한다.
 
 ### 실패 전파를 끊는 이유
 트리거는 wait_for_completion=False다 - 이 DAG가 실패해도 이미 만들어진 gold 데이터
-자체는 유효하므로 dag_risk_decision을 실패로 만들 이유가 없다. 대신 각 태스크에
+자체는 유효하므로 gold_risk_decision을 실패로 만들 이유가 없다. 대신 각 태스크에
 Slack 알림을 건다 (CloudWatch/SNS는 이 프로젝트에 대응 AWS 인프라가 없어 스코프 제외 -
 spec §2/§3 참고).
 
@@ -67,7 +67,7 @@ def _bash(job_module: str, extra_env: str = "") -> str:
 
 
 def _verify_bash(iceberg_table: str, postgres_table: str) -> str:
-    # dag_risk_decision이 conf로 넘긴 snapshot_date가 있으면 그걸 우선한다 (아래
+    # gold_risk_decision이 conf로 넘긴 snapshot_date가 있으면 그걸 우선한다 (아래
     # SNAPSHOT_DATE 주석 참고) - 없으면(수동 트리거 등) 이 DAG 자신의 ds로 폴백.
     return _bash(
         "verify_serving_sync",
@@ -78,17 +78,17 @@ def _verify_bash(iceberg_table: str, postgres_table: str) -> str:
 
 @dag(
     dag_id="gold_to_serving_sync",
-    schedule=None,  # dag_risk_decision의 TriggerDagRunOperator로만 실행
+    schedule=None,  # gold_risk_decision의 TriggerDagRunOperator로만 실행
     start_date=pendulum.datetime(2026, 8, 18, tz="Asia/Seoul"),
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
-    tags=["daily_batch", "serving"],
+    tags=["serving", "trigger_only"],
     doc_md=__doc__,
 )
 def gold_to_serving_sync():
     # 아래 네 태스크의 SNAPSHOT_DATE는 모두 dag_run.conf.get("snapshot_date")를 자기
-    # ds보다 우선한다 - dag_risk_decision이 conf로 trigger_serving_sync에서 넘긴 날짜가
+    # ds보다 우선한다 - gold_risk_decision이 conf로 trigger_serving_sync에서 넘긴 날짜가
     # 있으면 그걸 쓰고(백필/미래 스케줄 실행에서 두 DAG의 날짜가 어긋나지 않게), 수동
     # 트리거처럼 conf가 없으면 기존과 동일하게 이 DAG 자신의 ds로 폴백한다.
     build_mart_bike_risk_daily = BashOperator(

@@ -25,9 +25,9 @@ SNAPSHOT_RETENTION_DAYS(기본 7일)보다 오래된 스냅샷을 만료 대상�
 MIN_SNAPSHOTS_TO_RETAIN(기본 3개)은 나이와 무관하게 항상 남겨서 문제 발생 시
 최근 며칠로 롤백할 여지를 남긴다.
 
-### 왜 dag_gold_dim_fact가 아니라 별도 DAG인가
+### 왜 gold_dim_fact가 아니라 별도 DAG인가
 daily 배치마다 매번 돌리면(파일/스냅샷이 하루에 1개씩만 늘어나는데) 배보다
-배꼽이 커진다. 주간 1회면 충분하므로 별도 스케줄(dag_gold_maintenance, 매주 일요일)로
+배꼽이 커진다. 주간 1회면 충분하므로 별도 스케줄(gold_maintenance, 매주 일요일)로
 분리한다 - 실패해도 다음 주에 다시 시도하면 되고, daily 배치의 SLA에 영향을 주지 않는다.
 
 ### 멱등성 / 안전성

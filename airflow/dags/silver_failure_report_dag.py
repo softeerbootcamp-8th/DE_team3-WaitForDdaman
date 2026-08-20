@@ -84,7 +84,7 @@ def _staging_bash(job_module: str) -> str:
     catchup=False,  # 매번 브론즈 전체를 재처리하는 구조라 과거 날짜를 따로 메울 이유가 없음
     max_active_runs=1,
     default_args=DEFAULT_ARGS,
-    tags=["silver", "failure_report"],
+    tags=["silver", "asset_triggered"],
     doc_md=__doc__,
 )
 def silver_failure_report():

@@ -86,7 +86,7 @@ def _run_deploy_returned_bikes(**context) -> None:
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
-    tags=["daily_batch", "bikeman"],
+    tags=["serving", "trigger_only"],
     doc_md=__doc__,
 )
 def bikeman_event_generator():

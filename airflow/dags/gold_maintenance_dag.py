@@ -1,12 +1,12 @@
 """
 Gold 테이블 유지보수 DAG - Iceberg 컴팩션(rewrite_data_files)
 
-### 왜 dag_gold_dim_fact와 분리된 별도 DAG인가
+### 왜 gold_dim_fact와 분리된 별도 DAG인가
 gold.bike_location/station_active/fact_station_inventory/bike_last_action은
 매일 전체 덮어쓰기(overwritePartitions)라 실행마다 새 데이터 파일이 쌓인다
 (small file 문제). 컴팩션은 daily 배치의 SLA와 무관하고, 하루에 1~2개씩만
 늘어나는 파일을 매일 정리할 필요는 없으므로 주간 1회로 충분하다 -
-dag_gold_dim_fact에 태스크를 얹으면 daily 배치가 컴팩션 실패에 영향받게 되므로
+gold_dim_fact에 태스크를 얹으면 daily 배치가 컴팩션 실패에 영향받게 되므로
 분리했다(자세한 이유는 pipeline/collection_priority/jobs/compact_gold_tables.py
 docstring 참고).
 
@@ -41,16 +41,16 @@ def _compact_bash() -> str:
 
 
 @dag(
-    dag_id="dag_gold_maintenance",
+    dag_id="gold_maintenance",
     schedule="0 3 * * 0",  # 매주 일요일 03:00 KST
     start_date=pendulum.datetime(2026, 8, 17, tz="Asia/Seoul"),
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
-    tags=["weekly_batch", "gold", "maintenance"],
+    tags=["gold", "independent", "weekly_batch"],
     doc_md=__doc__,
 )
-def dag_gold_maintenance():
+def gold_maintenance():
     BashOperator(
         task_id="compact_gold_tables",
         bash_command=_compact_bash(),
@@ -58,4 +58,4 @@ def dag_gold_maintenance():
     )
 
 
-dag_gold_maintenance()
+gold_maintenance()

@@ -84,7 +84,7 @@ default_args = {
     max_active_runs=1,
     max_active_tasks=2,  # 로컬 LocalStack 동시 쓰기 부하 제한
     default_args=default_args,
-    tags=["initial_load", "bronze", "all_sources"],
+    tags=["bronze", "independent", "manual"],
     params={
         "rental_history_dir": f"{INGESTION_DIR}/data/rental_history",
         "rental_history_pattern": "*",
