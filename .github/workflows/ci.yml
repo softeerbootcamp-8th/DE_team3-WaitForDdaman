@@ -44,7 +44,7 @@ jobs:
           export PYSPARK_DRIVER_PYTHON="$PYSPARK_PYTHON"
 
           echo "::group::ingestion"
-          (cd ingestion && PYTHONPATH="$ROOT" pytest tests -q)
+          (cd ingestion && PYTHONPATH="$ROOT:$ROOT/ingestion" pytest tests -q)
           echo "::endgroup::"
 
           echo "::group::staging"
