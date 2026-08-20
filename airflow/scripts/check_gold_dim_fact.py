@@ -1,7 +1,7 @@
 """
 dag_gold_dim_fact 결과 확인용 스크립트 (dim_bike/bike_location/station_active/fact_station_inventory)
 
-사용법 (컨테이너 안에서, docker-compose.local.yml이 ./scripts를 /opt/airflow/scripts로 마운트함):
+사용법 (컨테이너 안에서. prod 이미지는 이 스크립트를 /opt/airflow/scripts에 포함한다):
     docker exec airflow-scheduler bash -c '
     cd /opt/airflow/ingestion &&
     set -a && source .env && set +a &&

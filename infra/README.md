@@ -2,6 +2,25 @@
 
 프로덕션(EC2 + ECR + docker compose + GitHub Actions) 배포 설정과 절차.
 
+## 이 브랜치에는 로컬 개발용 파일이 없다
+
+`production` 브랜치는 배포 전용이라 dev/local 파일을 의도적으로 제거했다
+(`docker-compose.yml`, `docker-compose.local.yml`, `airflow/Dockerfile`,
+`airflow/Dockerfile.local`, `services/*/Dockerfile`, `config/risk_model.local.yaml`).
+남은 건 `.prod` 계열뿐이다:
+
+```
+docker-compose.prod.yml
+airflow/Dockerfile.prod
+services/api/Dockerfile.prod
+services/web/Dockerfile.prod
+```
+
+**로컬 개발은 `develop` / `develop-services` 브랜치에서 한다.** 각 모듈 README에
+남아 있는 로컬 실행 설명(LocalStack, `docker compose -f docker-compose.local.yml` 등)은
+그 브랜치 기준이다. 또 `production`은 단방향(develop → production)으로만 운용한다 —
+이 브랜치를 develop으로 되머지하면 위 삭제가 전파되어 팀원들 로컬 환경이 깨진다.
+
 ## 아키텍처 요약
 
 - 단일 EC2 인스턴스(`t4g.large`, arm64/Graviton2) 위에서 `docker compose`로 전체 스택 실행:
