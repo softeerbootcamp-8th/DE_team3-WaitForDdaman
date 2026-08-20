@@ -48,7 +48,7 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::staging"
-          (cd staging && PYTHONPATH="$ROOT:$ROOT/ingestion" pytest tests -q)
+          (cd staging && PYTHONPATH="$ROOT:$ROOT/ingestion:$ROOT/staging" pytest tests -q)
           echo "::endgroup::"
 
           for mod in bikeman_event_generator serving_sync collection_priority; do
