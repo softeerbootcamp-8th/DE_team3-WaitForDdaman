@@ -1,5 +1,5 @@
 """
-Gold DAG(dag_gold_dim_fact)의 wait_for_silver 단계 - 워터마크 기반 Silver 소스
+Gold DAG(gold_dim_fact)의 wait_for_silver 단계 - 워터마크 기반 Silver 소스
 준비 확인용
 
 ### 왜 ExternalTaskSensor 대신 워터마크 직접 확인인가 (2026-08-17, #50)
@@ -34,7 +34,7 @@ import sys
 from datetime import datetime, timedelta
 
 from common.watermark import read_watermark
-from config.watermark_keys import SILVER_RENTAL_HISTORY
+from config.watermark_keys import SILVER_FAILURE_REPORT, SILVER_RENTAL_HISTORY
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 # 어긋나지 않게 한다.
 DATASET_WATERMARK_KEYS = {
     "rental_history": SILVER_RENTAL_HISTORY,
+    "failure_report": SILVER_FAILURE_REPORT,
 }
 
 
