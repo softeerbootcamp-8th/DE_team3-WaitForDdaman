@@ -97,6 +97,24 @@ def get_map_data() -> dict:
     }
 
 
+def _to_bike(r) -> dict:
+    """조회 행을 API의 Bike 모양으로. 수거 후보 Pool과 확정 목록이 같은 모양을 쓰므로
+    프론트가 두 화면에서 BikeTable/DetailPanel을 그대로 재사용한다."""
+    return {
+        "bike_id": r["bike_id"],
+        "station_name": r["station_name"],
+        "district": r["district"],
+        "region": r["region"],
+        "station_urgency": r["station_urgency"] or "정보없음",
+        "healthy_ratio": r["healthy_ratio"],
+        "risk_grade": r["risk_grade"],
+        "risk_score": r["risk_score"],
+        "dist_km": r["dist_km"],
+        "aging": r["aging"],
+        "fail_history": r["fail_history"] or [],
+    }
+
+
 def get_bikes() -> tuple[list[dict], list[dict]]:
     """수거 후보 Pool을 전부 source로 돌려준다 (dest는 항상 빈 배열).
 
@@ -124,22 +142,7 @@ def get_bikes() -> tuple[list[dict], list[dict]]:
             {"d": snapshot_date, "no_action_grade": NO_ACTION_GRADE},
         ).mappings().all()
 
-    def to_bike(r) -> dict:
-        return {
-            "bike_id": r["bike_id"],
-            "station_name": r["station_name"],
-            "district": r["district"],
-            "region": r["region"],
-            "station_urgency": r["station_urgency"] or "정보없음",
-            "healthy_ratio": r["healthy_ratio"],
-            "risk_grade": r["risk_grade"],
-            "risk_score": r["risk_score"],
-            "dist_km": r["dist_km"],
-            "aging": r["aging"],
-            "fail_history": r["fail_history"] or [],
-        }
-
-    source = [to_bike(r) for r in rows]
+    source = [_to_bike(r) for r in rows]
     dest: list[dict] = []
     return source, dest
 
@@ -210,6 +213,42 @@ def get_latest_confirmation() -> dict:
         "confirmed": row["confirmed"] if row else 0,
         "actioned_at": actioned_at.isoformat() if actioned_at else None,
     }
+
+
+def get_confirmed_bikes() -> dict:
+    """가장 최근 확정 배치에 담긴 자전거 목록. 확정 내역 조회 화면이 쓴다.
+
+    app.action_log에는 bike_id/station_id만 있으므로 화면에 필요한 위험도·대여소 정보는
+    serving.bike_risk_daily / station_daily에서 조인해 채운다.
+    """
+    summary = get_latest_confirmation()
+    if summary["confirmed"] == 0:
+        return {**summary, "bikes": []}
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT b.bike_id, b.station_name, b.district, b.region, b.healthy_ratio,
+                       b.risk_grade, b.risk_score, b.dist_km, b.aging,
+                       b.fail_history, s.urgency AS station_urgency
+                FROM app.action_log a
+                JOIN serving.bike_risk_daily b
+                  ON b.bike_id = a.bike_id AND b.snapshot_date = a.snapshot_date
+                LEFT JOIN serving.station_daily s
+                  ON s.station_id = b.station_id AND s.snapshot_date = b.snapshot_date
+                WHERE a.snapshot_date = :d AND a.action_taken = :action
+                  AND a.actioned_at = (
+                      SELECT max(actioned_at) FROM app.action_log
+                      WHERE snapshot_date = :d AND action_taken = :action
+                  )
+                ORDER BY b.risk_score DESC
+                """
+            ),
+            {"d": summary["snapshot_date"], "action": COLLECT_ACTION},
+        ).mappings().all()
+
+    return {**summary, "bikes": [_to_bike(r) for r in rows]}
 
 
 def confirm_collection(bike_ids: list[str]) -> dict:
@@ -285,6 +324,10 @@ class OperationState:
     @property
     def latest_confirmation(self) -> dict:
         return get_latest_confirmation()
+
+    @property
+    def confirmed_bikes(self) -> dict:
+        return get_confirmed_bikes()
 
 
 state = OperationState()

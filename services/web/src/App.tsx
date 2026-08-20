@@ -5,11 +5,12 @@ import { TopBar } from "./components/TopBar";
 import { useCapacity } from "./hooks/useCapacity";
 import { useClassifiedPool } from "./hooks/useClassifiedPool";
 import { DetailPage } from "./pages/DetailPage";
+import { ConfirmedPage } from "./pages/ConfirmedPage";
 import { MainPage } from "./pages/MainPage";
 import type { Bike, BikeLists, MapData, RegionFilter, SnapshotMeta } from "./types";
 import { ALL_FILTER, buildGuSideMap, totalBikeCount } from "./utils/regions";
 
-type View = "main" | "detail";
+type View = "main" | "detail" | "confirmed";
 
 function useSnapshotData() {
   const [meta, setMeta] = useState<SnapshotMeta | null>(null);
@@ -82,9 +83,12 @@ function Dashboard({ meta, mapData, pool }: DashboardProps) {
         <button className={`tab-btn${view === "detail" ? " active" : ""}`} onClick={() => setView("detail")}>
           상세
         </button>
+        <button className={`tab-btn${view === "confirmed" ? " active" : ""}`} onClick={() => setView("confirmed")}>
+          확정 내역
+        </button>
       </div>
 
-      {view === "main" ? (
+      {view === "main" && (
         <MainPage
           mapData={mapData}
           districtNames={districtNames}
@@ -95,7 +99,8 @@ function Dashboard({ meta, mapData, pool }: DashboardProps) {
           onOpenDetail={() => setView("detail")}
           capacity={capacity}
         />
-      ) : (
+      )}
+      {view === "detail" && (
         <DetailPage
           mapData={mapData}
           districtNames={districtNames}
@@ -106,6 +111,7 @@ function Dashboard({ meta, mapData, pool }: DashboardProps) {
           capacity={capacity}
         />
       )}
+      {view === "confirmed" && <ConfirmedPage />}
     </>
   );
 }

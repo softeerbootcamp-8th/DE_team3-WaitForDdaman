@@ -65,6 +65,13 @@ class ConfirmRequest(BaseModel):
     bike_ids: list[str]
 
 
+class ConfirmedBikes(BaseModel):
+    snapshot_date: str
+    confirmed: int
+    actioned_at: Optional[str]
+    bikes: list[Bike]
+
+
 class ConfirmResponse(BaseModel):
     snapshot_date: str
     confirmed: int
