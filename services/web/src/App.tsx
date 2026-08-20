@@ -7,10 +7,9 @@ import { useClassifiedPool } from "./hooks/useClassifiedPool";
 import { DetailPage } from "./pages/DetailPage";
 import { MainPage } from "./pages/MainPage";
 import type { Bike, BikeLists, MapData, RegionFilter, SnapshotMeta } from "./types";
-import { buildGuSideMap, totalBikeCount } from "./utils/regions";
+import { ALL_FILTER, buildGuSideMap, totalBikeCount } from "./utils/regions";
 
 type View = "main" | "detail";
-const ALL_FILTER: RegionFilter = { kind: "all" };
 
 function useSnapshotData() {
   const [meta, setMeta] = useState<SnapshotMeta | null>(null);

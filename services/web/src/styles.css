@@ -125,6 +125,8 @@ body{
 }
 .confirm-btn:hover:enabled{background:var(--moss-deep);border-color:var(--moss-deep);}
 .confirm-btn:disabled{background:#c8d2cc;border-color:#c8d2cc;cursor:not-allowed;}
+.confirm-note{font-size:11px;color:var(--moss-deep);font-variant-numeric:tabular-nums;}
+.confirm-note.error{color:var(--danger);}
 .list-cap-note{font-size:11px;color:var(--ink-soft);padding:7px 16px;border-bottom:1px solid var(--line-soft);background:var(--paper);}
 
 .list-scroll{max-height:640px;overflow-y:auto;}

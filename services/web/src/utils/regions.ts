@@ -2,6 +2,10 @@ import type { MapStation, RegionFilter, Side } from "../types";
 
 export const SIDES: readonly Side[] = ["강남", "강북"];
 
+// 화면 필터와 무관한 "전체" 기준. 헤더의 총 수거대수(SummaryRow)와 수거 확정이 같은 기준을
+// 쓰도록 여기 한 곳에 둔다.
+export const ALL_FILTER: RegionFilter = { kind: "all" };
+
 // 구-지역(강남/강북) 대응은 station_daily.region에서 그대로 나온다 — dim_district에는
 // region이 없어서, 지도 위 구 강조표시(gu 이름만 아는 경우)에 쓸 매핑을 대여소 목록에서 파생시킨다.
 export function buildGuSideMap(stations: MapStation[]): Record<string, Side> {
