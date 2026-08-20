@@ -30,6 +30,12 @@ x-airflow-common:
     PYTHONPATH: /opt/airflow/pylib
   volumes:
     - airflow-logs-volume:/opt/airflow/logs
+    # 모든 DAG의 BashOperator 커맨드가 `cd ingestion && source .env && python -m jobs.X`
+    # 형태로 /opt/airflow/ingestion/.env를 직접 source한다(dag_common.py 등 참고) -
+    # environment: 블록과는 별개 경로라 이 마운트가 없으면 모든 DAG 태스크가 실패한다.
+    # 여기 쓰는 .env는 docker-compose 변수 치환에도 쓰이는 바로 그 파일(같은 디렉터리의
+    # .env)이라 SEOUL_API_KEY, BIKEMAN_DB_*, WATERMARK_KEY 등도 전부 여기 채워야 한다.
+    - ./.env:/opt/airflow/ingestion/.env:ro
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
