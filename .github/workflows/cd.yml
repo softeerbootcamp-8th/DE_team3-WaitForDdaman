@@ -11,6 +11,13 @@ permissions:
 
 env:
   AWS_REGION: ap-northeast-2
+  SSH_SECURITY_GROUP_ID: sg-02e6dec021b39174f   # waitforddaman-prod-sg
+
+# 동시 실행되면 한쪽이 SSH 규칙을 회수하는 사이 다른 쪽이 배포 중일 수 있고,
+# 같은 컨테이너를 동시에 교체하게 되므로 배포는 직렬화한다.
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
 
 jobs:
   build-and-push:
@@ -89,6 +96,26 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
+      # 보안그룹 22번 포트는 팀 IP만 허용하고 있어서 러너가 그냥은 SSH를 못 붙는다.
+      # GitHub 러너 IP는 매 실행마다 바뀌므로, 배포 직전에 이 실행의 IP만 열고
+      # 끝나면 반드시 닫는다(아래 revoke 스텝이 if: always()).
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get runner public IP
+        id: runner-ip
+        run: echo "ip=$(curl -sf --retry 3 https://checkip.amazonaws.com | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Open SSH for this runner
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ env.SSH_SECURITY_GROUP_ID }} \
+            --protocol tcp --port 22 \
+            --cidr ${{ steps.runner-ip.outputs.ip }}/32
+
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1
         with:
@@ -111,3 +138,13 @@ jobs:
         env:
           ECR_REGISTRY: ${{ needs.build-and-push.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
+
+      # if: always() - 배포가 실패해도 열어둔 22번 규칙은 반드시 회수한다.
+      # 이게 없으면 실패한 실행의 러너 IP가 영구히 남아 SG가 계속 오염된다.
+      - name: Close SSH for this runner
+        if: always() && steps.runner-ip.outputs.ip != ''
+        run: |
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ env.SSH_SECURITY_GROUP_ID }} \
+            --protocol tcp --port 22 \
+            --cidr ${{ steps.runner-ip.outputs.ip }}/32

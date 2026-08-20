@@ -107,8 +107,24 @@ IAM Role              : waitforddaman-gha-role
   - trust  : 위 provider + sub가 정확히
              repo:softeerbootcamp-8th/DE_team3-WaitForDdaman:ref:refs/heads/production
              일 때만 assume 가능 (다른 브랜치/저장소는 실패)
-  - policy : ecr-push (인라인) - ECR 인증 + waitforddaman-* 리포지토리 push/pull만
+  - policy : ecr-push      (인라인) ECR 인증 + waitforddaman-* 리포지토리 push/pull
+             sg-ssh-manage (인라인) waitforddaman-prod-sg의 22번 인바운드 add/remove
 ```
+
+### 러너 IP 임시 허용 (SSH 배포용)
+보안그룹 22번은 팀 IP만 허용하는데 GitHub 러너 IP는 매 실행마다 바뀐다. 그래서
+`deploy` 잡이 배포 직전 자기 IP(`/32`)만 열고, 끝나면 회수한다:
+
+1. `checkip.amazonaws.com`으로 러너 공인 IP 조회
+2. `ec2:AuthorizeSecurityGroupIngress`로 22번 개방
+3. SSH 배포
+4. `ec2:RevokeSecurityGroupIngress`로 회수 — **`if: always()`** 이므로 배포가 실패해도
+   반드시 실행된다. 이게 없으면 실패한 실행의 IP가 SG에 영구히 남아 오염된다.
+
+동시 실행 시 한쪽이 회수하는 사이 다른 쪽이 배포 중일 수 있어 `concurrency`로
+배포를 직렬화한다(`group: production-deploy`, `cancel-in-progress: false`).
+
+22번을 `0.0.0.0/0`으로 열거나 GitHub 공개 IP 대역 전체를 허용하는 방식은 쓰지 않는다.
 GitHub Actions에 정적 AWS 키를 저장하지 않는 이유: 계정 SCP가 MFA 없는 IAM 사용자
 요청을 차단하므로 정적 키로는 ECR이 거부된다. assumed-role 세션은 통과한다
 (EC2 인스턴스 역할이 MFA 없이 ECR pull되는 것과 같은 이유).
