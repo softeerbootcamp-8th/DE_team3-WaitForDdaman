@@ -24,6 +24,18 @@ DEFAULT_CAPACITY = 700
 REASON_PLACEHOLDER = "정보없음"  # 아직 파이프라인이 안 만듦, #102 후속으로 원천 확인 예정
 DUR_H_PLACEHOLDER = 0.0
 
+# 위경도 -> dim_district viewBox 좌표 변환. seed_dim_district.py와 반드시 같은 값을 써야
+# 대여소 점이 소속 구 사각형 안쪽에 놓인다 (실제 경계/투영이 아니라 임시 근사치).
+_LAT_MIN, _LAT_MAX = 37.42, 37.70
+_LON_MIN, _LON_MAX = 126.76, 127.19
+_VIEW_BOX_W, _VIEW_BOX_H = 800.0, 800.0
+
+
+def _latlon_to_xy(lat: float, lon: float) -> tuple[float, float]:
+    x = (lon - _LON_MIN) / (_LON_MAX - _LON_MIN) * _VIEW_BOX_W
+    y = (_LAT_MAX - lat) / (_LAT_MAX - _LAT_MIN) * _VIEW_BOX_H
+    return x, y
+
 
 def _latest_snapshot_date():
     with engine.connect() as conn:
@@ -39,11 +51,11 @@ def get_meta() -> dict:
 
 
 def get_map_data() -> dict:
-    # NOTE: station_daily엔 지도 픽셀 좌표(x/y)가 없고 위경도(latitude/longitude)만 있다.
-    # 실제 투영(위경도 -> dim_district viewBox 좌표) 로직이 아직 없어서, 임시로 위경도값을
-    # 그대로 x/y에 흘려보낸다 — 점 위치가 실제 지도와는 안 맞는다. dim_district도 원본이
-    # 사라져 복구 불가라 서울 25개 구를 5x5 격자에 배치한 플레이스홀더로 시드해뒀다
-    # (services/api/scripts/seed_dim_district.py).
+    # NOTE: dim_district는 원본이 사라져 복구 불가 — 구청 근방 대략적 위경도를 아래와
+    # 같은 방식으로 viewBox에 투영한 정사각형 플레이스홀더로 대체했다
+    # (services/api/scripts/seed_dim_district.py). station의 x/y도 같은 변환식(위경도
+    # 기준 범위 동일)을 써서, 점이 소속 구 사각형 안쪽에 오도록 맞췄다. 둘 다 실제 경계/
+    # 위치가 아니라 임시값이다.
     snapshot_date = _latest_snapshot_date()
     with engine.connect() as conn:
         districts = conn.execute(
@@ -54,7 +66,7 @@ def get_map_data() -> dict:
             text(
                 """
                 SELECT station_id, station_name, region, district AS gu,
-                       longitude AS x, latitude AS y, hold_num,
+                       longitude, latitude, hold_num,
                        bike_cnt AS bike_count, risk_cnt AS risk_count, healthy_ratio, urgency
                 FROM serving.station_daily
                 WHERE snapshot_date = :d
@@ -65,6 +77,10 @@ def get_map_data() -> dict:
 
     # view_box_w/h는 지도 전체 크기라 모든 구 행에 동일하게 중복 저장되어 있다 — 한 행에서만 읽는다.
     view_box = [districts[0]["view_box_w"], districts[0]["view_box_h"]] if districts else [0, 0]
+
+    def _xy(s) -> tuple[float, float]:
+        return _latlon_to_xy(s["latitude"], s["longitude"])
+
     return {
         "viewBox": view_box,
         "districts": [{"name": d["name"], "path": d["path"], "cx": d["cx"], "cy": d["cy"]} for d in districts],
@@ -74,8 +90,8 @@ def get_map_data() -> dict:
                 "name": s["station_name"],
                 "gu": s["gu"],
                 "region": s["region"],
-                "x": s["x"],
-                "y": s["y"],
+                "x": _xy(s)[0],
+                "y": _xy(s)[1],
                 "holdNum": s["hold_num"],
                 "bikeCount": s["bike_count"],
                 "riskCount": s["risk_count"],
