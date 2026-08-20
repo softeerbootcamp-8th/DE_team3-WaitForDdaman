@@ -22,8 +22,6 @@ DEFAULT_CAPACITY = 700
 # 수거/대여중단 승격은 파이프라인이 아니라 프론트+백엔드가 capacity 기준으로 정한다
 # (gold.mart_bike_risk_daily에는 action 컬럼 자체가 없다, #104) — 그래서 여기서는
 # action으로 걸러내지 않고 전부 source로 돌려준다.
-REASON_PLACEHOLDER = "정보없음"  # 아직 파이프라인이 안 만듦, #102 후속으로 원천 확인 예정
-DUR_H_PLACEHOLDER = 0.0
 
 
 def _latest_snapshot_date():
@@ -124,9 +122,7 @@ def get_bikes() -> tuple[list[dict], list[dict]]:
             "healthyRatio": r["healthy_ratio"],
             "riskGrade": r["risk_grade"],
             "riskScore": r["risk_score"],
-            "reason": REASON_PLACEHOLDER,
             "distKm": r["dist_km"],
-            "durH": DUR_H_PLACEHOLDER,
             "aging": r["aging"],
             "failHistory": r["fail_history"] or [],
         }

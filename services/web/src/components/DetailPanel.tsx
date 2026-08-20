@@ -43,10 +43,6 @@ export function DetailPanel({ bike }: { bike: Bike | null }) {
             <div className="s-value">{bike.distKm.toLocaleString()}km</div>
           </div>
           <div className="stat-box">
-            <div className="s-label">누적 이용시간</div>
-            <div className="s-value">{bike.durH.toLocaleString()}h</div>
-          </div>
-          <div className="stat-box">
             <div className="s-label">노후화</div>
             <div className="s-value">{bike.aging.toLocaleString()}년</div>
           </div>
@@ -56,10 +52,6 @@ export function DetailPanel({ bike }: { bike: Bike | null }) {
           <div className="score-num">
             {bike.riskScore}
             <sub>점</sub>
-          </div>
-          <div className="score-reason">
-            <b>점수 산정 이유</b>
-            {bike.reason}
           </div>
         </div>
 

@@ -15,9 +15,7 @@ class Bike(BaseModel):
     healthyRatio: Optional[float]
     riskGrade: Tier
     riskScore: float
-    reason: str
     distKm: float
-    durH: float
     aging: float
     failHistory: list[str]
 
