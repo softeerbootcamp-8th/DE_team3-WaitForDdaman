@@ -22,7 +22,6 @@ import logging
 import os
 import sys
 import tempfile
-import zipfile
 from datetime import datetime
 from pathlib import Path
 
@@ -30,6 +29,7 @@ from pyspark.sql import functions as F
 
 import config
 from common.encoding_utils import convert_euckr_file_to_utf8
+from common.file_utils import unzip_if_needed
 from common.s3_utils import ensure_bucket, upload_file
 from common.spark_session import build_spark_session
 from schema.rental_history_schema import (
@@ -50,28 +50,6 @@ class NotThisDatasetError(Exception):
 
 def _table_name() -> str:
     return f"{config.SETTINGS.iceberg_catalog_name}.bronze.rental_history"
-
-
-def _unzip_if_needed(path: Path, workdir: Path) -> list[Path]:
-    """
-    확장자가 아니라 실제 파일 내용(zip 매직바이트)으로 압축 여부를 판별한다.
-    서울시 공공데이터에서 확장자는 .csv인데 실제로는 zip 바이너리인 파일이
-    실측으로 확인됐다(2026-08-11) - 확장자만 믿으면 안 된다.
-    """
-    with open(path, "rb") as f:
-        magic = f.read(4)
-    is_zip = magic[:2] == b"PK"
-
-    if not is_zip:
-        return [path] if path.suffix.lower() == ".csv" else []
-
-    extracted = []
-    with zipfile.ZipFile(path) as zf:
-        zf.extractall(workdir)
-        for name in zf.namelist():
-            if name.lower().endswith(".csv"):
-                extracted.append(workdir / name)
-    return extracted
 
 
 def _ensure_bronze_table(spark) -> None:
@@ -179,7 +157,7 @@ def run(input_file: str) -> None:
     # 예전처럼 폴더 전체를 한 세션으로 순회하며 무한정 누적되는 구조가 아니다.
     with tempfile.TemporaryDirectory() as tmpdir:
         workdir = Path(tmpdir)
-        for csv_path in _unzip_if_needed(raw_path, workdir):
+        for csv_path in unzip_if_needed(raw_path, workdir):
             try:
                 # write.distribution-mode=hash를 테이블 속성으로 지정해뒀으므로
                 # Iceberg가 스스로 분산+정렬을 처리한다. 우리가 직접 repartition/sort를

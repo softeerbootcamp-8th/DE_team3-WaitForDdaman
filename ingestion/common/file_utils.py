@@ -59,6 +59,17 @@ def unzip_if_needed(path: Path, workdir: Path) -> list[Path]:
     return extracted
 
 
+def expand_archives(paths: list[Path], workdir: Path) -> list[Path]:
+    """각 경로가 zip이면 workdir에 풀어서 개별 파일로 치환하고, 아니면 그대로 둔다.
+    Dynamic Task Mapping이 zip 파일 하나가 아니라 그 안의 개별 파일(월) 단위로 태스크를
+    나눌 수 있게 하기 위함 - unzip_if_needed가 이미 압축 여부를 판별해 알맞은 리스트를
+    반환하므로 그 결과를 이어 붙이기만 하면 된다."""
+    expanded = []
+    for path in paths:
+        expanded.extend(unzip_if_needed(path, workdir))
+    return expanded
+
+
 def convert_xlsx_to_utf8_csv(path: Path, workdir: Path, skiprows: int = 0, header=0) -> Path:
     """
     pandas+openpyxl로 xlsx를 읽어 UTF-8 CSV로 변환한다 (Spark는 xlsx를 직접 못 읽음).
