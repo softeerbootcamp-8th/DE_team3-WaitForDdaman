@@ -13,6 +13,7 @@ from __future__ import annotations
 from sqlalchemy import text
 
 from services.api.app.db import engine
+from services.api.app.geo import project as _latlon_to_xy
 
 # 정비소 하루 처리 capacity 기본값. 실제 배차 여력은 운영자가 프론트에서 구/지역별로
 # 조정하는 값이라 DB에는 저장하지 않는다 — 이 값은 그 조정의 초기 기준값일 뿐이다.
@@ -23,18 +24,6 @@ DEFAULT_CAPACITY = 700
 # action으로 걸러내지 않고 전부 source로 돌려준다.
 REASON_PLACEHOLDER = "정보없음"  # 아직 파이프라인이 안 만듦, #102 후속으로 원천 확인 예정
 DUR_H_PLACEHOLDER = 0.0
-
-# 위경도 -> dim_district viewBox 좌표 변환. seed_dim_district.py와 반드시 같은 값을 써야
-# 대여소 점이 소속 구 사각형 안쪽에 놓인다 (실제 경계/투영이 아니라 임시 근사치).
-_LAT_MIN, _LAT_MAX = 37.42, 37.70
-_LON_MIN, _LON_MAX = 126.76, 127.19
-_VIEW_BOX_W, _VIEW_BOX_H = 800.0, 800.0
-
-
-def _latlon_to_xy(lat: float, lon: float) -> tuple[float, float]:
-    x = (lon - _LON_MIN) / (_LON_MAX - _LON_MIN) * _VIEW_BOX_W
-    y = (_LAT_MAX - lat) / (_LAT_MAX - _LAT_MIN) * _VIEW_BOX_H
-    return x, y
 
 
 def _latest_snapshot_date():

@@ -1,76 +1,63 @@
-"""serving.dim_district 임시 시드 스크립트.
+"""serving.dim_district 시드 스크립트 — 서울 공공 GeoJSON + 원래 투영 방식으로 재현.
 
-원래 이 데이터(서울 25개 구 경계 SVG path/cx/cy/viewBox)는 팀원이 DB에 직접 넣어뒀던
-값인데, 그 원본이 사라져서 더는 복구할 수 없다. 실제 구 경계(폴리곤) 대신, 구청 기준
-대략적인 위경도를 viewBox 좌표로 선형 변환해서 그 위치에 작은 정사각형만 놓은
-플레이스홀더로 채운다 — 모양은 가짜지만 배치는 실제 지리적 위치에 가깝다.
+원래 이 데이터(구 경계 SVG path/cx/cy/viewBox)는 팀원이 DB에 직접 넣어뒀던 값인데
+원본이 사라져 복구 불가였다. 경계 데이터는 공개 행정구역 경계(KOSTAT/서울 열린데이터광장,
+southkorea/seoul-maps 저장소가 정리해 배포)로 대체하고, 위경도 -> SVG 좌표 투영은 옛
+오프라인 파이프라인(build_snapshot.py, 3f026f0 커밋 당시 버전)이 쓰던 등장방형도법 +
+위도 보정 방식을 그대로 재현한다 (services/api/app/geo.py).
 
-DISTRICT_LATLON은 정확한 경계 데이터가 아니라 각 구청 근방의 대략적인 위경도다
-(공개적으로 알려진 값 기준 근사치). 실제 구 경계가 필요해지면 서울 열린데이터광장 등
-공개 GeoJSON으로 이 스크립트 전체를 교체해야 한다.
+station의 x/y도 반드시 같은 geo.project()를 써야 대여소 점이 소속 구 폴리곤 안에 놓인다
+(services/api/app/state.py 참고).
 
-같은 (min/max 위경도 -> viewBox) 변환식을 station의 x/y에도 쓰면 대여소 점이 소속 구
-사각형 안쪽에 놓이게 맞출 수 있다 (services/api/app/state.py의 get_map_data 참고).
-
-사용법:
-    DATABASE_URL=postgresql+psycopg2://airflow:airflow@localhost:5433/airflow \
-    SNAPSHOT_DATE=2026-08-18 python3 seed_dim_district.py
+사용법 (레포 루트를 PYTHONPATH에 둬야 app.geo를 import할 수 있다):
+    cd services/api
+    PYTHONPATH=../.. DATABASE_URL=postgresql+psycopg2://airflow:airflow@localhost:5433/airflow \
+    SNAPSHOT_DATE=2026-08-18 python3 scripts/seed_dim_district.py
 """
 from __future__ import annotations
 
+import json
 import os
+import sys
 from datetime import date
+from pathlib import Path
 
 import psycopg2
 
-# (lat, lon) - 구청 근방 대략적인 위경도 근사치. 실제 경계 데이터 아님.
-DISTRICT_LATLON: dict[str, tuple[float, float]] = {
-    "종로구": (37.5735, 126.9788),
-    "중구": (37.5641, 126.9979),
-    "용산구": (37.5326, 126.9900),
-    "성동구": (37.5633, 127.0371),
-    "광진구": (37.5384, 127.0822),
-    "동대문구": (37.5744, 127.0396),
-    "중랑구": (37.6063, 127.0925),
-    "성북구": (37.5894, 127.0167),
-    "강북구": (37.6396, 127.0257),
-    "도봉구": (37.6688, 127.0471),
-    "노원구": (37.6542, 127.0568),
-    "은평구": (37.6027, 126.9291),
-    "서대문구": (37.5791, 126.9368),
-    "마포구": (37.5663, 126.9019),
-    "양천구": (37.5169, 126.8664),
-    "강서구": (37.5509, 126.8495),
-    "구로구": (37.4954, 126.8874),
-    "금천구": (37.4519, 126.9020),
-    "영등포구": (37.5264, 126.8963),
-    "동작구": (37.5124, 126.9393),
-    "관악구": (37.4784, 126.9516),
-    "서초구": (37.4837, 127.0324),
-    "강남구": (37.5172, 127.0473),
-    "송파구": (37.5145, 127.1058),
-    "강동구": (37.5301, 127.1238),
-}
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # repo root -> services.api.app import 가능하게
 
-# 위경도 -> viewBox 변환 기준 범위 (서울 전체를 넉넉히 덮는 값 + 여백).
-# station x/y도 같은 상수를 써야 구 사각형 안에 점이 놓인다.
-LAT_MIN, LAT_MAX = 37.42, 37.70
-LON_MIN, LON_MAX = 126.76, 127.19
-VIEW_BOX_W = 800.0
-VIEW_BOX_H = 800.0
-MARKER_SIZE = 44.0
+from services.api.app.geo import VIEW_BOX_H, VIEW_BOX_W, project  # noqa: E402
+
+GEOJSON_PATH = Path(__file__).parent / "geo_source" / "seoul_districts.geojson"
 
 
-def latlon_to_xy(lat: float, lon: float) -> tuple[float, float]:
-    x = (lon - LON_MIN) / (LON_MAX - LON_MIN) * VIEW_BOX_W
-    y = (LAT_MAX - lat) / (LAT_MAX - LAT_MIN) * VIEW_BOX_H  # 위도는 위로 갈수록 커지므로 뒤집는다
-    return x, y
+def _ring_to_path(ring: list[list[float]]) -> tuple[str, list[tuple[float, float]]]:
+    points = [project(lat, lng) for lng, lat in ring]
+    d = "M" + " L".join(f"{x:.2f},{y:.2f}" for x, y in points) + " Z"
+    return d, points
 
 
-def _marker_path(cx: float, cy: float) -> str:
-    half = MARKER_SIZE / 2
-    x0, y0 = cx - half, cy - half
-    return f"M{x0},{y0} h{MARKER_SIZE} v{MARKER_SIZE} h-{MARKER_SIZE} Z"
+def _largest_ring(geometry: dict) -> list[list[float]]:
+    """Polygon은 exterior ring(첫 번째)을 그대로, MultiPolygon은 가장 큰 파트를 쓴다
+    (서울 자치구는 섬이 없어 다 Polygon이지만, 방어적으로 처리)."""
+    if geometry["type"] == "Polygon":
+        return geometry["coordinates"][0]
+    parts = [poly[0] for poly in geometry["coordinates"]]
+    return max(parts, key=len)
+
+
+def build_rows() -> list[tuple[str, str, float, float]]:
+    geojson = json.loads(GEOJSON_PATH.read_text(encoding="utf-8"))
+    rows = []
+    for feature in geojson["features"]:
+        name = feature["properties"]["SIG_KOR_NM"]
+        ring = _largest_ring(feature["geometry"])
+        path, points = _ring_to_path(ring)
+        # 원래 파이프라인과 동일하게 라벨 위치는 폴리곤 꼭짓점의 단순 평균(정확한 무게중심은 아님)
+        cx = sum(p[0] for p in points) / len(points)
+        cy = sum(p[1] for p in points) / len(points)
+        rows.append((name, path, cx, cy))
+    return rows
 
 
 def main() -> None:
@@ -79,6 +66,8 @@ def main() -> None:
     )
     dsn = database_url.replace("postgresql+psycopg2://", "postgresql://")
     snapshot_date = os.environ.get("SNAPSHOT_DATE") or date.today().isoformat()
+
+    rows = build_rows()
 
     conn = psycopg2.connect(dsn)
     try:
@@ -99,9 +88,7 @@ def main() -> None:
                 """
             )
             cur.execute("DELETE FROM serving.dim_district WHERE snapshot_date = %s", (snapshot_date,))
-            for name, (lat, lon) in DISTRICT_LATLON.items():
-                cx, cy = latlon_to_xy(lat, lon)
-                path = _marker_path(cx, cy)
+            for name, path, cx, cy in rows:
                 cur.execute(
                     """
                     INSERT INTO serving.dim_district
@@ -114,7 +101,7 @@ def main() -> None:
     finally:
         conn.close()
 
-    print(f"serving.dim_district: {snapshot_date} 파티션에 {len(DISTRICT_LATLON)}개 구 임시 시드 완료")
+    print(f"serving.dim_district: {snapshot_date} 파티션에 {len(rows)}개 구 실제 경계 시드 완료")
 
 
 if __name__ == "__main__":
