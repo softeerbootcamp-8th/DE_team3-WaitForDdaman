@@ -59,7 +59,7 @@ def _staging_bash(job_module: str, extra_env: str = "") -> str:
     catchup=False,  # 과거 스냅샷을 API로 소급 조회할 수 없다 - 위 doc 참고
     max_active_runs=1,  # 같은 파티션에 두 실행이 동시에 쓰는 것 방지
     default_args=DEFAULT_ARGS,
-    tags=["daily_batch", "silver", "station_active"],
+    tags=["silver", "asset_triggered"],
     doc_md=__doc__,
 )
 def silver_station_active_daily():

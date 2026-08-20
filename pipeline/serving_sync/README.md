@@ -50,16 +50,16 @@ BIKEMAN_COLLECT_LIMIT=500   # 미설정 시 risk_score 상위 500대를 COLLECT 
 ## Airflow
 
 - DAG: `gold_to_serving_sync` (`airflow/dags/gold_to_serving_sync_dag.py`)
-  - `dag_risk_decision`의 마지막 태스크(`build_fact_bike_decision`)가 끝나면
-    `TriggerDagRunOperator`로 트리거된다 (`dag_gold_dim_fact`가 아님 - bike_risk_daily가
-    필요로 하는 `fact_bike_risk`/`fact_bike_decision`은 `dag_risk_decision`의 산출물)
-  - `SNAPSHOT_DATE`는 트리거한 `dag_risk_decision`이 conf로 넘긴 날짜를 우선하고,
+  - `gold_risk_decision`의 마지막 태스크(`build_fact_bike_decision`)가 끝나면
+    `TriggerDagRunOperator`로 트리거된다 (`gold_dim_fact`가 아님 - bike_risk_daily가
+    필요로 하는 `fact_bike_risk`/`fact_bike_decision`은 `gold_risk_decision`의 산출물)
+  - `SNAPSHOT_DATE`는 트리거한 `gold_risk_decision`이 conf로 넘긴 날짜를 우선하고,
     없으면(수동 트리거 등) 이 DAG 자신의 `ds`로 폴백한다 - 두 DAG가 각자 다른 경로로
     날짜를 정해 백필/미래 스케줄 실행에서 어긋나는 문제를 막기 위함(자세한 설명은
     DAG 파일의 주석 참고)
   - `build_mart_* -> write_* -> verify_*` 두 브랜치(bike_risk_daily / station_daily)는
     서로 의존하지 않아 병렬 실행
-  - 실패해도 `dag_risk_decision`을 실패로 만들지 않음(`wait_for_completion=False`) -
+  - 실패해도 `gold_risk_decision`을 실패로 만들지 않음(`wait_for_completion=False`) -
     이미 만들어진 gold 데이터 자체는 유효하므로. 대신 각 태스크에 Slack 알림을 건다
 
 ## 로컬 실행

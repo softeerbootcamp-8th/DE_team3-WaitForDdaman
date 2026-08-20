@@ -1,6 +1,6 @@
 # risk_model — 위험도 모델 학습(재학습) 파이프라인
 
-단일 DAG `risk_model_train` (수동 트리거). 아티팩트 저장까지가 범위이고, 서빙 반영은 `dag_risk_decision`(`pipeline/risk_model`)이 담당한다 — `run_risk_scoring_model.py`가 이 문서의 "모델 아티팩트 관리" 절 계약대로 `registry.get_champion()` + `train.score()`를 그대로 불러 쓴다.
+단일 DAG `risk_model_train` (수동 트리거). 아티팩트 저장까지가 범위이고, 서빙 반영은 `gold_risk_decision`(`pipeline/risk_model`)이 담당한다 — `run_risk_scoring_model.py`가 이 문서의 "모델 아티팩트 관리" 절 계약대로 `registry.get_champion()` + `train.score()`를 그대로 불러 쓴다.
 
 ```
 resolve_anchors → validate_inputs → build_train_samples → assert_train_table
@@ -61,7 +61,7 @@ window_days: 14 / horizon_days: 3 / exclude_recent_days: 30
 
 ### 추론(서빙) 쪽에서 쓰는 방법 — 계약
 
-`pipeline/risk_model/jobs/run_risk_scoring_model.py`(`dag_risk_decision` DAG)가 이 계약대로 구현돼 있다:
+`pipeline/risk_model/jobs/run_risk_scoring_model.py`(`gold_risk_decision` DAG)가 이 계약대로 구현돼 있다:
 
 1. `{model_root}/registry.json`을 읽어 `champion.artifact_uri`를 얻는다.
 2. `joblib.load()`로 `model.joblib`을 로드한다 ([settings.py](settings.py) `read_bytes` + `io.BytesIO`를 쓰면 S3/로컬 모두 동일 코드로 처리됨).
@@ -191,4 +191,4 @@ docker exec airflow-scheduler airflow tasks states-for-dag-run risk_model_train 
   `samples.py` 에 `--anchor-plan` CLI 를 이미 붙여뒀다.
 - MLflow — `mlflow.enabled: false`. 켤 경우 compose에 tracking server(백엔드=기존 postgres 별 DB,
   아티팩트=S3) 추가가 필요하고, joblib 은 S3 직접 저장 + 경로를 태그로 남겨 폴백을 유지한다.
-- 추론 — `dag_risk_decision`(`pipeline/risk_model`)이 위 계약대로 연결돼 있음. 다만 이 환경엔 아직 `registry.json`에 champion이 없어서(`risk_model_train`을 `dry_run=false`로 실제 실행해 승격시킨 적 없음) end-to-end 동작은 미검증 상태 — 실제 학습 실행 후 확인 필요.
+- 추론 — `gold_risk_decision`(`pipeline/risk_model`)이 위 계약대로 연결돼 있음. 다만 이 환경엔 아직 `registry.json`에 champion이 없어서(`risk_model_train`을 `dry_run=false`로 실제 실행해 승격시킨 적 없음) end-to-end 동작은 미검증 상태 — 실제 학습 실행 후 확인 필요.

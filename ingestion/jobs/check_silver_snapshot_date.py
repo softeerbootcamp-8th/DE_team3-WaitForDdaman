@@ -1,5 +1,5 @@
 """
-Gold DAG(dag_gold_dim_fact)의 wait_for_silver 단계 - 스냅샷 기반 Silver 소스
+Gold DAG(gold_dim_fact)의 wait_for_silver 단계 - 스냅샷 기반 Silver 소스
 (station_master / station_active) 준비 확인용
 
 ### 왜 워터마크가 아니라 테이블의 snapshot_date를 직접 보는가 (2026-08-17, #50)

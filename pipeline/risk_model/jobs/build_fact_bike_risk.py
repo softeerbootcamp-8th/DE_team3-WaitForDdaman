@@ -1,5 +1,5 @@
 """
-dag_risk_decision 원안의 "4-a/4-b 필터 + 5. run_risk_scoring_model + 6. build_fact_bike_risk"
+gold_risk_decision 원안의 "4-a/4-b 필터 + 5. run_risk_scoring_model + 6. build_fact_bike_risk"
 세 단계를 한 Spark job으로 구현 - gold.bike_features_daily -> 자전거별 risk_score/risk_grade
 산출. 모델 로드/추론 자체는 run_risk_scoring_model.py에 있고 여기서는 그걸 불러 쓴다.
 
@@ -113,7 +113,7 @@ def _validate_fact_bike_risk(spark, df) -> None:
 def _currently_collected_bike_ids(spark, as_of: date):
     """4-a/4-b (skip_filter_first_run / apply_lagged_filter) 구현.
 
-    bikeman_action에서 bike_id별 최신 이벤트가 '수거'인 자전거 = 아직 미배치(정비중).
+    bikeman_action에서 bike_id별 최신 이벤트가 'COLLECT'인 자전거 = 아직 미배치(정비중).
     대여중단 상태는 여기서 제외되지 않는다 - 수거 이벤트가 없거나, 수거 뒤에 배치
     이벤트가 이미 찍혔으면 오늘도 추론 대상에 포함된다.
 
@@ -126,7 +126,7 @@ def _currently_collected_bike_ids(spark, as_of: date):
     latest = (
         actions.withColumn("rn", F.row_number().over(w))
         .filter(F.col("rn") == 1)
-        .filter(F.col("event_type") == "수거")
+        .filter(F.col("event_type") == "COLLECT")
         .select("bike_id")
     )
     return latest

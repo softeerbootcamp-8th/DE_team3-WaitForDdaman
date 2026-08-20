@@ -21,20 +21,20 @@ bronze_daily_batch_all_sources DAG의 daily_batch_failure_report 태스크가 �
 
 ### 단일 DAG (전체 재처리)
 daily/backfill을 나누지 않는다 - silver는 결국 브론즈에 쌓인 걸 정제만 하면 되는
-레이어라, 매일 1회 브론즈 전체를 다시 읽어 staging에 적재하고 실버 전체를
-INSERT OVERWRITE로 교체한다 (catchup=False, 날짜 구간 파라미터 없음).
-전체 재처리라 daily(MERGE INTO, append-only)처럼 브론즈가 나중에 정정돼도
-실버에 반영이 안 되는 문제가 없다 - self-healing.
+레이어라, 매일 1회 브론즈 전체를 다시 읽어 실버 전체를 INSERT OVERWRITE로 교체한다
+(catchup=False, 날짜 구간 파라미터 없음). 전체 재처리라 daily(MERGE INTO, append-only)
+처럼 브론즈가 나중에 정정돼도 실버에 반영이 안 되는 문제가 없다 - self-healing.
 
-### 태스크 순서를 절대 바꾸지 않는다
-check(원천 완결성) -> transform -> validate(변환 결과 품질) -> overwrite -> metrics.
-check와 validate가 실버를 지키는 유일한 방어선이다. 특히 check: 브론즈 적재
-(ingestion/jobs/initial_load_failure_report.py)가 파일 단위로 개별 커밋되고 배치
-전체를 감싸는 트랜잭션이 없어서, 배치 도중 실패하면 브론즈가 부분 적재 상태로
-남을 수 있다. 이 상태로 그대로 재처리하면 INSERT OVERWRITE가 멀쩡하던 실버를
-부분 데이터로 통째로 교체해버리므로, check가 브론즈 현재 행수를 직전 실버 행수와
-비교해 크게 줄었으면 파이프라인을 중단시킨다
-(staging/jobs/silver_failure_report_check.py 참고).
+### 단일 태스크 (#82: 5단계 분할 -> 통합)
+원래 check -> transform -> validate -> overwrite -> metrics 5단계로 분할돼 있었으나,
+이 데이터 규모(3.9MB, 229개 파일)에서 실측한 결과 분할 안 했을 때보다 3.8배 느렸다
+(50.5s vs 13.4s, 2026-08-19 측정). 태스크당 Spark 세션 기동 비용(3~4초 x 5)만으로는
+설명이 안 되고, 각 단계가 staging Iceberg 테이블에 썼다가 다시 읽는 구조라 매 단계
+S3 I/O 왕복이 추가로 붙는 게 원인이었다. 분할이 주던 이점(단계별 실패 지점 구분,
+재시도 단위 세분화)보다 이 오버헤드가 훨씬 커서 하나의 태스크(하나의 Spark 세션)로
+합쳤다 - check/validate 방어 로직 자체는 staging/jobs/silver_failure_report.py 안에
+그대로 남아있고, 실패 시 로그로 어느 단계인지 구분할 수 있다. 재시도 단위가 전체
+잡으로 커지지만, 리포트성 배치라 재실행 비용이 크지 않아 감수할 만한 트레이드오프다.
 
 ### jobs 모듈
 staging/README.md에 이미 "Bronze / Silver 생성 - Spark ETL" 자리로 명시돼 있어
@@ -55,12 +55,7 @@ INGESTION_DIR = "/opt/airflow/ingestion"  # common/(config, spark_session), .env
 STAGING_DIR = "/opt/airflow/staging"      # 잡 실행 위치
 PYTHON_BIN = "python"
 
-# ---- 잡 모듈 경로 상수 (staging/jobs/silver_failure_report_*.py) ----
-SILVER_CHECK_MODULE = "silver_failure_report_check"
-SILVER_TRANSFORM_MODULE = "silver_failure_report_transform"
-SILVER_VALIDATE_MODULE = "silver_failure_report_validate"
-SILVER_OVERWRITE_MODULE = "silver_failure_report_overwrite"
-SILVER_METRICS_MODULE = "silver_failure_report_metrics"
+SILVER_MODULE = "silver_failure_report"  # staging/jobs/silver_failure_report.py
 
 
 def _staging_bash(job_module: str) -> str:
@@ -84,42 +79,16 @@ def _staging_bash(job_module: str) -> str:
     catchup=False,  # 매번 브론즈 전체를 재처리하는 구조라 과거 날짜를 따로 메울 이유가 없음
     max_active_runs=1,
     default_args=DEFAULT_ARGS,
-    tags=["silver", "failure_report"],
+    tags=["silver", "asset_triggered"],
     doc_md=__doc__,
 )
 def silver_failure_report():
-    check = BashOperator(
-        task_id="check",
-        bash_command=_staging_bash(SILVER_CHECK_MODULE),
-        execution_timeout=timedelta(minutes=30),
-        pool=SILVER_POOL,
-    )
-    transform = BashOperator(
-        task_id="transform",
-        bash_command=_staging_bash(SILVER_TRANSFORM_MODULE),
+    BashOperator(
+        task_id="silver_failure_report",
+        bash_command=_staging_bash(SILVER_MODULE),
         execution_timeout=timedelta(hours=1),
         pool=SILVER_POOL,
     )
-    validate = BashOperator(
-        task_id="validate",
-        bash_command=_staging_bash(SILVER_VALIDATE_MODULE),
-        execution_timeout=timedelta(minutes=30),
-        pool=SILVER_POOL,
-    )
-    overwrite = BashOperator(
-        task_id="overwrite",
-        bash_command=_staging_bash(SILVER_OVERWRITE_MODULE),
-        execution_timeout=timedelta(hours=1),
-        pool=SILVER_POOL,
-    )
-    metrics = BashOperator(
-        task_id="metrics",
-        bash_command=_staging_bash(SILVER_METRICS_MODULE),
-        execution_timeout=timedelta(minutes=30),
-        pool=SILVER_POOL,
-    )
-
-    check >> transform >> validate >> overwrite >> metrics
 
 
 silver_failure_report()
