@@ -39,9 +39,11 @@ def get_meta() -> dict:
 
 
 def get_map_data() -> dict:
-    # NOTE: dim_district가 아직 어디서도 만들어지지 않고(시드 데이터 미해결), station_daily도
-    # 지도 픽셀 좌표(x/y)가 아니라 위경도(latitude/longitude)만 갖고 있어 이 함수는 여전히
-    # 실패한다 — #102 범위 밖, 별도로 처리 필요.
+    # NOTE: station_daily엔 지도 픽셀 좌표(x/y)가 없고 위경도(latitude/longitude)만 있다.
+    # 실제 투영(위경도 -> dim_district viewBox 좌표) 로직이 아직 없어서, 임시로 위경도값을
+    # 그대로 x/y에 흘려보낸다 — 점 위치가 실제 지도와는 안 맞는다. dim_district도 원본이
+    # 사라져 복구 불가라 서울 25개 구를 5x5 격자에 배치한 플레이스홀더로 시드해뒀다
+    # (services/api/scripts/seed_dim_district.py).
     snapshot_date = _latest_snapshot_date()
     with engine.connect() as conn:
         districts = conn.execute(
@@ -51,7 +53,8 @@ def get_map_data() -> dict:
         stations = conn.execute(
             text(
                 """
-                SELECT station_id, station_name, region, district AS gu, x, y, hold_num,
+                SELECT station_id, station_name, region, district AS gu,
+                       longitude AS x, latitude AS y, hold_num,
                        bike_cnt AS bike_count, risk_cnt AS risk_count, healthy_ratio, urgency
                 FROM serving.station_daily
                 WHERE snapshot_date = :d
@@ -101,7 +104,7 @@ def get_bikes() -> tuple[list[dict], list[dict]]:
                 FROM serving.bike_risk_daily b
                 LEFT JOIN serving.station_daily s
                   ON s.station_id = b.station_id AND s.snapshot_date = b.snapshot_date
-                WHERE b.snapshot_date = :d
+                WHERE b.snapshot_date = :d AND b.region IS NOT NULL
                 ORDER BY b.risk_score DESC
                 """
             ),
