@@ -44,16 +44,16 @@ jobs:
           export PYSPARK_DRIVER_PYTHON="$PYSPARK_PYTHON"
 
           echo "::group::ingestion"
-          (cd ingestion && PYTHONPATH="$ROOT" pytest tests -q)
+          (cd ingestion && PYTHONPATH="$ROOT:$ROOT/ingestion" pytest tests -q)
           echo "::endgroup::"
 
           echo "::group::staging"
-          (cd staging && PYTHONPATH="$ROOT:$ROOT/ingestion" pytest tests -q)
+          (cd staging && PYTHONPATH="$ROOT:$ROOT/ingestion:$ROOT/staging" pytest tests -q)
           echo "::endgroup::"
 
           for mod in bikeman_event_generator serving_sync collection_priority; do
             echo "::group::pipeline/$mod"
-            (cd "pipeline/$mod" && PYTHONPATH="jobs:$ROOT:$ROOT/ingestion" pytest tests -q)
+            (cd "pipeline/$mod" && PYTHONPATH="$ROOT/pipeline/$mod:$ROOT/pipeline/$mod/jobs:$ROOT:$ROOT/ingestion" pytest tests -q)
             echo "::endgroup::"
           done
 

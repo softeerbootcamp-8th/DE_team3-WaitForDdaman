@@ -1,5 +1,5 @@
 """
-dag_risk_decision의 추론 입력을 만드는 feature 엔지니어링 job -
+gold_risk_decision의 추론 입력을 만드는 feature 엔지니어링 job -
 silver.rental_history + silver.failure_report -> gold.bike_features_daily (추론용)
 
 피처 로직은 pipeline/train_risk_model/features.py의 build_samples()/read_rental()/

@@ -28,7 +28,7 @@ for t in [\"gold.fact_bike_risk\",\"gold.fact_bike_decision\",\"gold.station_act
 
 ### 1) upstream Gold 파티션 채우기 (2026-07-01)
 
-`dag_gold_dim_fact`가 만드는 것 중 이 파이프라인이 실제로 쓰는 3개만 필요
+`gold_dim_fact`가 만드는 것 중 이 파이프라인이 실제로 쓰는 3개만 필요
 (`dim_bike`는 mart 입력에 없어서 제외):
 
 ```bash
@@ -40,7 +40,7 @@ SNAPSHOT_DATE=2026-07-01 python -m jobs.build_bike_location
 SNAPSHOT_DATE=2026-07-01 python -m jobs.build_fact_station_inventory
 ```
 
-`dag_risk_decision`이 만드는 것:
+`gold_risk_decision`이 만드는 것:
 
 ```bash
 cd pipeline/risk_model

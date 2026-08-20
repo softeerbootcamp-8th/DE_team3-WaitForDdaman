@@ -1,5 +1,5 @@
 """
-dag_risk_decision 원안의 "5. run_risk_scoring_model" 단계 구현 - gold.bike_features_daily
+gold_risk_decision 원안의 "5. run_risk_scoring_model" 단계 구현 - gold.bike_features_daily
 -> risk_score/risk_grade 추론. build_fact_bike_risk.py가 이 모듈을 그대로 불러 쓴다.
 
 모델 로딩(registry.json의 champion)과 스코어링(model_type별 predict_proba 분기)은

@@ -113,19 +113,19 @@ def _collection_priority_bash(job_module: str, extra_env: str = "") -> str:
 
 
 @dag(
-    dag_id="dag_gold_dim_fact",
+    dag_id="gold_dim_fact",
     schedule="0 8 * * *",  # 매일 08:00 KST - 상류 Silver DAG(07:00~07:30)가 보통 끝난 뒤
     start_date=pendulum.datetime(2026, 8, 17, tz="Asia/Seoul"),  # silver_station_active_daily 최초 가용일과 동일
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
-    tags=["daily_batch", "gold"],
+    tags=["gold"],
     params={
         "max_days_per_run": "",  # build_dim_bike 백필용
     },
     doc_md=__doc__,
 )
-def dag_gold_dim_fact():
+def gold_dim_fact():
     wait_rental_history = BashSensor(
         task_id="wait_for_silver_rental_history",
         bash_command=_ingestion_bash(
@@ -190,14 +190,9 @@ def dag_gold_dim_fact():
         execution_timeout=timedelta(minutes=20),
     )
 
-    # dag_risk_decision의 wait_for_gold_facts(ExternalTaskSensor)는 logical_date가
-    # 정확히 같은 dag_gold_dim_fact run을 찾는데, 둘 다 수동 트리거(schedule=None
-    # 또는 별개 트리거)라 각자 트리거하면 logical_date가 어긋나 절대 못 찾는다
-    # (#69, 2026-08-18 실측). #64가 dag_risk_decision -> gold_to_serving_sync에
-    # 쓴 것과 동일한 패턴으로, 여기서 같은 logical_date를 그대로 넘겨 직접 트리거한다.
     trigger_risk_decision = TriggerDagRunOperator(
         task_id="trigger_risk_decision",
-        trigger_dag_id="dag_risk_decision",
+        trigger_dag_id="gold_risk_decision",
         logical_date="{{ logical_date }}",
         wait_for_completion=False,
         reset_dag_run=True,
@@ -220,4 +215,4 @@ def dag_gold_dim_fact():
     build_fact_station_inventory >> trigger_risk_decision
 
 
-dag_gold_dim_fact()
+gold_dim_fact()

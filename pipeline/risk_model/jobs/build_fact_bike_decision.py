@@ -1,5 +1,5 @@
 """
-dag_risk_decision 원안의 "7. build_fact_bike_decision" 단계 구현 -
+gold_risk_decision 원안의 "7. build_fact_bike_decision" 단계 구현 -
 gold.fact_bike_risk + gold.fact_station_inventory -> 대여중단 여부 결정.
 
 action은 대여중단/보류 2가지뿐이다. capacity(정비 인력 기준)로 "대여중단" 중 오늘 몇 대를

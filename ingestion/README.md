@@ -9,7 +9,7 @@
 |---|---|---|---|
 | 대여이력 | OA-15182 / `tbCycleRentData` | `bronze.rental_history` | 파일 백필 + API 증분 |
 | 고장신고 | OA-15644 / `tbCycleFailureReport` | `bronze.failure_report` | 파일 백필 + API 증분 |
-| 대여소정보 | OA-13252 / `tbCycleStationInfo` | `bronze.station_master` | 파일 백필 + API 스냅샷 |
+| 대여소정보 | OA-13252 / `tbCycleStationInfo` | `bronze.station_master` | API 스냅샷 (파일 백필 없음) |
 | 실시간 대여정보 | OA-15493 / `bikeList` | `bronze.station_active` | API 스냅샷 (파일 백필 없음) |
 
 ## 핵심 설계 결정
@@ -120,23 +120,22 @@ bronze_initial_load_all_sources
 실행 용도:
 
 - 다운로드해 둔 파일 데이터를 Bronze로 최초 적재
-- 대여소정보를 먼저 적재한 뒤, 대여이력과 고장신고를 병렬로 적재
+- 대여이력과 고장신고를 병렬로 적재 (대여소정보는 파일 백필 대상이 아니라 이 DAG에 없음)
 
 기본 입력 경로:
 
 | 파라미터 | 기본값 |
 |---|---|
-| `station_master_dir` | `/opt/airflow/ingestion/data/station_master` |
-| `station_master_pattern` | `*` |
 | `rental_history_dir` | `/opt/airflow/ingestion/data/rental_history` |
 | `rental_history_pattern` | `*` |
+| `rental_history_watermark_date` | `2026-06-30` |
 | `failure_report_dir` | `/opt/airflow/ingestion/data/failure_report` |
 | `failure_report_pattern` | `*` |
+| `failure_report_watermark_date` | `2026-06-30` |
 
 실행 전 파일 배치 예시:
 
 ```text
-ingestion/data/station_master/
 ingestion/data/rental_history/
 ingestion/data/failure_report/
 ```
@@ -145,8 +144,8 @@ Airflow UI에서 `Trigger DAG w/ config`를 사용할 경우 예시:
 
 ```json
 {
-  "station_master_pattern": "*.xlsx",
   "rental_history_pattern": "*2601*",
+  "rental_history_watermark_date": "2026-01-31",
   "failure_report_pattern": "*"
 }
 ```
@@ -239,12 +238,12 @@ export $(grep -v '^#' .env | xargs)
 export PYTHONPATH=..:$PYTHONPATH  # ingestion/staging/pipeline이 공유하는 최상위 config/ 패키지를 찾기 위함
 ```
 
-초기 적재 (각 디렉터리에 파일이 없으면 열린데이터광장에서 자동으로 받는다):
+초기 적재 (각 디렉터리에 파일이 없으면 열린데이터광장에서 자동으로 받는다. 대여소정보는
+파일 백필이 없으므로 아래 "일 배치"의 `daily_batch_station_master`로 적재한다):
 
 ```bash
 INPUT_DIR=./data/rental_history python -m jobs.initial_load_rental_history
 INPUT_DIR=./data/failure_report python -m jobs.initial_load_failure_report
-INPUT_DIR=./data/station_master python -m jobs.backfill_station_master
 ```
 
 일 배치:
@@ -265,10 +264,11 @@ WATERMARK_DATE=2026-06-30 DATASET=silver_rental_history python -m jobs.set_water
 WATERMARK_DATE=2026-06-30 DATASET=gold_dim_bike python -m jobs.set_watermark
 ```
 
-대여소정보 파일명이 기준일을 포함하지 않으면 `SNAPSHOT_DATE`를 직접 지정한다.
+대여소정보는 과거 스냅샷을 소급 조회할 수 없다. 재처리가 필요하면 오늘 API 응답에
+과거 날짜를 찍는다는 점을 인지하고 `SNAPSHOT_DATE`를 직접 지정한다.
 
 ```bash
-INPUT_DIR=./data/station_master SNAPSHOT_DATE=2026-06-30 python -m jobs.backfill_station_master
+SNAPSHOT_DATE=2026-06-30 python -m jobs.daily_batch_station_master
 ```
 
 ## 테스트

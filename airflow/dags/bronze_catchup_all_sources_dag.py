@@ -62,7 +62,7 @@ from dag_common import BRONZE_POOL, DEFAULT_ARGS, bash_job
     catchup=False,
     max_active_runs=1,
     default_args=DEFAULT_ARGS,
-    tags=["bronze", "catchup", "manual"],
+    tags=["bronze", "manual"],
     params={
         # 빈 문자열 = 무제한 (각 잡의 `if max_days:` 판정이 빈 문자열을 falsy로 봄).
         # 구간을 제한하고 싶으면 트리거 시 conf로 override.

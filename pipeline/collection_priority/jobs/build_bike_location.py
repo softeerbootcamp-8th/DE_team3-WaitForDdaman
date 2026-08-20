@@ -8,7 +8,7 @@ Gold(TEMP) - 자전거별 현재 위치 (silver.rental_history -> gold.bike_loca
 
 ### 델타 구간을 "어제 하루"로 고정하지 않고 자기 자신의 snapshot_date로 추적하는 이유
 처음엔 델타 구간을 무조건 `snapshot_date - 1`(어제) 하루로 고정했었다. 이러면
-dag_gold_dim_fact가 하루라도 실행을 건너뛰면(예: catchup=False 상태에서 스케줄러
+gold_dim_fact가 하루라도 실행을 건너뛰면(예: catchup=False 상태에서 스케줄러
 장애) 그 사이에 낀 rent_date_partition은 그 뒤로 "어제"가 아니게 되어 어떤 미래
 실행에서도 다시는 스캔되지 않는다 - 해당 파티션에만 활동이 있던 자전거의 위치가
 영영 갱신되지 않는 조용한 데이터 유실이 발생한다.
