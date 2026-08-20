@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [production, develop, develop-services]
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system deps (libgomp1 for lightgbm)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
+
+      - name: Install Python deps
+        run: |
+          pip install --no-cache-dir -r ingestion/requirements.txt
+          pip install --no-cache-dir -r airflow/requirements.txt
+
+      - name: Run tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: pytest ingestion/tests staging/tests pipeline -v
+
+  web-lint-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: services/web/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  docker-build-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build airflow prod image (no push)
+        run: docker build -f airflow/Dockerfile.prod -t ci-check-airflow .
+
+      - name: Build api prod image (no push)
+        run: docker build -f services/api/Dockerfile.prod -t ci-check-api .
+
+      - name: Build web prod image (no push)
+        run: docker build -f services/web/Dockerfile.prod -t ci-check-web services/web
