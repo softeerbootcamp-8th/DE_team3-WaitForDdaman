@@ -127,6 +127,7 @@ def build_spark_session(
             builder.master(local_master)
             .config("spark.driver.memory", driver_memory)
             .config("spark.sql.shuffle.partitions", shuffle_partitions)
+            .config("spark.sql.adaptive.coalescePartitions.enabled", "false")
             .config("spark.hadoop.fs.s3a.connection.maximum", "5")
             .config("spark.hadoop.fs.s3a.threads.max", "5")
         )
