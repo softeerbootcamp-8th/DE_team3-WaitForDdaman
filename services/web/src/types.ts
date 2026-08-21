@@ -5,19 +5,17 @@ export type Side = "강남" | "강북";
 export type RegionFilter = { kind: "all" } | { kind: "side"; side: Side } | { kind: "gu"; name: string };
 
 export interface Bike {
-  id: string;
-  station: string;
-  gu: string;
+  bike_id: string;
+  station_name: string;
+  district: string;
   region: Side;
-  stationUrgency: Urgency;
-  healthyRatio: number | null;
-  tier: Tier;
-  score: number;
-  reason: string;
-  distKm: number;
-  durH: number;
+  station_urgency: Urgency;
+  healthy_ratio: number | null;
+  risk_grade: Tier;
+  risk_score: number;
+  dist_km: number;
   aging: number;
-  history: string[];
+  fail_history: string[];
 }
 
 export interface Capacity {
@@ -25,7 +23,7 @@ export interface Capacity {
 }
 
 export interface SnapshotMeta {
-  generatedAt: string;
+  snapshot_date: string;
   capacity: Capacity;
 }
 
@@ -37,21 +35,21 @@ export interface District {
 }
 
 export interface MapStation {
-  id: number;
-  name: string;
-  gu: string;
+  station_id: string;
+  station_name: string;
+  district: string;
   region: Side;
   x: number;
   y: number;
-  holdNum: number;
-  bikeCount: number;
-  riskCount: number;
-  healthyRatio: number;
+  hold_num: number;
+  bike_cnt: number;
+  risk_cnt: number;
+  healthy_ratio: number;
   urgency: string;
 }
 
 export interface MapData {
-  viewBox: [number, number];
+  view_box: [number, number];
   districts: District[];
   stations: MapStation[];
 }
@@ -59,4 +57,18 @@ export interface MapData {
 export interface BikeLists {
   source: Bike[];
   dest: Bike[];
+}
+
+export interface ConfirmResponse {
+  snapshot_date: string;
+  confirmed: number;
+  /** 마지막 확정 시각. 아직 확정한 적 없으면 null */
+  actioned_at: string | null;
+}
+
+export interface ConfirmedBikes {
+  snapshot_date: string;
+  confirmed: number;
+  actioned_at: string | null;
+  bikes: Bike[];
 }

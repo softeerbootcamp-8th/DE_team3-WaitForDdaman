@@ -22,29 +22,25 @@ export function DetailPanel({ bike }: { bike: Bike | null }) {
     <div>
       <img
         className="detail-img"
-        src={bikeImageFor(bike.id)}
+        src={bikeImageFor(bike.bike_id)}
         onError={(e) => {
           (e.target as HTMLImageElement).src = FALLBACK_BIKE_IMG;
         }}
-        alt={`${bike.id} 참고 이미지`}
+        alt={`${bike.bike_id} 참고 이미지`}
       />
       <div className="detail-body">
         <div className="detail-id-row">
-          <span className="bike-id">{bike.id}</span>
-          <span className={`badge-type ${bike.tier}`}>{bike.tier}</span>
+          <span className="bike-id">{bike.bike_id}</span>
+          <span className={`badge-type ${bike.risk_grade}`}>{bike.risk_grade}</span>
         </div>
         <div className="detail-station">
-          {bike.station} · {bike.gu}
+          {bike.station_name} · {bike.district}
         </div>
 
         <div className="detail-grid">
           <div className="stat-box">
             <div className="s-label">누적 이동거리</div>
-            <div className="s-value">{bike.distKm.toLocaleString()}km</div>
-          </div>
-          <div className="stat-box">
-            <div className="s-label">누적 이용시간</div>
-            <div className="s-value">{bike.durH.toLocaleString()}h</div>
+            <div className="s-value">{bike.dist_km.toLocaleString()}km</div>
           </div>
           <div className="stat-box">
             <div className="s-label">노후화</div>
@@ -54,29 +50,25 @@ export function DetailPanel({ bike }: { bike: Bike | null }) {
 
         <div className="score-block">
           <div className="score-num">
-            {bike.score}
+            {bike.risk_score}
             <sub>점</sub>
-          </div>
-          <div className="score-reason">
-            <b>점수 산정 이유</b>
-            {bike.reason}
           </div>
         </div>
 
         <div className="station-block">
-          {bike.stationUrgency === "정보없음" ? (
+          {bike.station_urgency === "정보없음" ? (
             "이 대여소의 정상자전거 비율 데이터가 부족합니다"
           ) : (
             <>
-              정상자전거 비율 <b>{bike.healthyRatio}%</b> → <b>{bike.stationUrgency}</b> (70% 기준)
+              정상자전거 비율 <b>{bike.healthy_ratio}%</b> → <b>{bike.station_urgency}</b> (70% 기준)
             </>
           )}
         </div>
 
         <div className="history-label">최근 고장신고 이력</div>
         <div className="history-list">
-          {bike.history.length ? (
-            bike.history.map((h, i) => (
+          {bike.fail_history.length ? (
+            bike.fail_history.map((h, i) => (
               <div className="history-item" key={i}>
                 <span className="dot" />
                 {h}

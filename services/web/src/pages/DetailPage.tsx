@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { api } from "../api";
 import { BikeTable } from "../components/BikeTable";
 import { CapacityPanel } from "../components/CapacityPanel";
 import { Controls } from "../components/Controls";
@@ -7,11 +8,10 @@ import { DistrictMap } from "../components/DistrictMap";
 import { RegionFilterBar } from "../components/RegionFilterBar";
 import type { UseCapacityResult } from "../hooks/useCapacity";
 import { useClassifiedPool } from "../hooks/useClassifiedPool";
-import type { Bike, MapData, RegionFilter, Side, SnapshotMeta } from "../types";
-import { isDistrictActive, matchesRegion, regionLabel } from "../utils/regions";
+import type { Bike, ConfirmResponse, MapData, RegionFilter, Side } from "../types";
+import { ALL_FILTER, isDistrictActive, matchesRegion, regionLabel } from "../utils/regions";
 
 interface DetailPageProps {
-  meta: SnapshotMeta;
   mapData: MapData;
   districtNames: string[];
   guToSide: Record<string, Side>;
@@ -22,17 +22,16 @@ interface DetailPageProps {
 }
 
 function passesFilter(bike: Bike, query: string, tiers: Set<string>, urgencies: Set<string>): boolean {
-  if (tiers.size && !tiers.has(bike.tier)) return false;
-  if (urgencies.size && bike.stationUrgency !== "정보없음" && !urgencies.has(bike.stationUrgency)) return false;
+  if (tiers.size && !tiers.has(bike.risk_grade)) return false;
+  if (urgencies.size && bike.station_urgency !== "정보없음" && !urgencies.has(bike.station_urgency)) return false;
   if (query) {
-    const hay = (bike.id + " " + bike.station + " " + bike.gu).toLowerCase();
+    const hay = (bike.bike_id + " " + bike.station_name + " " + bike.district).toLowerCase();
     if (!hay.includes(query)) return false;
   }
   return true;
 }
 
 export function DetailPage({
-  meta: _meta,
   mapData,
   districtNames,
   guToSide,
@@ -45,12 +44,44 @@ export function DetailPage({
   const [tiers, setTiers] = useState<Set<string>>(new Set(["Critical", "Warning"]));
   const [urgencies, setUrgencies] = useState<Set<string>>(new Set(["여유있음", "부족함"]));
   const [activeDetailId, setActiveDetailId] = useState<string | null>(null);
+  // 서버에 저장된 확정 내역. 새로고침해도 남아야 하므로 로드 시 API에서 읽어온다.
+  const [confirmed, setConfirmed] = useState<ConfirmResponse | null>(null);
+  const [submitState, setSubmitState] = useState<"idle" | "saving" | "error">("idle");
 
   const { dest, source } = useClassifiedPool(pool, regionFilter, capacity);
 
+  // 확정 대상은 화면 필터와 무관하게 전체 capacity 기준 수거 대상이다 - App의 SummaryRow가
+  // "총 수거대수"로 보여주는 것과 정확히 같은 집합(같은 useClassifiedPool + ALL_FILTER)이다.
+  const { dest: confirmTargets } = useClassifiedPool(pool, ALL_FILTER, capacity);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .getConfirmation()
+      .then((c) => {
+        if (alive && c.confirmed > 0) setConfirmed(c);
+      })
+      .catch(() => {
+        // 확정 내역을 못 읽어도 화면 나머지는 그대로 쓸 수 있으므로 조용히 넘어간다.
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const handleConfirm = useCallback(async () => {
+    setSubmitState("saving");
+    try {
+      setConfirmed(await api.confirmCollection(confirmTargets.map((b) => b.bike_id)));
+      setSubmitState("idle");
+    } catch {
+      setSubmitState("error");
+    }
+  }, [confirmTargets]);
+
   const byId = useMemo(() => {
     const map = new Map<string, Bike>();
-    dest.concat(source).forEach((b) => map.set(b.id, b));
+    dest.concat(source).forEach((b) => map.set(b.bike_id, b));
     return map;
   }, [dest, source]);
 
@@ -71,8 +102,8 @@ export function DetailPage({
     () =>
       regionPool.reduce(
         (acc, b) => {
-          if (b.tier === "Critical") acc.critCount++;
-          else if (b.tier === "Warning") acc.warningCount++;
+          if (b.risk_grade === "Critical") acc.critCount++;
+          else if (b.risk_grade === "Warning") acc.warningCount++;
           return acc;
         },
         { critCount: 0, warningCount: 0 },
@@ -92,7 +123,7 @@ export function DetailPage({
       <div className="detail-region-layout">
         <RegionFilterBar filter={regionFilter} onChange={onRegionFilterChange} districtNames={districtNames} />
         <DistrictMap
-          viewBox={mapData.viewBox}
+          viewBox={mapData.view_box}
           districts={mapData.districts}
           variant="mini"
           highlight={(gu) => isDistrictActive(gu, regionFilter, guToSide)}
@@ -100,7 +131,15 @@ export function DetailPage({
         />
       </div>
 
-      <CapacityPanel pool={pool} filter={regionFilter} capacity={capacity} />
+      <CapacityPanel
+        pool={pool}
+        filter={regionFilter}
+        capacity={capacity}
+        confirmCount={confirmTargets.length}
+        confirmed={confirmed}
+        submitState={submitState}
+        onConfirm={handleConfirm}
+      />
 
       <Controls
         query={query}
@@ -120,7 +159,7 @@ export function DetailPage({
           </div>
           <div className="list-cap-note">Capacity 초과분 · 대여중단 유지, 다음날 재평가</div>
           <div className="list-scroll">
-            <BikeTable bikes={filteredSource} activeDetailId={activeDetailId} onRowClick={(bike) => setActiveDetailId(bike.id)} />
+            <BikeTable bikes={filteredSource} activeDetailId={activeDetailId} onRowClick={(bike) => setActiveDetailId(bike.bike_id)} />
           </div>
         </div>
 
@@ -131,7 +170,7 @@ export function DetailPage({
           </div>
           <div className="list-cap-note">Capacity 내 우선 수거 대상</div>
           <div className="list-scroll">
-            <BikeTable bikes={filteredDest} activeDetailId={activeDetailId} onRowClick={(bike) => setActiveDetailId(bike.id)} />
+            <BikeTable bikes={filteredDest} activeDetailId={activeDetailId} onRowClick={(bike) => setActiveDetailId(bike.bike_id)} />
           </div>
         </div>
 

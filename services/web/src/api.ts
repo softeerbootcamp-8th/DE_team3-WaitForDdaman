@@ -1,4 +1,4 @@
-import type { BikeLists, MapData, SnapshotMeta } from "./types";
+import type { BikeLists, ConfirmedBikes, ConfirmResponse, MapData, SnapshotMeta } from "./types";
 
 const BASE = "/api";
 
@@ -17,4 +17,9 @@ export const api = {
   getMeta: () => request<SnapshotMeta>("/meta"),
   getMap: () => request<MapData>("/map"),
   getBikes: () => request<BikeLists>("/bikes"),
+  getConfirmation: () => request<ConfirmResponse>("/actions/confirm"),
+  getConfirmedBikes: () => request<ConfirmedBikes>("/actions/confirmed"),
+  // headers를 init으로 넘기면 위 Content-Type이 덮이므로 body만 전달한다.
+  confirmCollection: (bike_ids: string[]) =>
+    request<ConfirmResponse>("/actions/confirm", { method: "POST", body: JSON.stringify({ bike_ids }) }),
 };

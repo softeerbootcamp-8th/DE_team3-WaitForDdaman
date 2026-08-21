@@ -14,7 +14,7 @@ export function classifyPool(
   capacity: number,
 ): { dest: Bike[]; source: Bike[] } {
   const inRegion = bikes.filter((b) => matchesRegion(b, filter));
-  const sorted = [...inRegion].sort((a, b) => b.score - a.score);
+  const sorted = [...inRegion].sort((a, b) => b.risk_score - a.risk_score);
   const n = Math.max(0, Math.min(sorted.length, Math.round(capacity)));
   return { dest: sorted.slice(0, n), source: sorted.slice(n) };
 }
