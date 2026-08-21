@@ -159,6 +159,9 @@ def _ensure_silver_table(spark) -> None:
         PARTITIONED BY (days(reg_dttm))
         """
     )
+    spark.sql(
+        f"ALTER TABLE {SILVER_TABLE} SET TBLPROPERTIES ('write.distribution-mode'='hash')"
+    )
 
 
 def run() -> None:
