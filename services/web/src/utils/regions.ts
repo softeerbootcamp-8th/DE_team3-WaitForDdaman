@@ -2,20 +2,24 @@ import type { MapStation, RegionFilter, Side } from "../types";
 
 export const SIDES: readonly Side[] = ["강남", "강북"];
 
+// 화면 필터와 무관한 "전체" 기준. 헤더의 총 수거대수(SummaryRow)와 수거 확정이 같은 기준을
+// 쓰도록 여기 한 곳에 둔다.
+export const ALL_FILTER: RegionFilter = { kind: "all" };
+
 // 구-지역(강남/강북) 대응은 station_daily.region에서 그대로 나온다 — dim_district에는
 // region이 없어서, 지도 위 구 강조표시(gu 이름만 아는 경우)에 쓸 매핑을 대여소 목록에서 파생시킨다.
 export function buildGuSideMap(stations: MapStation[]): Record<string, Side> {
   const map: Record<string, Side> = {};
   stations.forEach((s) => {
-    if (!(s.gu in map)) map[s.gu] = s.region;
+    if (!(s.district in map)) map[s.district] = s.region;
   });
   return map;
 }
 
-export function matchesRegion(entity: { gu: string; region: Side }, filter: RegionFilter): boolean {
+export function matchesRegion(entity: { district: string; region: Side }, filter: RegionFilter): boolean {
   if (filter.kind === "all") return true;
   if (filter.kind === "side") return entity.region === filter.side;
-  return entity.gu === filter.name;
+  return entity.district === filter.name;
 }
 
 // 지도에서 구를 강조 표시할지 여부 (구 이름만 알 때 — DistrictMap의 highlight 콜백용).
@@ -33,5 +37,5 @@ export function regionLabel(filter: RegionFilter): string {
 }
 
 export function totalBikeCount(stations: MapStation[], filter: RegionFilter): number {
-  return stations.filter((s) => matchesRegion(s, filter)).reduce((sum, s) => sum + s.bikeCount, 0);
+  return stations.filter((s) => matchesRegion(s, filter)).reduce((sum, s) => sum + s.bike_cnt, 0);
 }

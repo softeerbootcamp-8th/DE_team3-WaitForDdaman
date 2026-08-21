@@ -5,12 +5,12 @@ import { TopBar } from "./components/TopBar";
 import { useCapacity } from "./hooks/useCapacity";
 import { useClassifiedPool } from "./hooks/useClassifiedPool";
 import { DetailPage } from "./pages/DetailPage";
+import { ConfirmedPage } from "./pages/ConfirmedPage";
 import { MainPage } from "./pages/MainPage";
 import type { Bike, BikeLists, MapData, RegionFilter, SnapshotMeta } from "./types";
-import { buildGuSideMap, totalBikeCount } from "./utils/regions";
+import { ALL_FILTER, buildGuSideMap, totalBikeCount } from "./utils/regions";
 
-type View = "main" | "detail";
-const ALL_FILTER: RegionFilter = { kind: "all" };
+type View = "main" | "detail" | "confirmed";
 
 function useSnapshotData() {
   const [meta, setMeta] = useState<SnapshotMeta | null>(null);
@@ -41,7 +41,7 @@ export default function App() {
 
   return (
     <>
-      <TopBar generatedAt={meta?.generatedAt} />
+      <TopBar />
       <div className="page">
         {meta && mapData ? <Dashboard meta={meta} mapData={mapData} pool={pool} /> : <div className="updated">로딩 중…</div>}
       </div>
@@ -83,23 +83,25 @@ function Dashboard({ meta, mapData, pool }: DashboardProps) {
         <button className={`tab-btn${view === "detail" ? " active" : ""}`} onClick={() => setView("detail")}>
           상세
         </button>
+        <button className={`tab-btn${view === "confirmed" ? " active" : ""}`} onClick={() => setView("confirmed")}>
+          확정 내역
+        </button>
       </div>
 
-      {view === "main" ? (
+      {view === "main" && (
         <MainPage
           mapData={mapData}
           districtNames={districtNames}
           guToSide={guToSide}
           pool={pool}
-          generatedAt={meta.generatedAt}
           regionFilter={regionFilter}
           onRegionFilterChange={setRegionFilter}
           onOpenDetail={() => setView("detail")}
           capacity={capacity}
         />
-      ) : (
+      )}
+      {view === "detail" && (
         <DetailPage
-          meta={meta}
           mapData={mapData}
           districtNames={districtNames}
           guToSide={guToSide}
@@ -109,6 +111,7 @@ function Dashboard({ meta, mapData, pool }: DashboardProps) {
           capacity={capacity}
         />
       )}
+      {view === "confirmed" && <ConfirmedPage />}
     </>
   );
 }
