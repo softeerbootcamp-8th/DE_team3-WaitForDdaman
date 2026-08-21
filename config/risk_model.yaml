@@ -44,10 +44,7 @@ cleaning:
 paths:
   train_sample: "/opt/airflow/data/gold/fact_bike_train_sample"
   label_pos_new: "/opt/airflow/data/gold/fact_bike_label_pos_new"
-  model_root: "/opt/airflow/data/models/risk_model"
-  # LocalStack S3로 바꿀 때:
-  #   model_root: "s3://ttareungi-dev/models/risk_model"
-  #   AWS_ENDPOINT_URL=http://localstack:4566 환경변수만 추가
+  model_root: "s3://ttareungyi-warehouse/ml/risk_model/models"
 
 quality:
   min_train_rows: 5000
