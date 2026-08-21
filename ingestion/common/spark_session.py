@@ -35,6 +35,57 @@ ICEBERG_SPARK_RUNTIME_PACKAGE = "org.apache.iceberg:iceberg-spark-runtime-3.5_2.
 ICEBERG_AWS_BUNDLE_PACKAGE = "org.apache.iceberg:iceberg-aws-bundle:1.5.2"
 HADOOP_AWS_PACKAGE = "org.apache.hadoop:hadoop-aws:3.3.4"
 
+_MB = 1024 * 1024
+
+
+def _s3a_pool_size(env: str) -> str:
+    """
+    S3A 커넥션/스레드 풀 크기.
+
+    LocalStack(PERSISTENCE=1 파일 백엔드)은 동시 PutObject가 많아지면 "read of closed
+    file" 레이스로 500을 뱉는 게 실측으로 확인돼서 낮게 묶는다. 실 S3에는 이 레이스가
+    없어서 낮은 값은 순수하게 처리량 손실이다 - 그래서 spark_local_execution(이 프로세스가
+    작은 머신에서 도는지)이 아니라 env(S3가 LocalStack이냐 실 S3냐)로 분기한다.
+
+    hadoop-aws 기본값(96)을 그대로 쓰지 않는 이유: t4g.large가 2 vCPU라 그만큼의 커넥션
+    풀은 소켓/메모리만 잡고 이득이 없다.
+    """
+    return os.getenv("SPARK_S3A_POOL_SIZE", "5" if env == "local" else "32")
+
+
+def _spark_tuning_config() -> dict[str, str]:
+    """
+    작은 머신에서 도는 실행(spark_local_execution)에 적용하는 튜닝값.
+
+    2026-08-21 EC2(t4g.large, 8GB)에서 silver_failure_report가 write 단계에서
+    OutOfMemoryError로 죽었다. 원인은 힙 크기가 아니라 write 병렬도였다 - 읽기는
+    934 태스크였는데 write 스테이지는 3 태스크까지 줄어들어(AQE 셔플 병합), 태스크
+    하나가 전체의 1/3 + 수백 개 날짜 파티션(days(reg_dttm))의 Parquet writer를 동시에
+    열었다. 필요한 힙 = (동시에 열린 writer 수) x (writer당 버퍼)이므로 양쪽을 다 줄인다.
+
+        shuffle.partitions            8 -> 64   동시에 열리는 writer 수를 줄인다
+        advisoryPartitionSizeInBytes 64MB -> 8MB  늘린 파티션이 다시 병합되지 않게
+        parquet.block.size          128MB -> 32MB writer 하나가 잡는 버퍼를 줄인다
+
+    AQE 병합을 아예 끄지 않고 기준만 낮추는 이유: 데이터 양에 따라 태스크 수가 따라
+    움직이게 남겨둔다. 일 배치처럼 작은 write는 그대로 1~2 태스크로 병합되고, 전량
+    재처리처럼 큰 write만 쪼개진다. 끄면 볼륨과 무관하게 항상 64로 고정된다.
+
+    NOTE: 파티션 테이블 + write.distribution-mode=hash 조합에서는 같은 파티션 값이 한
+    태스크로 모이므로, 태스크 수를 늘려도 출력 파일 수는 늘지 않는다(파일 수 ~= 파티션
+    수). 파일 수가 태스크 수에 비례하는 건 파티션이 없는 테이블(quarantine, dq_results
+    같은 append 대상)이므로, 그쪽에서 Small Files가 문제되면 이 값이 아니라 해당 잡에서
+    coalesce를 검토할 것.
+    """
+    advisory_mb = int(os.getenv("SPARK_ADVISORY_PARTITION_SIZE_MB", "8"))
+    parquet_block_mb = int(os.getenv("SPARK_PARQUET_BLOCK_SIZE_MB", "32"))
+    return {
+        "spark.driver.memory": os.getenv("SPARK_LOCAL_DRIVER_MEMORY", "6g"),
+        "spark.sql.shuffle.partitions": os.getenv("SPARK_LOCAL_SHUFFLE_PARTITIONS", "64"),
+        "spark.sql.adaptive.advisoryPartitionSizeInBytes": str(advisory_mb * _MB),
+        "spark.hadoop.parquet.block.size": str(parquet_block_mb * _MB),
+    }
+
 
 def build_spark_session(
     app_name: str,
@@ -64,6 +115,14 @@ def build_spark_session(
 
     if extra_excludes:
         builder = builder.config("spark.jars.excludes", ",".join(extra_excludes))
+
+    # S3A 커넥션/스레드 풀은 "S3가 LocalStack이냐 실 S3냐"에만 달렸다(_s3a_pool_size 참고).
+    # spark_local_execution 블록에 들어 있던 시절에는 실 S3로 전환해도 LocalStack 레이스
+    # 방어용 값(5)이 그대로 따라와 처리량만 깎였다.
+    s3a_pool_size = _s3a_pool_size(settings.env)
+    builder = builder.config("spark.hadoop.fs.s3a.connection.maximum", s3a_pool_size).config(
+        "spark.hadoop.fs.s3a.threads.max", s3a_pool_size
+    )
 
     if settings.iceberg_catalog_type == "hadoop":
         # Hadoop Catalog (S3 경로 기반 메타데이터, Glue 불필요) - 로컬 LocalStack뿐 아니라
@@ -109,27 +168,16 @@ def build_spark_session(
             "spark.driver.host", bind_address
         )
 
-        # LocalStack(특히 PERSISTENCE=1 파일 기반 백엔드)은 동시 PutObject 요청이 많아지면
-        # "read of closed file" 레이스 컨디션으로 500을 뱉는 게 실측으로 확인됐다(반기 CSV 1개에
-        # 파티션 180개+ -> overwritePartitions가 한꺼번에 병렬 업로드 시도). 실 S3에서는 이
-        # 레이스는 없지만, 로컬 머신의 대역폭/CPU도 한정적이라 동시 연결 수를 낮게 유지하는 게
-        # 여전히 안전하다. 로컬 실행은 master를 명시적으로 낮은 병렬도로 고정해 동시 요청 수를
-        # 줄인다. (AWS/EMR 클러스터 실행은 spark-submit --master가 따로 지정되므로 이 분기는
-        # 영향 없음 - spark_local_execution을 false로 둔다)
+        # 로컬 실행은 master를 명시적으로 낮은 병렬도로 고정한다. (AWS/EMR 클러스터 실행은
+        # spark-submit --master가 따로 지정되므로 이 분기는 영향 없음 -
+        # spark_local_execution을 false로 둔다)
         local_master = os.getenv("SPARK_LOCAL_MASTER", "local[2]")
         # 로컬 모드는 driver == executor가 같은 JVM이라, 기본 힙(1g)으로는 반기 CSV
         # (최대 700MB대) 읽기 + repartition 셔플 + cache를 감당 못 해 OutOfMemoryError가
-        # 실측으로 발생했다. 드라이버 메모리를 넉넉히 올리고, 셔플 파티션 수도
-        # 기본값(200)이 이 볼륨엔 과한 오버헤드라 로컬 한정으로 줄인다.
-        driver_memory = os.getenv("SPARK_LOCAL_DRIVER_MEMORY", "6g")
-        shuffle_partitions = os.getenv("SPARK_LOCAL_SHUFFLE_PARTITIONS", "8")
-        builder = (
-            builder.master(local_master)
-            .config("spark.driver.memory", driver_memory)
-            .config("spark.sql.shuffle.partitions", shuffle_partitions)
-            .config("spark.hadoop.fs.s3a.connection.maximum", "5")
-            .config("spark.hadoop.fs.s3a.threads.max", "5")
-        )
+        # 실측으로 발생했다. 나머지 값의 근거는 _spark_tuning_config 참고.
+        builder = builder.master(local_master)
+        for key, value in _spark_tuning_config().items():
+            builder = builder.config(key, value)
 
     spark = builder.getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
