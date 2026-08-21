@@ -194,6 +194,7 @@ def gold_dim_fact():
         task_id="trigger_risk_decision",
         trigger_dag_id="gold_risk_decision",
         logical_date="{{ logical_date }}",
+        conf={"snapshot_date": "{{ ds }}"},
         wait_for_completion=False,
         reset_dag_run=True,
     )

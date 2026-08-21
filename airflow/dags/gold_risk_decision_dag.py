@@ -83,18 +83,20 @@ def _ingestion_bash(job_module: str, extra_env: str = "") -> str:
     default_args=default_args,
     tags=["gold", "trigger_only"],
     params={
-        "snapshot_date": "",  # 미지정 시 각 job이 오늘 날짜로 기본 처리
+        "snapshot_date": "",  # 수동 재처리용. 미지정 시 dag_run.conf.snapshot_date 또는 ds 사용
     },
     doc_md=__doc__,
 )
 def gold_risk_decision():
+    snapshot_date_expr = '{{ dag_run.conf.get("snapshot_date") or params.snapshot_date or ds }}'
+
     # 1. wait_for_silver_failure_report - rental_history는 gold_dim_fact가 이미
     # 대기해줬지만 failure_report는 그 DAG 스코프 밖이라 여기서 직접 확인한다.
     wait_for_silver_failure_report = BashSensor(
         task_id="wait_for_silver_failure_report",
         bash_command=_ingestion_bash(
             "check_silver_watermark",
-            "DATASET=failure_report REQUIRED_OFFSET_DAYS=1 TARGET_DATE='{{ params.snapshot_date or ds }}' ",
+            f"DATASET=failure_report REQUIRED_OFFSET_DAYS=1 TARGET_DATE='{snapshot_date_expr}' ",
         ),
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
@@ -106,7 +108,7 @@ def gold_risk_decision():
     # failure_report 대기 뒤에만 실행하면 된다.
     build_bike_features_daily = BashOperator(
         task_id="build_bike_features_daily",
-        bash_command=_bash("build_bike_features_daily", "SNAPSHOT_DATE='{{ params.snapshot_date }}' "),
+        bash_command=_bash("build_bike_features_daily", f"SNAPSHOT_DATE='{snapshot_date_expr}' "),
         execution_timeout=timedelta(minutes=30),
     )
 
@@ -115,14 +117,14 @@ def gold_risk_decision():
     # 자연스럽게 이어지는 처리라(build_fact_bike_risk.py) 태스크도 하나로 합쳤다.
     run_risk_scoring_model = BashOperator(
         task_id="run_risk_scoring_model",
-        bash_command=_bash("build_fact_bike_risk", "SNAPSHOT_DATE='{{ params.snapshot_date }}' "),
+        bash_command=_bash("build_fact_bike_risk", f"SNAPSHOT_DATE='{snapshot_date_expr}' "),
         execution_timeout=timedelta(minutes=30),
     )
 
     # 4. build_fact_bike_decision
     build_fact_bike_decision = BashOperator(
         task_id="build_fact_bike_decision",
-        bash_command=_bash("build_fact_bike_decision", "SNAPSHOT_DATE='{{ params.snapshot_date }}' "),
+        bash_command=_bash("build_fact_bike_decision", f"SNAPSHOT_DATE='{snapshot_date_expr}' "),
         execution_timeout=timedelta(minutes=30),
     )
 
@@ -137,7 +139,7 @@ def gold_risk_decision():
         task_id="trigger_serving_sync",
         trigger_dag_id="gold_to_serving_sync",
         logical_date="{{ logical_date }}",
-        conf={"snapshot_date": "{{ params.snapshot_date or ds }}"},
+        conf={"snapshot_date": snapshot_date_expr},
         wait_for_completion=False,
         reset_dag_run=True,
     )
