@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 def _resolve_table(table_identifier_or_table: Union[str, Table], catalog: Optional[Catalog] = None) -> Table:
     """테이블 식별자 문자열 또는 Table 객체를 받아 PyIceberg Table 객체를 반환합니다."""
-    if isinstance(table_identifier_or_table, Table):
+    if not isinstance(table_identifier_or_table, str):
         return table_identifier_or_table
 
     cat = catalog or build_iceberg_catalog()
