@@ -10,7 +10,12 @@ Asset 트리거 DAG는 이 계산이 통하지 않아 대상 DagRun을 못 찾�
 읽어서 "Gold DAG의 오늘(ds)까지 Silver가 끝났는가"만 확인한다.
 
 이 스크립트는 성공/실패가 아니라 "아직 준비 안 됨"을 나타내야 하므로, 준비 안 됐을
-때도 예외 없이 exit code 1로 조용히 끝낸다 (BashSensor가 poke_interval마다 재시도).
+때도 예외 없이 False/exit code 1로 조용히 끝낸다 (PythonSensor가 poke_interval마다
+재시도).
+
+### PythonSensor로 전환 (2026-08-22, #145)
+판정 로직(워터마크 비교)은 그대로 두고, BashSensor의 exit-code 우회 대신
+is_ready()를 PythonSensor python_callable로 직접 호출하도록 정리한다.
 
 ### TARGET_DATE는 호출부에서 이미 하루 전으로 넘어온다 (2026-08-17 수정, #52)
 ingestion/jobs/daily_batch_bikeman_event.py는 "작업자가 몰아서 제출하는 경우가
@@ -37,16 +42,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 
-def run() -> None:
-    target_date = datetime.strptime(os.environ["TARGET_DATE"], "%Y-%m-%d").date()
+def is_ready(target_date: str) -> bool:
+    target = datetime.strptime(target_date, "%Y-%m-%d").date()
     watermark = read_watermark(watermark_key=SILVER_BIKEMAN_ACTION)
 
-    if watermark >= target_date:
-        logger.info("silver.bikeman_action 준비 완료 (워터마크=%s >= 대상일=%s)", watermark, target_date)
-        sys.exit(0)
+    if watermark >= target:
+        logger.info("silver.bikeman_action 준비 완료 (워터마크=%s >= 대상일=%s)", watermark, target)
+        return True
 
-    logger.info("silver.bikeman_action 아직 준비 안 됨 (워터마크=%s < 대상일=%s)", watermark, target_date)
-    sys.exit(1)
+    logger.info("silver.bikeman_action 아직 준비 안 됨 (워터마크=%s < 대상일=%s)", watermark, target)
+    return False
+
+
+def run() -> None:
+    sys.exit(0 if is_ready(os.environ["TARGET_DATE"]) else 1)
 
 
 if __name__ == "__main__":
