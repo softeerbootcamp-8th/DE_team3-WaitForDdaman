@@ -141,10 +141,12 @@ jobs:
           done
 
           # train_risk_model만 규칙이 다르다: tests/ 디렉터리가 아니라 모듈 루트에
-          # test_risk_model.py가 있고, `from pipeline.train_risk_model...` 절대
-          # 임포트를 써서 저장소 루트를 cwd/PYTHONPATH로 둬야 한다.
+          # test_*.py가 있고, `from pipeline.train_risk_model...` 절대 임포트를 써서
+          # 저장소 루트를 cwd/PYTHONPATH로 둬야 한다. sql_engine.py가
+          # common.duckdb_io(ingestion/common)를 쓰므로 다른 pipeline 스텝들과 동일하게
+          # $ROOT/ingestion도 PYTHONPATH에 넣는다 (#149).
           echo "::group::pipeline/train_risk_model"
-          PYTHONPATH="$ROOT" pytest pipeline/train_risk_model/test_risk_model.py -q
+          PYTHONPATH="$ROOT:$ROOT/ingestion" pytest pipeline/train_risk_model/ -q
           echo "::endgroup::"
 
   api-tests:
