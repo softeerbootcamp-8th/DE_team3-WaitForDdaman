@@ -20,17 +20,62 @@ serving.bike_risk_daily에서 action 컬럼이 제거된 뒤에는 최신 snapsh
 상위 500대를 COLLECT 대상으로 삼는다. 세부 설계는
 docs/superpowers/specs/2026-08-18-bikeman-event-generator-design.md 참고.
 """
+import os
+import sys
 from datetime import timedelta
 
 import pendulum
 import requests
 from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import dag
 
 SERVING_SYNC_DIR = "/opt/airflow/pipeline/serving_sync"
 INGESTION_DIR = "/opt/airflow/ingestion"
 PYTHON = "python"
+
+
+def _load_ingestion_env(env_path: str) -> None:
+    """`source .env`(BashOperator 시절)와 동일하게, ingestion/.env의 값을 컨테이너
+    환경변수 위에 그대로 덮어쓴다 (gold_dim_fact_dag.py와 동일한 패턴 - 안 하면
+    컨테이너 루트 .env(배포용)가 그대로 새어 들어와 LocalStack 대신 실제 AWS로
+    나가는 문제가 재현된다). 이 파일은 docker-compose.local.yml 컨테이너에만
+    존재해서 DagBag이 이 DAG를 로드하는 다른 환경(CI 등)에서는 조용히 건너뛴다."""
+    if not os.path.exists(env_path):
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ[key.strip()] = value.strip()
+
+
+_load_ingestion_env(f"{INGESTION_DIR}/.env")
+
+# build_mart_*가 Spark/서브프로세스 없이 DuckDB로 직접 실행되므로(#172), PythonOperator가
+# 잡 모듈을 직접 import해서 호출할 수 있도록 ingestion과 serving_sync/jobs를 sys.path에
+# 얹는다. serving_sync/jobs 안의 모듈들은 `from station_risk_shared import ...`처럼
+# 서로를 bare import하므로, 패키지 루트가 아니라 jobs/ 디렉터리 자체를 얹어야 한다.
+if INGESTION_DIR not in sys.path:
+    sys.path.insert(0, INGESTION_DIR)
+if f"{SERVING_SYNC_DIR}/jobs" not in sys.path:
+    sys.path.insert(0, f"{SERVING_SYNC_DIR}/jobs")
+
+from build_mart_bike_risk_daily import run as _run_build_mart_bike_risk_daily  # noqa: E402
+from build_mart_station_daily import run as _run_build_mart_station_daily  # noqa: E402
+
+
+def _build_mart_bike_risk_daily(snapshot_date: str) -> None:
+    os.environ["SNAPSHOT_DATE"] = snapshot_date
+    _run_build_mart_bike_risk_daily()
+
+
+def _build_mart_station_daily(snapshot_date: str) -> None:
+    os.environ["SNAPSHOT_DATE"] = snapshot_date
+    _run_build_mart_station_daily()
 
 default_args = {
     "retries": 2,
@@ -91,9 +136,10 @@ def gold_to_serving_sync():
     # ds보다 우선한다 - gold_risk_decision이 conf로 trigger_serving_sync에서 넘긴 날짜가
     # 있으면 그걸 쓰고(백필/미래 스케줄 실행에서 두 DAG의 날짜가 어긋나지 않게), 수동
     # 트리거처럼 conf가 없으면 기존과 동일하게 이 DAG 자신의 ds로 폴백한다.
-    build_mart_bike_risk_daily = BashOperator(
+    build_mart_bike_risk_daily = PythonOperator(
         task_id="build_mart_bike_risk_daily",
-        bash_command=_bash("build_mart_bike_risk_daily", "SNAPSHOT_DATE='{{ dag_run.conf.get(\"snapshot_date\") or ds }}' "),
+        python_callable=_build_mart_bike_risk_daily,
+        op_kwargs={"snapshot_date": "{{ dag_run.conf.get(\"snapshot_date\") or ds }}"},
         execution_timeout=timedelta(minutes=20),
     )
     write_bike_risk_daily = BashOperator(
@@ -122,9 +168,10 @@ def gold_to_serving_sync():
         reset_dag_run=True,
     )
 
-    build_mart_station_daily = BashOperator(
+    build_mart_station_daily = PythonOperator(
         task_id="build_mart_station_daily",
-        bash_command=_bash("build_mart_station_daily", "SNAPSHOT_DATE='{{ dag_run.conf.get(\"snapshot_date\") or ds }}' "),
+        python_callable=_build_mart_station_daily,
+        op_kwargs={"snapshot_date": "{{ dag_run.conf.get(\"snapshot_date\") or ds }}"},
         execution_timeout=timedelta(minutes=20),
     )
     write_station_daily = BashOperator(

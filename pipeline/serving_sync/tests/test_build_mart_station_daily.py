@@ -1,75 +1,67 @@
-"""build_mart_station_daily 조인/urgency 로직 테스트."""
-from datetime import date
-
-import pytest
-from pyspark.sql import types as T
+"""build_mart_station_daily 조인/urgency 로직 테스트 (#172)."""
+import pyarrow as pa
 
 from build_mart_station_daily import build_mart_station_daily
 
-STATION_ACTIVE_SCHEMA = T.StructType([
-    T.StructField("station_id", T.StringType()),
-    T.StructField("station_name", T.StringType()),
-    T.StructField("region", T.StringType()),
-    T.StructField("district", T.StringType()),
-    T.StructField("latitude", T.DoubleType()),
-    T.StructField("longitude", T.DoubleType()),
-    T.StructField("hold_num", T.IntegerType()),
-])
-INVENTORY_SCHEMA = T.StructType([
-    T.StructField("station_id", T.StringType()),
-    T.StructField("bike_cnt", T.IntegerType()),
-    T.StructField("target_bike_cnt", T.IntegerType()),
-])
-STATION_RISK_SCHEMA = T.StructType([
-    T.StructField("station_id", T.StringType()),
-    T.StructField("risk_cnt", T.IntegerType()),
-    T.StructField("healthy_ratio", T.DoubleType()),
-])
+SNAPSHOT_DATE = "2026-08-18"
 
 
-@pytest.fixture(scope="module")
-def spark():
-    from pyspark.sql import SparkSession
-
-    session = (
-        SparkSession.builder.appName("test-build-mart-station-daily")
-        .master("local[1]")
-        .config("spark.driver.bindAddress", "127.0.0.1")
-        .config("spark.driver.host", "127.0.0.1")
-        .config("spark.sql.shuffle.partitions", "1")
-        .getOrCreate()
+def station_active_table(rows: list[tuple]) -> pa.Table:
+    return pa.table(
+        {
+            "station_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "station_name": pa.array([r[1] for r in rows], type=pa.string()),
+            "region": pa.array([r[2] for r in rows], type=pa.string()),
+            "district": pa.array([r[3] for r in rows], type=pa.string()),
+            "latitude": pa.array([r[4] for r in rows], type=pa.float64()),
+            "longitude": pa.array([r[5] for r in rows], type=pa.float64()),
+            "hold_num": pa.array([r[6] for r in rows], type=pa.int32()),
+        }
     )
-    session.sparkContext.setLogLevel("ERROR")
-    yield session
-    session.stop()
 
 
-def build(spark, station_active_rows, inventory_rows, station_risk_rows):
-    station_active_df = spark.createDataFrame(station_active_rows, STATION_ACTIVE_SCHEMA)
-    inventory_df = spark.createDataFrame(inventory_rows, INVENTORY_SCHEMA)
-    station_risk_df = spark.createDataFrame(station_risk_rows, STATION_RISK_SCHEMA)
-    return {
-        r["station_id"]: r
-        for r in build_mart_station_daily(
-            station_active_df, inventory_df, station_risk_df, date(2026, 8, 18)
-        ).collect()
-    }
+def inventory_table(rows: list[tuple]) -> pa.Table:
+    return pa.table(
+        {
+            "station_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "bike_cnt": pa.array([r[1] for r in rows], type=pa.int32()),
+            "target_bike_cnt": pa.array([r[2] for r in rows], type=pa.int32()),
+        }
+    )
 
 
-def test_latitude_longitude_pass_through_unchanged(spark):
+def station_risk_table(rows: list[tuple]) -> pa.Table:
+    return pa.table(
+        {
+            "station_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "risk_cnt": pa.array([r[1] for r in rows], type=pa.int32()),
+            "healthy_ratio": pa.array([r[2] for r in rows], type=pa.float64()),
+        }
+    )
+
+
+def build(station_active_rows, inventory_rows, station_risk_rows) -> dict:
+    result = build_mart_station_daily(
+        station_active_table(station_active_rows),
+        inventory_table(inventory_rows),
+        station_risk_table(station_risk_rows),
+        SNAPSHOT_DATE,
+    )
+    return {r["station_id"]: r for r in result.to_pylist()}
+
+
+def test_latitude_longitude_pass_through_unchanged():
     result = build(
-        spark,
         [("ST-1", "역삼역", "강남", "강남구", 37.5, 127.0, 10)],
         [("ST-1", 5, 10)],
         [],
     )
-    assert result["ST-1"]["latitude"] == pytest.approx(37.5)
-    assert result["ST-1"]["longitude"] == pytest.approx(127.0)
+    assert result["ST-1"]["latitude"] == 37.5
+    assert result["ST-1"]["longitude"] == 127.0
 
 
-def test_healthy_ratio_ge_70_is_sufficient(spark):
+def test_healthy_ratio_ge_70_is_sufficient():
     result = build(
-        spark,
         [("ST-1", "역삼역", "강남", "강남구", 37.5, 127.0, 10)],
         [("ST-1", 5, 10)],
         [("ST-1", 1, 80.0)],
@@ -77,9 +69,8 @@ def test_healthy_ratio_ge_70_is_sufficient(spark):
     assert result["ST-1"]["urgency"] == "여유있음"
 
 
-def test_healthy_ratio_below_70_is_insufficient(spark):
+def test_healthy_ratio_below_70_is_insufficient():
     result = build(
-        spark,
         [("ST-1", "역삼역", "강남", "강남구", 37.5, 127.0, 10)],
         [("ST-1", 5, 10)],
         [("ST-1", 4, 50.0)],
@@ -87,14 +78,13 @@ def test_healthy_ratio_below_70_is_insufficient(spark):
     assert result["ST-1"]["urgency"] == "부족함"
 
 
-def test_missing_inventory_defaults_bike_cnt_to_zero(spark):
+def test_missing_inventory_defaults_bike_cnt_to_zero():
     result = build(
-        spark,
         [("ST-1", "역삼역", "강남", "강남구", 37.5, 127.0, 10)],
         [],
         [],
     )
     assert result["ST-1"]["bike_cnt"] == 0
     assert result["ST-1"]["risk_cnt"] == 0
-    assert result["ST-1"]["healthy_ratio"] == pytest.approx(100.0)
+    assert result["ST-1"]["healthy_ratio"] == 100.0
     assert result["ST-1"]["urgency"] == "여유있음"
