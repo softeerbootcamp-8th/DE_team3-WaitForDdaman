@@ -42,6 +42,8 @@ class Settings:
     s3_secret_key: str = os.getenv("AWS_SECRET_ACCESS_KEY", "test")
     raw_bucket: str = os.getenv("RAW_BUCKET", "ttareungyi-raw")
     warehouse_bucket: str = os.getenv("WAREHOUSE_BUCKET", "ttareungyi-warehouse")
+    # s3: Lambda가 수집한 S3 raw payload.json을 읽음 (기본값) / api: 직접 호출 fallback
+    raw_source: str = os.getenv("RAW_SOURCE", "s3").strip().lower()
 
     # ---- Iceberg 카탈로그 ----
     # hadoop: 객체 스토리지 경로 기반(별도 DB 불필요) / glue: AWS Glue Data Catalog /

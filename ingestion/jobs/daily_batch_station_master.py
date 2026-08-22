@@ -37,7 +37,7 @@ from common.api_client import (
     fetch_station_info,
     strip_pagination_meta,
 )
-from common.s3_utils import ensure_bucket, put_json
+from common.s3_utils import ensure_bucket, get_json, put_json
 from common.spark_session import build_spark_session
 from schema.station_master_schema import (
     SchemaValidationError,
@@ -90,28 +90,39 @@ def _ensure_bronze_table(spark) -> None:
 
 
 def _process_snapshot(spark, snapshot_date: str) -> int:
-    raw_rows = list(fetch_station_info())
+    settings = config.SETTINGS
+    s3_key = f"raw/station_master/api/snapshot_date={snapshot_date}/payload.json"
 
-    # 변환 전 원본 응답을 그대로 보존한다 (lineage).
-    # 나중에 "이 값이 왜 이렇지?"를 원천 재호출 없이 확인할 수 있고,
-    # API가 현행화되어 응답이 바뀌면 그 시점의 원본이 근거가 된다.
-    ensure_bucket(config.SETTINGS.raw_bucket)
-    put_json(
-        config.SETTINGS.raw_bucket,
-        f"raw/station_master/api/snapshot_date={snapshot_date}/payload.json",
-        {"snapshot_date": snapshot_date, "row_count": len(raw_rows), "rows": raw_rows},
-    )
+    if settings.raw_source == "s3":
+        logger.info("%s: S3 raw payload 읽기 시도 (s3://%s/%s)", snapshot_date, settings.raw_bucket, s3_key)
+        payload = get_json(settings.raw_bucket, s3_key)
+        if payload is None:
+            raise FileNotFoundError(
+                f"S3 raw payload가 존재하지 않습니다: s3://{settings.raw_bucket}/{s3_key}. "
+                f"fetch_station_master_raw Lambda가 실패했거나 아직 실행되지 않았습니다."
+            )
+        raw_rows = payload.get("rows", [])
+    else:
+        logger.info("%s: 공공 API 직접 호출 (RAW_SOURCE=api)", snapshot_date)
+        raw_rows = list(fetch_station_info())
+
+        # 변환 전 원본 응답을 그대로 보존한다 (lineage).
+        ensure_bucket(settings.raw_bucket)
+        put_json(
+            settings.raw_bucket,
+            s3_key,
+            {"snapshot_date": snapshot_date, "row_count": len(raw_rows), "rows": raw_rows},
+        )
 
     if not raw_rows:
-        logger.warning("%s: API 응답이 비어있음 (0건) - 적재 생략", snapshot_date)
+        logger.warning("%s: raw 데이터가 비어있음 (0건) - 적재 생략", snapshot_date)
         return 0
 
     # START_INDEX/END_INDEX/RNUM은 페이징 메타라 실제 데이터 컬럼이 아니므로 제거
     rows = [strip_pagination_meta(r) for r in raw_rows]
     # 첫 행이 아니라 전체 행의 키 합집합을 본다. 행마다 필드 구성이 다르다
-    # (실측: 13행은 HOLD_NUM 키가 없음) - 자세한 이유는 함수 docstring 참고
     actual_columns = collect_response_fields(rows)
-    logger.info("API 응답 필드: %s", actual_columns)
+    logger.info("필드 목록: %s", actual_columns)
     validate_and_report(actual_columns)
 
     raw_df = spark.createDataFrame(rows)
@@ -132,28 +143,27 @@ def _process_snapshot(spark, snapshot_date: str) -> int:
 
 
 def run() -> None:
-    if config.SETTINGS.seoul_api_key in ("", "sample"):
+    settings = config.SETTINGS
+    if settings.raw_source == "api" and settings.seoul_api_key in ("", "sample"):
         logger.error(
-            "SEOUL_API_KEY가 비어있거나 'sample'(데모 키)입니다. "
-            "data.seoul.go.kr에서 발급받은 실제 인증키로 ingestion/.env를 채우세요. "
-            "(루트 .env가 아니라 ingestion/.env여야 잡이 읽습니다)"
+            "RAW_SOURCE=api 모드이지만 SEOUL_API_KEY가 비어있거나 'sample'(데모 키)입니다. "
+            "data.seoul.go.kr에서 발급받은 실제 인증키로 ingestion/.env를 채우세요."
         )
         sys.exit(1)
 
-    ensure_bucket(config.SETTINGS.raw_bucket)
-    ensure_bucket(config.SETTINGS.warehouse_bucket)
+    ensure_bucket(settings.raw_bucket)
+    ensure_bucket(settings.warehouse_bucket)
 
     spark = build_spark_session("bronze-daily-batch-station-master")
     _ensure_bronze_table(spark)
 
     # 이 API는 "지금 시점의 전체 스냅샷"만 주므로 과거 날짜를 소급 조회할 수 없다.
     # 따라서 기본값은 오늘이며, SNAPSHOT_DATE는 재처리 목적으로만 쓴다.
-    # ⚠️ 과거 날짜를 지정하면 "오늘 데이터에 과거 날짜 도장을 찍는" 결과가 되므로 주의.
     snapshot_date = os.getenv("SNAPSHOT_DATE") or date.today().strftime("%Y-%m-%d")
 
     try:
         _process_snapshot(spark, snapshot_date)
-    except (SchemaValidationError, SeoulApiError, SeoulApiTransientError) as e:
+    except (SchemaValidationError, SeoulApiError, SeoulApiTransientError, FileNotFoundError) as e:
         logger.error("%s 스냅샷 처리 실패: %s", snapshot_date, e)
         sys.exit(1)
 
