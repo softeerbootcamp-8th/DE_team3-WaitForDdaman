@@ -9,8 +9,13 @@ Silver 워터마크 부트스트랩 - Bronze 초기 적재가 커버한 실제 �
 이 잡은 Bronze 테이블의 실제 MIN(partition)을 직접 읽어서 그 전날을 Silver 워터마크로
 찍는다 - 사람이 날짜를 눈으로 세어 set_watermark.py에 넘기던 걸 없앤다.
 
-⚠️ 반드시 초기 적재 직후 1회만 실행해야 한다. daily_batch처럼 매일 도는 잡에 넣으면 안 된다 -
-그러면 정상 진행 중인 워터마크를 매번 (bronze MIN - 1일)로 되돌려버린다.
+⚠️ 원래는 초기 적재 직후 1회만 실행해야 하는 잡이었다 - daily_batch처럼 매일 도는 잡에
+넣으면 정상 진행 중인 워터마크를 매번 (bronze MIN - 1일)로 되돌려버리기 때문이다.
+bronze_initial_load_all_sources_dag.py는 재트리거가 가능한 DAG(수동 1회성이지만 파일을
+빠뜨렸을 때 등 다시 트리거할 수 있음)라, "1회만"을 사람이 지키는 것에만 의존할 수 없다 -
+그래서 이미 워터마크가 설정돼 있으면(재실행으로 판단) 아무것도 안 하고 건너뛴다.
+read_watermark()는 없으면 backfill_start_date로 폴백해버려서 "진짜 없음"과 "폴백값"을
+구분 못 하므로, get_json()으로 키 존재 자체를 직접 확인한다.
 bronze_initial_load_all_sources_dag.py에서만 태스크로 연결한다.
 
 사용법:
@@ -22,6 +27,7 @@ import sys
 from datetime import date, timedelta
 
 import config
+from common.s3_utils import get_json
 from common.spark_session import build_spark_session
 from common.watermark import write_watermark
 from config.watermark_keys import SILVER_RENTAL_HISTORY
@@ -44,7 +50,18 @@ def run(dataset: str) -> None:
         sys.exit(1)
 
     table, partition_col, watermark_key = DATASETS[dataset]
-    catalog = config.SETTINGS.iceberg_catalog_name
+    settings = config.SETTINGS
+    catalog = settings.iceberg_catalog_name
+
+    # get_json()으로 키 존재 자체를 직접 본다 - read_watermark()는 없으면 backfill_start_date로
+    # 폴백해서 "이미 설정됨"과 "설정된 적 없음"을 구분할 수 없다.
+    if get_json(settings.raw_bucket, watermark_key) is not None:
+        logger.info(
+            "%s: Silver 워터마크가 이미 설정돼 있음 - 재실행으로 판단해 건너뜀 "
+            "(최초 1회만 계산해야 하는 값이라 다시 트리거해도 덮어쓰지 않음)",
+            watermark_key,
+        )
+        return
 
     spark = build_spark_session(f"bootstrap-silver-watermark-{dataset}")
     try:

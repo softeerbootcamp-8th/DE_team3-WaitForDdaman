@@ -13,11 +13,15 @@ jobs/initial_load_*.py 참고) - 사람이 미리 내려받아 둘 필요가 없
 
 ### 태스크 의존성 설계
 대여이력과 고장신고는 서로 의존관계가 없어서 병렬로 둔다. 각 소스는 초기 적재 성공
-직후 자기 워터마크를 찍는다.
+직후 자기 워터마크를 찍고, 그 뒤에 Silver까지 이어서 승격한다 - 초기 적재 시점에
+Silver를 채워두지 않으면 daily_batch/backfill을 별도로 한 번 더 돌려야 한다.
 
-    rental_history ─┬─> set_bronze_ingestion_watermark_rental_history
-                     └─> bootstrap_silver_watermark_rental_history
-    failure_report ──> set_bronze_ingestion_watermark_failure_report
+    rental_history ─┬─> check_watermark_date_rental_history ─> set_bronze_ingestion_watermark_rental_history ─┐
+                     └─> bootstrap_silver_watermark_rental_history ──────────────────────────────────────────┴─> load_silver_rental_history
+    failure_report ──> check_watermark_date_failure_report ─> set_bronze_ingestion_watermark_failure_report ──> load_silver_failure_report
+
+check_watermark_date_*는 사람이 입력한 *_watermark_date가 실제 Bronze 최대 적재일과
+다르면 경고 로그만 남기는 안전망이다 (DAG를 막지 않음 - ⚠️ 문단 참고).
 
 ### 왜 set_*과 bootstrap_*으로 동사가 다른가
 값을 "어떻게 얻는지"가 다르다. set_bronze_ingestion_watermark_*는 사람이 지정한
@@ -48,9 +52,10 @@ DAG에서 이어져야 한다. 별도 set_watermark DAG를 손으로 트리거�
 
 max_active_tasks=2는 이 DAG 안에서만 유효하다. 초기 적재는 몇 시간짜리라 도중에 일 배치
 스케줄(06:00)과 겹치는 게 정상 케이스인데, DAG 단위 제한은 서로를 알지 못한다.
-그래서 Spark를 쓰는 두 초기 적재 태스크는 일 배치와 같은 BRONZE_POOL에 넣어 전역으로
-묶는다. 워터마크 태스크는 S3에 JSON 한 개만 쓰고 Spark를 안 띄우므로 풀에서 제외한다
-(슬롯을 잡으면 정작 초기 적재가 밀린다).
+그래서 Spark를 쓰는 태스크는 각 레이어의 daily 잡과 같은 풀에 넣어 전역으로 묶는다 -
+Bronze 초기 적재 태스크는 BRONZE_POOL, Silver 승격 태스크(load_silver_*)는 daily
+silver_*_dag.py와 같은 SILVER_POOL. 워터마크 태스크는 S3에 JSON 한 개만 쓰고 Spark를
+안 띄우므로 풀에서 제외한다(슬롯을 잡으면 정작 초기 적재가 밀린다).
 
 ### 실행 방법
 Airflow UI에서 "Trigger DAG w/ config"로 각 소스의 input_dir / 파일 패턴을 조정할 수 있다.
@@ -63,7 +68,7 @@ import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag, task
 
-from dag_common import BRONZE_POOL, INGESTION_DIR, bash_job
+from dag_common import BRONZE_POOL, INGESTION_DIR, SILVER_POOL, bash_job, bash_staging_job
 
 # 일 배치의 DEFAULT_ARGS를 그대로 쓰지 않는다. 초기 적재는 수동 1회성이라 사람이 붙어서
 # 보고 있고, 실패하면 빨리 알고 원인을 봐야 한다. 일 배치처럼 길게 백오프하면
@@ -92,6 +97,11 @@ default_args = {
         "failure_report_dir": f"{INGESTION_DIR}/data/failure_report",
         "failure_report_pattern": "*",
         "failure_report_watermark_date": "2026-06-30",
+        # daily silver_rental_history의 기본 상한(31일)은 매일 하루치를 처리하는 전제라, 초기
+        # 적재처럼 몇 년치를 한 번에 승격해야 하는 경우엔 그대로 쓰면 여러 번 재트리거해야 한다.
+        # 초기 적재는 사람이 붙어서 지켜보는 1회성 작업이라 기본값을 넉넉히(10년) 잡아 한 번에
+        # 끝내고, 필요하면 Trigger DAG w/ config로 좁힐 수 있게 둔다.
+        "rental_history_silver_max_days_per_run": "3650",
     },
     doc_md=__doc__,
 )
@@ -160,6 +170,36 @@ def bronze_initial_load_all_sources():
         )
     )
 
+    # *_watermark_date는 사람이 직접 입력하는 값이라 *_pattern으로 적재 범위를 좁히고
+    # 이 값을 안 맞추면(#41-42 경고 참고) 실제로 적재 안 한 기간이 daily_batch/Silver에
+    # "처리 완료"로 영구히 잘못 기록된다. set_watermark 자체를 실데이터 기반으로 바꾸는
+    # 건 추후 작업이라, 지금은 실제 Bronze MAX(partition)과 비교해 어긋나면 경고만 남기는
+    # 안전망을 먼저 둔다 (DAG를 막지는 않음 - 로컬에서는 데이터가 일부만 있어도 진행해야
+    # 해서 강제 실패시키면 안 된다).
+    check_watermark_date_rental_history = BashOperator(
+        task_id="check_watermark_date_rental_history",
+        bash_command=bash_job(
+            "check_watermark_date",
+            "DATASET=rental_history "
+            "WATERMARK_DATE='{{ params.rental_history_watermark_date }}' ",
+        ),
+        retries=0,
+        execution_timeout=timedelta(minutes=10),
+        pool=BRONZE_POOL,  # Spark로 테이블을 읽으므로 풀에 넣음 (bootstrap_silver_watermark와 동일 이유)
+    )
+
+    check_watermark_date_failure_report = BashOperator(
+        task_id="check_watermark_date_failure_report",
+        bash_command=bash_job(
+            "check_watermark_date",
+            "DATASET=failure_report "
+            "WATERMARK_DATE='{{ params.failure_report_watermark_date }}' ",
+        ),
+        retries=0,
+        execution_timeout=timedelta(minutes=10),
+        pool=BRONZE_POOL,
+    )
+
     # 워터마크는 해당 소스의 초기 적재가 성공했을 때만 찍힌다 (재시도 소진 후 실패면 안 찍힘).
     # Bronze의 다음 API 수집(daily_batch)이 이어받을 지점 - 값은 *_watermark_date 파라미터를 그대로 기록.
     set_bronze_ingestion_watermark_rental_history = BashOperator(
@@ -197,11 +237,43 @@ def bronze_initial_load_all_sources():
         pool=BRONZE_POOL,
     )
 
+    # Silver 승격 (초기 적재 시점에 바로 Silver까지 채워, 이후 daily_batch/backfill을
+    # 다시 돌리지 않아도 되게 한다). 잡 자체는 daily용 silver_rental_history_dag.py /
+    # silver_failure_report_dag.py와 동일하다 - 여기서는 Asset 트리거 대신 초기 적재
+    # 완료 직후 명시적으로 한 번 실행한다.
+    #
+    # rental_history: transform_silver_rental_history.py가 read_watermark()(상한, 기본
+    # 키=Bronze rental_history)와 SILVER_RENTAL_HISTORY(하한)를 직접 읽으므로, 두 값이
+    # 모두 이번 초기 적재 결과를 반영한 뒤에 실행해야 한다 - set_bronze_ingestion_watermark_*
+    # (상한)과 bootstrap_silver_watermark_*(하한) 둘 다에 의존해야 한다.
+    load_silver_rental_history = BashOperator(
+        task_id="load_silver_rental_history",
+        bash_command=bash_staging_job(
+            "transform_silver_rental_history",
+            "MAX_DAYS_PER_RUN='{{ params.rental_history_silver_max_days_per_run }}' ",
+        ),
+        execution_timeout=timedelta(hours=2),  # daily(1시간)보다 넉넉히 - 초기 적재는 몇 년치를 한 번에 처리
+        pool=SILVER_POOL,
+    )
+
+    # failure_report: silver_failure_report.py는 워터마크로 구간을 자르지 않고 매번 Bronze
+    # 전체를 재처리한다(#76 문서 참고) - bootstrap 대상이 아니다. set_bronze_ingestion_watermark_*
+    # 이후에 실행해, 처리 후 기록되는 Silver 워터마크(Bronze 워터마크의 미러)가 이번 초기
+    # 적재 값을 반영하게 한다.
+    load_silver_failure_report = BashOperator(
+        task_id="load_silver_failure_report",
+        bash_command=bash_staging_job("silver_failure_report"),
+        execution_timeout=timedelta(hours=1),
+        pool=SILVER_POOL,
+    )
+
     # 두 소스 사이에는 의존관계를 걸지 않는다. 서로 참조하지 않는 원천이고,
     # 동시 실행 부하는 max_active_tasks=2가 제한한다.
-    rental_history >> set_bronze_ingestion_watermark_rental_history
+    rental_history >> check_watermark_date_rental_history >> set_bronze_ingestion_watermark_rental_history
     rental_history >> bootstrap_silver_watermark_rental_history
-    failure_report >> set_bronze_ingestion_watermark_failure_report
+    [set_bronze_ingestion_watermark_rental_history, bootstrap_silver_watermark_rental_history] >> load_silver_rental_history
+    failure_report >> check_watermark_date_failure_report >> set_bronze_ingestion_watermark_failure_report
+    set_bronze_ingestion_watermark_failure_report >> load_silver_failure_report
 
 
 bronze_initial_load_all_sources()
