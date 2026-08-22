@@ -78,6 +78,12 @@ from common.sql_assert import QualityCheck, QualityCheckError
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+# #147: 콜드 스타트(baseline 없음)일 때 전체 이력 대신 최근 N일만 본다. N일 넘게
+# 반납 기록이 없는 자전거는 이미 폐기·장기 결번으로 보고 위치 미상으로 시작한다
+# (영구 손실 아님 - 이후 실제 반납되면 daily incremental이 자동 반영한다).
+# 실측(2022-01~2026-07, 49,178대) 기준 30일 내 반납 기록 비율 78.8%.
+COLD_START_LOOKBACK_DAYS = 30
+
 
 def _silver_table() -> str:
     return f"{config.SETTINGS.iceberg_catalog_name}.silver.rental_history"
@@ -119,17 +125,24 @@ def _baseline_snapshot_date(spark) -> date | None:
     return spark.read.table(_gold_table()).agg(F.max("snapshot_date")).collect()[0][0]
 
 
+def _effective_delta_start(start_date: date | None, end_date: date) -> date:
+    """_delta()가 실제로 스캔할 하한을 정한다. baseline이 있으면(start_date not
+    None) 그대로 쓰고, 콜드 스타트(None)면 전체 이력 대신 COLD_START_LOOKBACK_DAYS
+    일만 본다 (#147) - Spark 없이 테스트 가능하도록 날짜 계산만 분리했다."""
+    if start_date is not None:
+        return start_date
+    return end_date - timedelta(days=COLD_START_LOOKBACK_DAYS - 1)
+
+
 def _delta(spark, start_date: date | None, end_date: date):
     """silver.rental_history에서 아직 baseline에 반영 안 된 구간
     [start_date, end_date]만 스캔해서 자전거별 가장 최근 반납 1건만 채택한다.
-    start_date가 None이면(cold start) 하한 없이 end_date까지 전체를 스캔한다."""
+    start_date가 None이면(cold start) _effective_delta_start()가 정한 lookback
+    구간만 스캔한다 (#147 - 예전엔 하한 없이 end_date까지 전체 스캔이었음)."""
     end_str = end_date.strftime("%Y-%m-%d")
+    start_str = _effective_delta_start(start_date, end_date).strftime("%Y-%m-%d")
     silver_df = spark.read.table(_silver_table())
-    if start_date is not None:
-        start_str = start_date.strftime("%Y-%m-%d")
-        silver_df = silver_df.filter(F.col("rent_date_partition").between(start_str, end_str))
-    else:
-        silver_df = silver_df.filter(F.col("rent_date_partition") <= end_str)
+    silver_df = silver_df.filter(F.col("rent_date_partition").between(start_str, end_str))
 
     window = Window.partitionBy("bike_id").orderBy(F.col("return_dt").desc())
     return (
