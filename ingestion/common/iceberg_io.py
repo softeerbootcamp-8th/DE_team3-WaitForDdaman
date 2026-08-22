@@ -59,6 +59,38 @@ def overwrite_partition(
     logger.info("Iceberg 파티션 덮어쓰기 완료: table=%s", table.name())
 
 
+def overwrite_all(
+    table_identifier_or_table: Union[str, Table],
+    arrow_table: pa.Table,
+    catalog: Optional[Catalog] = None,
+) -> None:
+    """
+    테이블 전체를 원자적으로 교체합니다 (파티션 단위가 아닌 전량 덮어쓰기).
+
+    매번 상류 전체를 재처리하는 잡(silver.failure_report 등)을 위한 함수입니다.
+    그런 잡에서 overwrite_partition()을 날짜마다 반복 호출하면 파티션 수만큼
+    커밋이 쪼개져 느리고, 이번 입력에 더 이상 나타나지 않는 과거 파티션이 삭제되지
+    않고 남는 문제도 있습니다. 전량 교체는 커밋 1회로 끝나고 그 잔여 파티션까지
+    정리됩니다.
+
+    증분 적재 잡에는 쓰면 안 됩니다 - 이번 구간 밖의 데이터까지 전부 지웁니다.
+
+    Args:
+        table_identifier_or_table: 'silver.failure_report' 식별자 또는 Table 객체
+        arrow_table: 테이블 전체를 대체할 PyArrow Table
+        catalog: 선택적 PyIceberg Catalog 인스턴스
+    """
+    table = _resolve_table(table_identifier_or_table, catalog)
+
+    logger.info(
+        "Iceberg 전량 덮어쓰기 시작: table=%s, row_count=%d",
+        table.name(),
+        len(arrow_table),
+    )
+    table.overwrite(arrow_table)
+    logger.info("Iceberg 전량 덮어쓰기 완료: table=%s", table.name())
+
+
 def append(
     table_identifier_or_table: Union[str, Table],
     arrow_table: pa.Table,

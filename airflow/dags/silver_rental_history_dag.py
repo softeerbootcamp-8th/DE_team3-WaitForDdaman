@@ -16,8 +16,8 @@ PYTHON = "python"
 
 
 def _bash(job_dir: str, job_module: str, extra_env: str = "") -> str:
-    # staging 잡은 자체 common 패키지가 없다 - ingestion/common(config,
-    # spark_session, watermark 등)을 그대로 재사용해 중복을 피한다. PYTHONPATH에
+    # staging 잡은 자체 common 패키지가 없다 - ingestion/common(iceberg_catalog,
+    # iceberg_io, sql_assert, watermark 등)을 그대로 재사용해 중복을 피한다. PYTHONPATH에
     # ingestion을 추가하면 `from common import ...`가 ingestion/common으로 해석된다.
     return (
         f"cd {job_dir} && set -a && source {INGESTION_DIR}/.env && set +a && "
