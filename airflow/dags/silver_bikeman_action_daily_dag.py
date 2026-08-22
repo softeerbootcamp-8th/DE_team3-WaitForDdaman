@@ -21,7 +21,8 @@ Bronze/Silver 양쪍에서 각자 Asset("bikeman_event_bronze")를 새로 선언
 bikeman_event는 3일 lookback으로 하루 실행에도 같은 날짜 파티션이 여러 번 덮어써질
 수 있는데(그래도 outlets는 태스크 "성공" 1회당 1번 발생), 혹시 Bronze가 하루에
 여러 번 성공하면(예: 수동 재실행) Silver도 그만큼 다시 트리거된다. Silver 잡
-자체가 날짜 기준 overwritePartitions이라 여러 번 돌아도 결과는 같다 (멱등).
+자체가 `occurred_date_partition` identity 파티션을 날짜 기준으로 덮어쓰므로 여러 번
+돌아도 결과는 같다 (멱등). 변환은 Spark 없이 DuckDB/PyArrow/PyIceberg로 실행한다.
 
 사용법 (수동 테스트):
     python -m jobs.silver_bikeman_action
