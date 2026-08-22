@@ -88,6 +88,12 @@ logger = logging.getLogger(__name__)
 SILVER_TABLE = "silver.rental_history"
 GOLD_TABLE = "gold.bike_location"
 
+# #147: 콜드 스타트(baseline 없음)일 때 전체 이력 대신 최근 N일만 본다. N일 넘게
+# 반납 기록이 없는 자전거는 이미 폐기·장기 결번으로 보고 위치 미상으로 시작한다
+# (영구 손실 아님 - 이후 실제 반납되면 daily incremental이 자동 반영한다).
+# 실측(2022-01~2026-07, 49,178대) 기준 30일 내 반납 기록 비율 78.8%.
+COLD_START_LOOKBACK_DAYS = 30
+
 GOLD_COLUMNS = ["bike_id", "last_station_id", "last_event_at", "snapshot_date"]
 
 # TEMP류(파티션 없음) 테이블이라 스펙 없이 스키마만 정의한다.
@@ -191,20 +197,29 @@ def _baseline_snapshot_date(catalog) -> date | None:
     return row[0]
 
 
+def _effective_delta_start(start_date: date | None, end_date: date) -> date:
+    """_read_silver_delta()가 실제로 스캔할 하한을 정한다. baseline이 있으면
+    (start_date not None) 그대로 쓰고, 콜드 스타트(None)면 전체 이력 대신
+    COLD_START_LOOKBACK_DAYS일만 본다 (#147) - 순수 날짜 계산이라 카탈로그 없이
+    테스트 가능하다."""
+    if start_date is not None:
+        return start_date
+    return end_date - timedelta(days=COLD_START_LOOKBACK_DAYS - 1)
+
+
 def _read_silver_delta(catalog, start_date: date | None, end_date: date) -> pa.Table:
-    """silver.rental_history에서 아직 baseline에 반영 안 된 구간 [start_date, end_date]만
-    스캔한다. start_date가 None이면(cold start) 하한 없이 end_date까지 전체를 스캔한다."""
+    """silver.rental_history에서 아직 baseline에 반영 안 된 구간
+    [_effective_delta_start(start_date, end_date), end_date]만 스캔한다.
+    start_date가 None이면(cold start) _effective_delta_start()가 정한 lookback
+    구간만 스캔한다 (#147 - 예전엔 하한 없이 end_date까지 전체 스캔이었음)."""
     end_str = end_date.strftime("%Y-%m-%d")
+    start_str = _effective_delta_start(start_date, end_date).strftime("%Y-%m-%d")
     table = catalog.load_table(SILVER_TABLE)
     selected_fields = ("bike_id", "return_station_id", "return_dt", "rent_date_partition")
-    if start_date is not None:
-        start_str = start_date.strftime("%Y-%m-%d")
-        row_filter = And(
-            GreaterThanOrEqual("rent_date_partition", start_str),
-            LessThanOrEqual("rent_date_partition", end_str),
-        )
-    else:
-        row_filter = LessThanOrEqual("rent_date_partition", end_str)
+    row_filter = And(
+        GreaterThanOrEqual("rent_date_partition", start_str),
+        LessThanOrEqual("rent_date_partition", end_str),
+    )
     return table.scan(row_filter=row_filter, selected_fields=selected_fields).to_arrow()
 
 
