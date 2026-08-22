@@ -11,6 +11,21 @@ from pathlib import Path
 import pytest
 
 
+
+def _assert_imported(dag_bag, *file_names) -> None:
+    """이 테스트가 담당하는 DAG 파일만 파싱 성공을 요구한다.
+
+    dags 폴더 전체를 검사하면 무관한 DAG의 파싱 실패까지 여기서 터져서
+    원인을 찾기 어렵고, 다른 사람의 변경이 이 테스트를 막는다.
+    """
+    mine = {
+        path: err
+        for path, err in dag_bag.import_errors.items()
+        if Path(path).name in file_names
+    }
+    assert mine == {}, mine
+
+
 def _dag_folder() -> Path:
     repository_path = Path(__file__).resolve().parents[2] / "airflow" / "dags"
     if repository_path.exists():
@@ -30,7 +45,7 @@ def preliminary_task():
     if folder not in sys.path:
         sys.path.insert(0, folder)
     dag_bag = DagBag(folder)
-    assert dag_bag.import_errors == {}
+    _assert_imported(dag_bag, "rental_history_preliminary_raw_dag.py")
     return dag_bag.dags["rental_history_preliminary_raw"].get_task(
         "collect_preliminary_raw"
     )
