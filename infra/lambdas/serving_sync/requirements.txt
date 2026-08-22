@@ -1,8 +1,21 @@
 # write_bike_risk_daily / write_station_daily / verify_serving_sync가 실제로 쓰는
 # 것만 담는다 - DuckDB는 이 3개 잡 어디서도 쓰지 않아서(#172 전환 후 pyiceberg 스캔
 # 결과를 바로 psycopg2로 넘김) 뺐다. ingestion/requirements.txt의 버전과 맞춘다.
+#
+# numpy는 상한을 명시적으로 둔다 - pandas/pyarrow가 각자 무제한(>=)으로 numpy를
+# 끌어오면 최신 numpy(2.3.x/2.4.x, 이 시점 기준 릴리스된 지 얼마 안 됨)가 걸리는데,
+# 이 Lambda 베이스 이미지(Amazon Linux, manylinux_2_17)용 wheel이 아직 안 나와서
+# 소스 빌드로 떨어지고, 이 이미지엔 컴파일러가 없어 빌드 자체가 실패한다
+# (2026-08-23 실측, `docker build`로 확인 - numpy==2.1.3은 wheel 있음, 2.3.5는 없음).
+# macOS에서는 wheel이 있어서 로컬 개발 환경에서는 이 문제가 안 보인다. numpy를
+# 먼저 고정해서 pandas/pyarrow가 그 안에서 풀리게 한다.
+# pyarrow도 같은 이유로 상한을 둔다 - pyarrow>=14.0.0(무제한)은 wheel이 없는
+# 25.0.1로 풀려서 소스 빌드로 떨어지고, 그 소스 빌드 자체가 또 numpy를 무제한으로
+# 요구해서 위 numpy 상한과 별개로 다시 실패한다(2026-08-23 실측 - pyarrow==18.1.0은
+# wheel 있음).
+numpy<2.2
 pyiceberg[sql-postgres]==0.11.1
-pyarrow>=14.0.0
-pandas>=2.0
+pyarrow>=14.0.0,<19
+pandas>=2.0,<3.0
 psycopg2-binary>=2.9
 boto3>=1.34
