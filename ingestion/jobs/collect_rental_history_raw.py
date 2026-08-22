@@ -3,6 +3,7 @@
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Iterable
 from zoneinfo import ZoneInfo
@@ -31,6 +32,9 @@ logger = logging.getLogger(__name__)
 
 KST = ZoneInfo("Asia/Seoul")
 SNAPSHOT_TYPES = {"PRELIMINARY", "FINAL"}
+# #142와 동일한 최대 동시성. 한 snapshot 안의 시간대 호출만 병렬화하고 날짜/window 간에는
+# 순차를 유지한다(#167).
+MAX_HOUR_CONCURRENCY = 8
 
 
 class RawCollectionError(Exception):
@@ -110,6 +114,26 @@ def snapshot_keys(
     return f"{prefix}payload.json", f"{prefix}manifest.json"
 
 
+def _fetch_hour_pages(
+    fetch_pages: Callable[[date, int], Iterable[list[dict]]],
+    target_date: date,
+    hour: int,
+) -> tuple[int, list[list[dict]], str | None]:
+    """한 시간대의 페이지네이션을 순차적으로 끝까지 소비한다.
+
+    시간대 내부 순서(페이지네이션)는 그대로 순차이며, 이 함수 자체가 스레드 풀의
+    병렬 실행 단위(시간대)가 된다. 실패 전까지 받은 페이지는 버리지 않고 반환해
+    부분 결과를 숨기지 않는다.
+    """
+    pages: list[list[dict]] = []
+    try:
+        for page_rows in fetch_pages(target_date, hour):
+            pages.append(page_rows)
+        return hour, pages, None
+    except (SeoulApiError, SeoulApiTransientError) as exc:
+        return hour, pages, f"{target_date.isoformat()} {hour}시: {exc}"
+
+
 def collect_snapshot(
     target_date: date,
     hours: list[int],
@@ -147,30 +171,42 @@ def collect_snapshot(
     completed_hours: list[int] = []
     raw_rows: list[dict] = []
     page_count = 0
-    collection_error: str | None = None
+    hour_errors: list[str] = []
 
-    for hour in requested_hours:
-        hour_page_count = 0
-        hour_row_count = 0
-        try:
-            for page_rows in fetch_pages(target_date, hour):
+    if requested_hours:
+        results: dict[int, tuple[list[list[dict]], str | None]] = {}
+        max_workers = min(MAX_HOUR_CONCURRENCY, len(requested_hours))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_fetch_hour_pages, fetch_pages, target_date, hour): hour
+                for hour in requested_hours
+            }
+            for future in as_completed(futures):
+                hour, pages, error = future.result()
+                results[hour] = (pages, error)
+
+        # 완료 순서와 무관하게 항상 시간순으로 결합해 payload/manifest를 결정적으로 만든다.
+        for hour in sorted(results):
+            pages, error = results[hour]
+            for page_rows in pages:
                 page_count += 1
-                hour_page_count += 1
-                hour_row_count += len(page_rows)
                 raw_rows.extend(page_rows)
-        except (SeoulApiError, SeoulApiTransientError) as exc:
-            collection_error = f"{target_date.isoformat()} {hour}시: {exc}"
-            logger.error("대여이력 Raw 시간대 수집 실패: %s", collection_error)
-            break
 
-        completed_hours.append(hour)
-        logger.info(
-            "대여이력 Raw 시간대 수집 완료: target_date=%s hour=%d pages=%d rows=%d",
-            target_date,
-            hour,
-            hour_page_count,
-            hour_row_count,
-        )
+            if error is not None:
+                hour_errors.append(error)
+                logger.error("대여이력 Raw 시간대 수집 실패: %s", error)
+                continue
+
+            completed_hours.append(hour)
+            logger.info(
+                "대여이력 Raw 시간대 수집 완료: target_date=%s hour=%d pages=%d rows=%d",
+                target_date,
+                hour,
+                len(pages),
+                sum(len(page_rows) for page_rows in pages),
+            )
+
+    collection_error = "; ".join(hour_errors) if hour_errors else None
 
     if collection_error is not None:
         status = "INCOMPLETE"
