@@ -25,9 +25,7 @@ bike_location처럼 "안 바뀐 자전거는 그대로 두고 바뀐 것만 갱�
 gold.station_active(운영 중인 대여소만)를 기준으로 대여소별 자전거 수를 센다.
 자전거가 하나도 없는 대여소도 0으로 나와야 하므로 station_active를 기준(left side)
 으로 두고 자전거 수를 왼쪽 조인한다. target_bike_cnt는 거치대 수(hold_num)를
-목표치로 사용한다. station_active는 대여소 수만큼(수백~수천 건)이라 build_station_active.py와
-동일하게 broadcast 힌트를 준다 - bike_counts는 그보다 더 작거나 같으므로(대여소당
-최대 1행) 셔플 조인보다 확실히 저렴하다.
+목표치로 사용한다.
 
 ### gold.bike_last_action - 증분 유지되는 "자전거별 최신 수거/배치 이벤트"
 silver.bikeman_action은 매일 계속 쌓이는 이벤트 로그라, 매번 전체를 훑어서
@@ -48,6 +46,14 @@ bikeman_action 이벤트는 어떤 미래 실행에서도 다시는 스캔되지
 기존처럼 occurred_at 타임스탬프 범위(`>= 시작 AND < 끝+1일`)로 다시 제한한다.
 
 ### 전체 덮어쓰기 (TEMP류 입력에 의존하는 최신 상태)
+gold.bike_last_action/gold.fact_station_inventory 둘 다 파티션 없이 매번 전체를
+덮어쓴다 - pyiceberg의 overwrite_all()(#170)이 이 의미를 그대로 옮긴 것.
+
+### Spark 제거 (#170)
+읽기/쓰기는 pyiceberg, "자전거별 최신 이벤트 1건" 채택은 pyarrow에 윈도우 함수가
+없어 DuckDB SQL(QUALIFY row_number() OVER)로 옮긴다. 병합/위치 판정/집계는 순수
+DuckDB SQL이라 단위 테스트가 가능하다.
+
 ### 적재 전 품질 검증 (common/sql_assert.py, #146에서 PyDeequ 제거)
 build_dim_bike.py와 동일한 패턴으로 gold.bike_last_action/gold.fact_station_inventory
 둘 다 쓰기 전에 검증한다. 실패하면 QualityCheckError로 배치를 즉시 중단한다.
@@ -61,218 +67,267 @@ import os
 import sys
 from datetime import date, datetime, time, timedelta
 
-from pyspark.sql import functions as F
-from pyspark.sql.window import Window
+import duckdb
+import pyarrow as pa
+from pyiceberg.exceptions import NoSuchTableError
+from pyiceberg.expressions import And, GreaterThanOrEqual, LessThan, LessThanOrEqual
+from pyiceberg.schema import Schema
+from pyiceberg.types import BooleanType, DateType, IntegerType, NestedField, StringType, TimestamptzType
 
 import config
+from common.duckdb_io import query_arrow
+from common.iceberg_catalog import build_iceberg_catalog
+from common.iceberg_io import overwrite_all
 from common.s3_utils import ensure_bucket
-from common.spark_session import build_spark_session
 from common.sql_assert import QualityCheck, QualityCheckError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+BIKE_LOCATION_TABLE = "gold.bike_location"
+STATION_ACTIVE_TABLE = "gold.station_active"
+BIKEMAN_ACTION_TABLE = "silver.bikeman_action"
+BIKE_LAST_ACTION_TABLE = "gold.bike_last_action"
+GOLD_TABLE = "gold.fact_station_inventory"
 
-def _bike_location_table() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.gold.bike_location"
+GOLD_COLUMNS = ["station_id", "bike_cnt", "hold_num", "target_bike_cnt", "snapshot_date"]
+BIKE_LAST_ACTION_COLUMNS = ["bike_id", "action_event_type", "action_station_id", "action_at", "snapshot_date"]
+
+# TEMP류(파티션 없음) 테이블이라 스펙 없이 스키마만 정의한다.
+GOLD_SCHEMA = Schema(
+    NestedField(1, "station_id", StringType(), required=False),
+    NestedField(2, "bike_cnt", IntegerType(), required=False),
+    NestedField(3, "hold_num", IntegerType(), required=False),
+    NestedField(4, "target_bike_cnt", IntegerType(), required=False),
+    NestedField(5, "snapshot_date", DateType(), required=False),
+)
+BIKE_LAST_ACTION_SCHEMA = Schema(
+    NestedField(1, "bike_id", StringType(), required=False),
+    NestedField(2, "action_event_type", StringType(), required=False),
+    NestedField(3, "action_station_id", StringType(), required=False),
+    NestedField(4, "action_at", TimestamptzType(), required=False),
+    NestedField(5, "snapshot_date", DateType(), required=False),
+)
+
+# 자전거별 최신 이벤트 1건만 채택한다.
+_BIKE_LAST_ACTION_DELTA_SQL = """
+    SELECT
+        bike_id,
+        event_type AS delta_event_type,
+        station_id AS delta_station_id,
+        occurred_at AS delta_at
+    FROM bikeman_action
+    QUALIFY row_number() OVER (PARTITION BY bike_id ORDER BY occurred_at DESC) = 1
+"""
+
+# baseline(직전 상태)과 delta(신규 반영분)를 병합한다 - build_bike_location.py의
+# _MERGE_SQL과 동일 idiom(값 컬럼만 2개로 늘어남).
+_MERGE_BIKE_LAST_ACTION_SQL = """
+    WITH merged AS (
+        SELECT
+            COALESCE(b.bike_id, d.bike_id) AS bike_id,
+            b.base_event_type, b.base_station_id, b.base_at,
+            d.delta_event_type, d.delta_station_id, d.delta_at,
+            (d.delta_at IS NOT NULL AND (b.base_at IS NULL OR d.delta_at > b.base_at)) AS delta_is_newer
+        FROM baseline b
+        FULL OUTER JOIN delta d ON b.bike_id = d.bike_id
+    )
+    SELECT
+        bike_id,
+        CASE WHEN delta_is_newer THEN delta_event_type ELSE base_event_type END AS action_event_type,
+        CASE WHEN delta_is_newer THEN delta_station_id ELSE base_station_id END AS action_station_id,
+        CASE WHEN delta_is_newer THEN delta_at ELSE base_at END AS action_at,
+        CAST(? AS DATE) AS snapshot_date
+    FROM merged
+"""
+
+# 자전거별 최종 위치(effective_station_id, excluded)를 계산한다.
+_RESOLVE_SQL = """
+    WITH joined AS (
+        SELECT
+            bl.bike_id,
+            bl.last_station_id,
+            bl.last_event_at,
+            la.action_event_type,
+            la.action_station_id,
+            la.action_at,
+            (la.action_at IS NOT NULL AND la.action_at > bl.last_event_at) AS action_is_newer
+        FROM bike_location bl
+        LEFT JOIN latest_action la ON bl.bike_id = la.bike_id
+    )
+    SELECT
+        bike_id,
+        CASE
+            WHEN action_is_newer AND action_event_type = 'COLLECT' THEN NULL
+            WHEN action_is_newer AND action_event_type = 'DEPLOY' THEN COALESCE(action_station_id, last_station_id)
+            ELSE last_station_id
+        END AS effective_station_id,
+        (action_is_newer AND action_event_type = 'COLLECT') AS excluded
+    FROM joined
+"""
+
+# station_active(운영 중인 대여소, left side)를 기준으로 대여소별 자전거 수를 센다 -
+# 자전거가 하나도 없는 대여소도 0으로 나와야 하므로 left join.
+_AGGREGATE_SQL = """
+    WITH active_bikes AS (
+        SELECT effective_station_id AS station_id
+        FROM resolved
+        WHERE NOT excluded AND effective_station_id IS NOT NULL
+    ),
+    bike_counts AS (
+        SELECT station_id, COUNT(*) AS bike_cnt
+        FROM active_bikes
+        GROUP BY station_id
+    )
+    SELECT
+        sa.station_id,
+        CAST(COALESCE(bc.bike_cnt, 0) AS INT) AS bike_cnt,
+        sa.hold_num,
+        sa.hold_num AS target_bike_cnt,
+        CAST(? AS DATE) AS snapshot_date
+    FROM station_active sa
+    LEFT JOIN bike_counts bc ON sa.station_id = bc.station_id
+"""
 
 
-def _station_active_table() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.gold.station_active"
+def _merge_bike_last_action(
+    baseline_table: pa.Table,
+    delta_table: pa.Table,
+    snapshot_date: str,
+    con: duckdb.DuckDBPyConnection | None = None,
+) -> pa.Table:
+    """baseline(직전 상태)과 delta(신규 반영분)를 병합한다 - 카탈로그 없이 두
+    PyArrow Table만으로 동작하는 순수 로직이라 단위 테스트가 가능하다."""
+    conn = con or duckdb.connect(":memory:")
+    conn.register("baseline", baseline_table)
+    conn.register("delta", delta_table)
+    return query_arrow(conn, _MERGE_BIKE_LAST_ACTION_SQL, [snapshot_date])
 
 
-def _bikeman_action_table() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.silver.bikeman_action"
+def _resolve_bike_station(
+    bike_location_table: pa.Table,
+    latest_action_table: pa.Table,
+    con: duckdb.DuckDBPyConnection | None = None,
+) -> pa.Table:
+    """자전거별 최종 위치(effective_station_id, excluded)를 계산한다 - 두
+    PyArrow Table만으로 동작하는 순수 로직이라 단위 테스트가 가능하다."""
+    conn = con or duckdb.connect(":memory:")
+    conn.register("bike_location", bike_location_table)
+    conn.register("latest_action", latest_action_table)
+    return query_arrow(conn, _RESOLVE_SQL)
 
 
-def _bike_last_action_table() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.gold.bike_last_action"
+def _aggregate_station_inventory(
+    resolved_table: pa.Table,
+    station_active_table: pa.Table,
+    snapshot_date: str,
+    con: duckdb.DuckDBPyConnection | None = None,
+) -> pa.Table:
+    """대여소별 재고를 집계한다 - 두 PyArrow Table만으로 동작하는 순수 로직이라
+    단위 테스트가 가능하다."""
+    conn = con or duckdb.connect(":memory:")
+    conn.register("resolved", resolved_table)
+    conn.register("station_active", station_active_table)
+    return query_arrow(conn, _AGGREGATE_SQL, [snapshot_date])
 
 
-def _gold_table() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.gold.fact_station_inventory"
+def _ensure_gold_tables(catalog):
+    catalog.create_namespace_if_not_exists("gold")
+    try:
+        gold_table = catalog.load_table(GOLD_TABLE)
+    except NoSuchTableError:
+        logger.info("%s 테이블 신규 생성", GOLD_TABLE)
+        gold_table = catalog.create_table(GOLD_TABLE, schema=GOLD_SCHEMA)
+    try:
+        bike_last_action_table = catalog.load_table(BIKE_LAST_ACTION_TABLE)
+    except NoSuchTableError:
+        logger.info("%s 테이블 신규 생성", BIKE_LAST_ACTION_TABLE)
+        bike_last_action_table = catalog.create_table(BIKE_LAST_ACTION_TABLE, schema=BIKE_LAST_ACTION_SCHEMA)
+    return gold_table, bike_last_action_table
 
 
-def _ensure_gold_table(spark) -> None:
-    catalog = config.SETTINGS.iceberg_catalog_name
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {catalog}.gold")
-    spark.sql(
-        f"""
-        CREATE TABLE IF NOT EXISTS {_gold_table()} (
-            station_id      STRING,
-            bike_cnt        INT,
-            hold_num        INT,
-            target_bike_cnt INT,
-            snapshot_date   DATE
-        )
-        USING iceberg
+def _bike_last_action_baseline(catalog) -> pa.Table:
+    """직전 상태 전체 (테이블이 비어있으면 빈 Table - cold start도 안전)."""
+    full = catalog.load_table(BIKE_LAST_ACTION_TABLE).scan(
+        selected_fields=("bike_id", "action_event_type", "action_station_id", "action_at")
+    ).to_arrow()
+    con = duckdb.connect(":memory:")
+    con.register("t", full)
+    return query_arrow(
+        con,
         """
-    )
-    spark.sql(
-        f"""
-        CREATE TABLE IF NOT EXISTS {_bike_last_action_table()} (
-            bike_id            STRING,
-            action_event_type  STRING,
-            action_station_id  STRING,
-            action_at          TIMESTAMP,
-            snapshot_date      DATE
-        )
-        USING iceberg
-        """
+        SELECT
+            bike_id,
+            action_event_type AS base_event_type,
+            action_station_id AS base_station_id,
+            action_at AS base_at
+        FROM t
+        """,
     )
 
 
-def _bike_last_action_baseline(spark):
-    """직전 상태 전체 (테이블이 비어있으면 빈 DataFrame - cold start도 안전)."""
-    return spark.read.table(_bike_last_action_table()).select(
-        "bike_id",
-        F.col("action_event_type").alias("base_event_type"),
-        F.col("action_station_id").alias("base_station_id"),
-        F.col("action_at").alias("base_at"),
-    )
-
-
-def _bike_last_action_baseline_snapshot_date(spark) -> date | None:
+def _bike_last_action_baseline_snapshot_date(catalog) -> date | None:
     """gold.bike_last_action에 남아있는 MAX(snapshot_date) - 그 값보다 이전
     bikeman_action 이벤트는 이미 baseline에 반영되어 있으므로, 이번 실행의
     델타 시작일로 그대로 쓸 수 있다. 테이블이 비어있으면(cold start) None."""
-    return spark.read.table(_bike_last_action_table()).agg(F.max("snapshot_date")).collect()[0][0]
+    full = catalog.load_table(BIKE_LAST_ACTION_TABLE).scan(selected_fields=("snapshot_date",)).to_arrow()
+    if len(full) == 0:
+        return None
+    con = duckdb.connect(":memory:")
+    con.register("t", full)
+    return con.execute("SELECT MAX(snapshot_date) FROM t").fetchone()[0]
 
 
-def _bike_last_action_delta(spark, start_date: date | None, end_date: date):
+def _read_bikeman_action_delta(catalog, start_date: date | None, end_date: date) -> pa.Table:
     """bikeman_action에서 아직 baseline에 반영 안 된 구간 [start_date, end_date]만
-    스캔해서 자전거별 최신 이벤트 1건만 채택한다. start_date가 None이면(cold start)
-    하한 없이 end_date까지 전체를 스캔한다."""
+    스캔한다. occurred_date_partition identity 파티션으로 파일을 먼저 줄이고,
+    정확한 경계는 occurred_at 타임스탬프 범위로 다시 제한한다."""
     end_exclusive = datetime.combine(end_date + timedelta(days=1), time.min)
-    bikeman_action_df = spark.read.table(_bikeman_action_table()).filter(
-        (F.col("occurred_date_partition") <= F.lit(end_date.isoformat()))
-        & (F.col("occurred_at") < F.lit(end_exclusive))
-    )
+    table = catalog.load_table(BIKEMAN_ACTION_TABLE)
+    selected_fields = ("bike_id", "event_type", "station_id", "occurred_at", "occurred_date_partition")
+
+    filters = [
+        LessThanOrEqual("occurred_date_partition", end_date.isoformat()),
+        LessThan("occurred_at", end_exclusive),
+    ]
     if start_date is not None:
-        start_inclusive = datetime.combine(start_date, time.min)
-        bikeman_action_df = bikeman_action_df.filter(
-            (F.col("occurred_date_partition") >= F.lit(start_date.isoformat()))
-            & (F.col("occurred_at") >= F.lit(start_inclusive))
-        )
+        filters.append(GreaterThanOrEqual("occurred_date_partition", start_date.isoformat()))
+        filters.append(GreaterThanOrEqual("occurred_at", datetime.combine(start_date, time.min)))
 
-    window = Window.partitionBy("bike_id").orderBy(F.col("occurred_at").desc())
-    return (
-        bikeman_action_df.withColumn("_rn", F.row_number().over(window))
-        .filter(F.col("_rn") == 1)
-        .select(
-            "bike_id",
-            F.col("event_type").alias("delta_event_type"),
-            F.col("station_id").alias("delta_station_id"),
-            F.col("occurred_at").alias("delta_at"),
-        )
-    )
+    row_filter = filters[0]
+    for f in filters[1:]:
+        row_filter = And(row_filter, f)
+
+    return table.scan(row_filter=row_filter, selected_fields=selected_fields).to_arrow()
 
 
-def _merge_bike_last_action(baseline_df, delta_df, snapshot_date: date):
-    """baseline(직전 상태)과 delta(신규 반영분)를 병합한다 - Spark 세션/카탈로그
-    없이 두 DataFrame만으로 동작하는 순수 로직이라 단위 테스트가 가능하다."""
-    merged = baseline_df.join(delta_df, on="bike_id", how="outer")
-
-    delta_is_newer = F.col("delta_at").isNotNull() & (
-        F.col("base_at").isNull() | (F.col("delta_at") > F.col("base_at"))
-    )
-
-    return merged.select(
-        "bike_id",
-        F.when(delta_is_newer, F.col("delta_event_type")).otherwise(F.col("base_event_type")).alias(
-            "action_event_type"
-        ),
-        F.when(delta_is_newer, F.col("delta_station_id")).otherwise(F.col("base_station_id")).alias(
-            "action_station_id"
-        ),
-        F.when(delta_is_newer, F.col("delta_at")).otherwise(F.col("base_at")).alias("action_at"),
-        F.lit(snapshot_date).cast("date").alias("snapshot_date"),
-    )
-
-
-def build_bike_last_action(spark, snapshot_date: date):
+def build_bike_last_action(catalog, snapshot_date: date) -> pa.Table:
     """gold.bike_last_action의 오늘자 스냅샷을 증분(baseline+delta)으로 계산한다."""
-    baseline = _bike_last_action_baseline(spark)
-    delta_start = _bike_last_action_baseline_snapshot_date(spark)
+    baseline = _bike_last_action_baseline(catalog)
+    delta_start = _bike_last_action_baseline_snapshot_date(catalog)
     delta_end = snapshot_date - timedelta(days=1)
-    delta = _bike_last_action_delta(spark, delta_start, delta_end)
+    bikeman_action_delta = _read_bikeman_action_delta(catalog, delta_start, delta_end)
 
-    return _merge_bike_last_action(baseline, delta, snapshot_date)
+    con = duckdb.connect(":memory:")
+    con.register("bikeman_action", bikeman_action_delta)
+    delta = query_arrow(con, _BIKE_LAST_ACTION_DELTA_SQL)
 
-
-def _resolve_bike_station(bike_location_df, latest_action_df):
-    """자전거별 최종 위치(effective_station_id, excluded)를 계산한다 - 두
-    DataFrame만으로 동작하는 순수 로직이라 단위 테스트가 가능하다."""
-    joined = bike_location_df.join(
-        latest_action_df.select(
-            "bike_id",
-            F.col("action_event_type"),
-            F.col("action_station_id"),
-            F.col("action_at"),
-        ),
-        on="bike_id",
-        how="left",
-    )
-
-    action_is_newer = F.col("action_at").isNotNull() & (
-        F.col("action_at") > F.col("last_event_at")
-    )
-
-    return joined.select(
-        "bike_id",
-        F.when(
-            action_is_newer & (F.col("action_event_type") == "COLLECT"),
-            F.lit(None).cast("string"),
-        )
-        .when(
-            action_is_newer & (F.col("action_event_type") == "DEPLOY"),
-            F.coalesce(F.col("action_station_id"), F.col("last_station_id")),
-        )
-        .otherwise(F.col("last_station_id"))
-        .alias("effective_station_id"),
-        # 최신 이벤트가 COLLECT면 필드에서 제거된 상태 -> 재고 집계 제외
-        (action_is_newer & (F.col("action_event_type") == "COLLECT")).alias("excluded"),
-    )
+    return _merge_bike_last_action(baseline, delta, snapshot_date.strftime("%Y-%m-%d"))
 
 
-def _aggregate_station_inventory(resolved_df, station_active_df, snapshot_date: date):
-    """대여소별 재고를 집계한다 - 두 DataFrame만으로 동작하는 순수 로직이라
-    단위 테스트가 가능하다."""
-    active_bikes = resolved_df.filter(~F.col("excluded") & F.col("effective_station_id").isNotNull())
-
-    # left outer join은 build(broadcast) 대상이 오른쪽(non-preserved side)이어야 한다 -
-    # 왼쪽(station_active, 이 조인의 outer/preserved 쪽)에 broadcast를 걸면 Spark가
-    # 힌트를 무시하고 경고만 남긴다(실측으로 확인: "Hint (strategy=broadcast) is not
-    # supported ... build left for left outer join"). bike_counts는 대여소당 최대
-    # 1행이라 station_active보다도 작거나 같으므로 이쪽에 broadcast를 건다.
-    bike_counts = F.broadcast(
-        active_bikes.groupBy(F.col("effective_station_id").alias("station_id")).agg(
-            F.count("*").alias("bike_cnt")
-        )
-    )
-
-    return (
-        station_active_df.select("station_id", "hold_num")
-        .join(bike_counts, on="station_id", how="left")
-        .select(
-            "station_id",
-            F.coalesce(F.col("bike_cnt"), F.lit(0)).cast("int").alias("bike_cnt"),
-            "hold_num",
-            F.col("hold_num").alias("target_bike_cnt"),
-            F.lit(snapshot_date).cast("date").alias("snapshot_date"),
-        )
-    )
-
-
-def build_fact_station_inventory(spark, snapshot_date: date, latest_action):
-    bike_location = spark.read.table(_bike_location_table())
+def build_fact_station_inventory(catalog, snapshot_date: date, latest_action: pa.Table) -> pa.Table:
+    bike_location = catalog.load_table(BIKE_LOCATION_TABLE).scan(
+        selected_fields=("bike_id", "last_station_id", "last_event_at")
+    ).to_arrow()
     resolved = _resolve_bike_station(bike_location, latest_action)
 
-    station_active = spark.read.table(_station_active_table())
-    return _aggregate_station_inventory(resolved, station_active, snapshot_date)
+    station_active = catalog.load_table(STATION_ACTIVE_TABLE).scan(
+        selected_fields=("station_id", "hold_num")
+    ).to_arrow()
+    return _aggregate_station_inventory(resolved, station_active, snapshot_date.strftime("%Y-%m-%d"))
 
 
-def _validate_bike_last_action(df) -> None:
+def _validate_bike_last_action(table: pa.Table) -> None:
     # bikeman_action(수거/배치) 이벤트가 아직 하나도 없는 환경(신규 배포 직후 등)에서는
     # 이 결과가 통째로 0행일 수 있다 - 정상 상태다. common/sql_assert.py(#140)는 0행에서
     # 위반이 자연히 0건이라 별도 스킵 분기가 필요 없다.
@@ -280,12 +335,12 @@ def _validate_bike_last_action(df) -> None:
         QualityCheck("bike_last_action_check")
         .is_complete("bike_id")
         .has_uniqueness("bike_id", threshold=0.99)
-        .run(df.toPandas())
+        .run(table)
         .raise_if_failed(QualityCheckError)
     )
 
 
-def _validate_fact_station_inventory(df) -> None:
+def _validate_fact_station_inventory(table: pa.Table) -> None:
     # gold.station_active(운영 중 대여소)가 아직 없으면 이 결과도 0행일 수 있다 -
     # bike_last_action과 동일한 이유로 별도 스킵 분기가 필요 없다.
     (
@@ -293,7 +348,7 @@ def _validate_fact_station_inventory(df) -> None:
         .is_complete("station_id")
         .is_non_negative("bike_cnt")
         .has_uniqueness("station_id", threshold=0.99)
-        .run(df.toPandas())
+        .run(table)
         .raise_if_failed(QualityCheckError)
     )
 
@@ -305,42 +360,33 @@ def run() -> None:
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
-    spark = build_spark_session("gold-build-fact-station-inventory")
+    catalog = build_iceberg_catalog()
+    gold_table, bike_last_action_table = _ensure_gold_tables(catalog)
+
+    # gold.bike_last_action을 먼저 증분 갱신 - 아래 계산에 재사용하고 그대로
+    # 테이블에도 써서 다음 실행의 baseline이 되게 한다.
+    latest_action = build_bike_last_action(catalog, snapshot_date).select(BIKE_LAST_ACTION_COLUMNS)
     try:
-        _ensure_gold_table(spark)
+        _validate_bike_last_action(latest_action)
+    except QualityCheckError as e:
+        logger.error("%s: gold.bike_last_action 검증 실패, 적재 중단: %s", snapshot_date_str, e)
+        sys.exit(1)
+    overwrite_all(bike_last_action_table, latest_action)
 
-        # gold.bike_last_action을 먼저 증분 갱신 - 캐싱해서 아래 계산에 재사용하고
-        # 그대로 테이블에도 써서 다음 실행의 baseline이 되게 한다.
-        latest_action = build_bike_last_action(spark, snapshot_date).cache()
-        latest_action.count()
-        try:
-            _validate_bike_last_action(latest_action)
-        except QualityCheckError as e:
-            logger.error("%s: gold.bike_last_action 검증 실패, 적재 중단: %s", snapshot_date_str, e)
-            latest_action.unpersist()
-            sys.exit(1)
-        latest_action.writeTo(_bike_last_action_table()).overwritePartitions()
+    out_table = build_fact_station_inventory(catalog, snapshot_date, latest_action).select(GOLD_COLUMNS)
+    row_count = len(out_table)
+    try:
+        _validate_fact_station_inventory(out_table)
+    except QualityCheckError as e:
+        logger.error("%s: gold.fact_station_inventory 검증 실패, 적재 중단: %s", snapshot_date_str, e)
+        sys.exit(1)
 
-        out_df = build_fact_station_inventory(spark, snapshot_date, latest_action).cache()
-        row_count = out_df.count()
-        try:
-            _validate_fact_station_inventory(out_df)
-        except QualityCheckError as e:
-            logger.error("%s: gold.fact_station_inventory 검증 실패, 적재 중단: %s", snapshot_date_str, e)
-            out_df.unpersist()
-            latest_action.unpersist()
-            sys.exit(1)
+    overwrite_all(gold_table, out_table)
 
-        out_df.writeTo(_gold_table()).overwritePartitions()
-        out_df.unpersist()
-        latest_action.unpersist()
-
-        logger.info(
-            "%s: gold.fact_station_inventory %d행 갱신 완료 (bike_last_action 증분 처리)",
-            snapshot_date_str, row_count,
-        )
-    finally:
-        spark.stop()
+    logger.info(
+        "%s: gold.fact_station_inventory %d행 갱신 완료 (bike_last_action 증분 처리)",
+        snapshot_date_str, row_count,
+    )
 
 
 if __name__ == "__main__":
