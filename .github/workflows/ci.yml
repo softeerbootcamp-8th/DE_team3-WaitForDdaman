@@ -2,10 +2,61 @@ name: CI
 
 on:
   pull_request:
-    branches: [production, develop, develop-services]
+    branches: [production, develop, services]
 
 jobs:
+  # 세 base 브랜치의 레이아웃이 서로 겹치지 않는 반쪽이다 - develop엔 파이썬
+  # 파이프라인만(ingestion/airflow/staging/pipeline), services엔 services/(web·api)만,
+  # production엔 둘 다 + *.Dockerfile.prod. 브랜치마다 잡을 지워서 맞추면 같은 경로의
+  # 파일이 브랜치별로 달라져 release/develop-to-production PR마다 add/add 충돌이 나고,
+  # 충돌을 잘못 해결해 게이트가 빠져도 develop은 자기 사본으로 계속 잘 돌기 때문에
+  # production의 퇴행을 아무도 눈치채지 못한다. 그래서 파일은 세 브랜치에서 동일하게
+  # 두고, 잡은 파일 존재 여부로 켜고 끈다 - 계열이 합쳐지면 해당 잡이 자동으로 켜진다.
+  #
+  # 이 판정을 잡 레벨 `if: hashFiles(...)`로 못 하는 이유: 잡 레벨 if는 체크아웃 전에
+  # 평가되고 그 시점엔 워크스페이스가 비어 있어서 hashFiles가 항상 ''를 돌려준다.
+  # 그래서 체크아웃하는 별도 잡의 output으로 넘긴다.
+  #
+  # paths 필터를 쓰지 않는 이유: required status check와 조합하면 paths로 스킵된 체크가
+  # pending으로 남아 머지가 영구히 막힌다. 잡 스킵(if: false)은 그 문제가 없다.
+  detect-layout:
+    runs-on: ubuntu-latest
+    outputs:
+      has_python: ${{ steps.check.outputs.has_python }}
+      has_web: ${{ steps.check.outputs.has_web }}
+      has_prod_dockerfiles: ${{ steps.check.outputs.has_prod_dockerfiles }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # `[ -f x ] && v=true` 형태로 쓰면 파일이 없을 때 이 스텝의 종료코드가 1이 되어
+      # bash -e로 실행되는 스텝 자체가 실패한다. if 블록으로 쓴다.
+      - id: check
+        run: |
+          has_python=false
+          if [ -f ingestion/requirements.txt ] && [ -f airflow/requirements.txt ]; then
+            has_python=true
+          fi
+
+          has_web=false
+          if [ -f services/web/package-lock.json ]; then
+            has_web=true
+          fi
+
+          has_prod=false
+          if [ -f airflow/Dockerfile.prod ] \
+             && [ -f services/api/Dockerfile.prod ] \
+             && [ -f services/web/Dockerfile.prod ]; then
+            has_prod=true
+          fi
+
+          echo "has_python=$has_python" >> "$GITHUB_OUTPUT"
+          echo "has_web=$has_web" >> "$GITHUB_OUTPUT"
+          echo "has_prod_dockerfiles=$has_prod" >> "$GITHUB_OUTPUT"
+          echo "has_python=$has_python  has_web=$has_web  has_prod_dockerfiles=$has_prod"
+
   python-tests:
+    needs: detect-layout
+    if: needs.detect-layout.outputs.has_python == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -65,6 +116,8 @@ jobs:
           echo "::endgroup::"
 
   web-lint-build:
+    needs: detect-layout
+    if: needs.detect-layout.outputs.has_web == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -83,6 +136,8 @@ jobs:
       - run: npm run build
 
   docker-build-check:
+    needs: detect-layout
+    if: needs.detect-layout.outputs.has_prod_dockerfiles == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
