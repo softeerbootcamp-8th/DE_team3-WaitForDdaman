@@ -34,6 +34,9 @@ logger = logging.getLogger(__name__)
 ICEBERG_SPARK_RUNTIME_PACKAGE = "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2"
 ICEBERG_AWS_BUNDLE_PACKAGE = "org.apache.iceberg:iceberg-aws-bundle:1.5.2"
 HADOOP_AWS_PACKAGE = "org.apache.hadoop:hadoop-aws:3.3.4"
+# jdbc 카탈로그(JdbcCatalog)가 포인터를 저장하는 Postgres에 접속하려면 JDBC 드라이버가
+# 필요하다 - iceberg-spark-runtime에는 JdbcCatalog 구현체만 있고 드라이버는 별도.
+POSTGRESQL_JDBC_DRIVER_PACKAGE = "org.postgresql:postgresql:42.7.3"
 
 
 def build_spark_session(
@@ -45,6 +48,8 @@ def build_spark_session(
     catalog = settings.iceberg_catalog_name
 
     packages = [ICEBERG_SPARK_RUNTIME_PACKAGE, ICEBERG_AWS_BUNDLE_PACKAGE, HADOOP_AWS_PACKAGE]
+    if settings.iceberg_catalog_type == "jdbc":
+        packages.append(POSTGRESQL_JDBC_DRIVER_PACKAGE)
     if extra_packages:
         packages.extend(extra_packages)
 
@@ -68,7 +73,25 @@ def build_spark_session(
     if settings.iceberg_catalog_type == "hadoop":
         # Hadoop Catalog (S3 경로 기반 메타데이터, Glue 불필요) - 로컬 LocalStack뿐 아니라
         # Glue 권한이 없는 AWS 계정(교육용 계정 등)에서 실 S3에 붙일 때도 이 분기를 쓴다.
+        # 단점: 파일 규칙(version-hint.text) 기반이라 pyiceberg 등 Spark 밖 클라이언트가
+        # 카탈로그를 읽을 표준 방법이 없다 - 그래서 jdbc 분기를 추가했다.
         builder = builder.config(f"spark.sql.catalog.{catalog}.type", "hadoop")
+    elif settings.iceberg_catalog_type == "jdbc":
+        # JDBC Catalog - "테이블 -> 최신 metadata.json 위치" 포인터를 Postgres DB에
+        # 저장한다. 데이터/메타데이터 파일 자체는 그대로 warehouse(S3)에 있고, 이 DB는
+        # 포인터만 담는다. pyiceberg의 SqlCatalog가 같은 스키마를 그대로 읽을 수 있어서
+        # Spark 없이도(가벼운 메타데이터 조회 목적) 접근 가능해진다.
+        # io-impl은 일부러 안 지정한다 - hadoop 분기와 동일하게 기본값(HadoopFileIO)을
+        # 써서 아래 env=="local" 블록의 spark.hadoop.fs.s3a.*(LocalStack 엔드포인트/자격증명)
+        # 설정을 그대로 재사용한다. glue 분기의 S3FileIO는 여기서 안 맞는다 - S3FileIO는
+        # LocalStack 엔드포인트를 Iceberg 전용 s3.endpoint 계열 설정으로 따로 받아야 해서
+        # 지금 이미 있는 s3a 설정과 별도로 관리해야 하는 부담이 생긴다.
+        builder = (
+            builder.config(f"spark.sql.catalog.{catalog}.catalog-impl", "org.apache.iceberg.jdbc.JdbcCatalog")
+            .config(f"spark.sql.catalog.{catalog}.uri", settings.iceberg_jdbc_catalog_uri)
+            .config(f"spark.sql.catalog.{catalog}.jdbc.user", settings.iceberg_jdbc_catalog_user)
+            .config(f"spark.sql.catalog.{catalog}.jdbc.password", settings.iceberg_jdbc_catalog_password)
+        )
     else:
         # AWS 배포: Glue Data Catalog (Hive Metastore 자체 운영 불필요)
         builder = builder.config(f"spark.sql.catalog.{catalog}.type", "glue").config(
@@ -92,6 +115,31 @@ def build_spark_session(
         builder = builder.config("spark.hadoop.fs.s3a.endpoint", settings.s3_endpoint).config(
             "spark.hadoop.fs.s3a.connection.ssl.enabled", "false"
         )
+
+        if settings.iceberg_catalog_type == "jdbc":
+            # 위 전역 spark.hadoop.fs.s3a.*는 "type=hadoop/glue" 같은 Spark 내장 카탈로그
+            # 통합에는 그대로 먹힌다(SparkSession의 세션 Hadoop Configuration을 그대로
+            # 넘겨받아서) - 하지만 JdbcCatalog처럼 catalog-impl로 리플렉션 생성되는 커스텀
+            # 카탈로그는 그 세션 Configuration을 자동으로 물려받지 않고, catalog-impl에
+            # 전달되는 속성 맵(spark.sql.catalog.<name>.* 중 hadoop.*로 시작하는 것만
+            # Iceberg가 별도로 뽑아 Configuration에 얹어줌)만 받는다. 실측으로 확인(2026-08-22):
+            # 이 설정 없이 register_table을 호출하면 "No AWS Credentials provided"로 실패한다.
+            #
+            # settings.s3_access_key/secret_key가 빈 문자열이면(.env의 AWS_ACCESS_KEY_ID=,
+            # AWS_SECRET_ACCESS_KEY= - 실측 확인) "test"로 대체한다. 전역 spark.hadoop.fs.s3a.*
+            # 경로(hadoop/glue 카탈로그가 쓰는 경로)는 빈 문자열도 LocalStack이 그냥 받아주지만,
+            # 이 catalog-impl 전용 경로는 SimpleAWSCredentialsProvider가 빈 문자열을 "값 없음"과
+            # 동일하게 취급해 통째로 스킵해버려서 빈 문자열로는 아예 안 먹힌다(실측 확인,
+            # 2026-08-22) - LocalStack은 어차피 자격증명 값 자체를 검증하지 않으므로 실제
+            # 값이 뭐든 무방하다.
+            jdbc_access_key = settings.s3_access_key or "test"
+            jdbc_secret_key = settings.s3_secret_key or "test"
+            builder = (
+                builder.config(f"spark.sql.catalog.{catalog}.hadoop.fs.s3a.access.key", jdbc_access_key)
+                .config(f"spark.sql.catalog.{catalog}.hadoop.fs.s3a.secret.key", jdbc_secret_key)
+                .config(f"spark.sql.catalog.{catalog}.hadoop.fs.s3a.endpoint", settings.s3_endpoint)
+                .config(f"spark.sql.catalog.{catalog}.hadoop.fs.s3a.connection.ssl.enabled", "false")
+            )
 
     if settings.spark_local_execution:
         # 이 블록은 "S3가 LocalStack이냐 실 AWS냐"와 무관하게, 지금 이 프로세스가 자원이

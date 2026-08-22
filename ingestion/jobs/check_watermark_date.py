@@ -12,8 +12,12 @@ daily_batch/Silver가 실제로 적재하지 않은 기간을 "처리 완료"로
 이 경우는 비교할 실제 값이 없으므로 조용히 스킵한다 (경고 대상이 아니라 정상 케이스).
 
 ⚠️ 아직 DAG를 실패시키지 않는다 - 값이 어긋나도 계속 진행된다. 사람이 로그를 보고
-판단해야 한다. set_watermark.py/bootstrap_silver_watermark.py 자체를 실제 데이터
-기반으로 바꾸는 건 추후 작업 - 지금은 경고만 추가한다.
+판단해야 한다. set_watermark.py 자체를 실제 데이터 기반으로 바꾸는 건 추후 작업 -
+지금은 경고만 추가한다.
+
+Spark를 안 쓴다 (2026-08-22 변경) - MAX 하나 뽑는데 Spark JVM을 통째로 띄울 필요가
+없다. pyiceberg로 매니페스트(파티션 메타데이터)만 읽어서 훨씬 가볍게 조회한다
+(common/iceberg_catalog.py 참고) - ICEBERG_CATALOG_TYPE=jdbc 전용.
 
 사용법:
     DATASET=rental_history WATERMARK_DATE=2026-06-30 python -m jobs.check_watermark_date
@@ -23,8 +27,7 @@ import os
 import sys
 from datetime import date
 
-import config
-from common.spark_session import build_spark_session
+from common.iceberg_catalog import build_iceberg_catalog
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -36,31 +39,40 @@ DATASETS = {
 }
 
 
+def _max_partition_value(catalog, table_identifier: str, partition_col: str) -> str | None:
+    """
+    table.inspect.partitions()는 매니페스트(파티션 메타데이터)만 읽는다 - 실제 데이터
+    파일을 스캔하지 않아 Spark로 SELECT MAX(...)하는 것보다 훨씬 가볍다.
+
+    rent_dt/reg_dttm이 NULL인 원본 행은 파티션 컬럼이 ""로 떨어진다
+    (bootstrap_silver_watermark.py와 동일한 이유) - ""가 실제 날짜보다 사전식으로
+    작아서 걸러내지 않으면 MAX가 아니라 오히려 문제없지만(문자열 비교상 ""가 항상
+    작음) 방어적으로 동일하게 걸러낸다.
+    """
+    table = catalog.load_table(table_identifier)
+    parts = table.inspect.partitions().to_pandas()
+    if parts.empty:
+        return None
+    values = parts["partition"].apply(lambda p: p[partition_col])
+    values = values[values.notna() & (values != "")]
+    if values.empty:
+        return None
+    return values.max()
+
+
 def run(dataset: str, watermark_date_str: str) -> None:
     if dataset not in DATASETS:
         print(f"알 수 없는 DATASET: {dataset} (가능한 값: {list(DATASETS.keys())})")
         sys.exit(1)
 
-    table, partition_col = DATASETS[dataset]
-    catalog = config.SETTINGS.iceberg_catalog_name
+    table_name, partition_col = DATASETS[dataset]
+    catalog = build_iceberg_catalog()
 
-    spark = build_spark_session(f"check-watermark-date-{dataset}")
-    try:
-        # bootstrap_silver_watermark.py와 동일한 이유로 빈 문자열을 걸러낸다 -
-        # rent_dt/reg_dttm이 NULL인 원본 행은 파티션 컬럼이 ""로 떨어져서
-        # MAX 계산을 오염시킬 수 있다.
-        row = spark.sql(
-            f"SELECT MAX({partition_col}) AS max_date FROM {catalog}.{table} "
-            f"WHERE {partition_col} IS NOT NULL AND {partition_col} != ''"
-        ).collect()[0]
-    finally:
-        spark.stop()
-
-    max_date_str = row["max_date"]
+    max_date_str = _max_partition_value(catalog, table_name, partition_col)
     if not max_date_str:
         logger.info(
             "%s: Bronze 테이블에 비교할 데이터가 없음 - 검증 스킵 (로컬 부분 적재 등 정상 케이스)",
-            table,
+            table_name,
         )
         return
 
@@ -73,10 +85,10 @@ def run(dataset: str, watermark_date_str: str) -> None:
             "*_pattern을 좁혀놓고 watermark_date를 안 맞추면 daily_batch/Silver가 실제로 "
             "적재하지 않은 기간을 처리 완료로 잘못 기록해 영구 누락됩니다 - 의도한 게 아니면 "
             "다시 트리거하기 전에 확인하세요.",
-            table, given, actual_max,
+            table_name, given, actual_max,
         )
     else:
-        logger.info("%s: watermark_date(%s)가 실제 Bronze 최대 적재일과 일치", table, given)
+        logger.info("%s: watermark_date(%s)가 실제 Bronze 최대 적재일과 일치", table_name, given)
 
 
 if __name__ == "__main__":

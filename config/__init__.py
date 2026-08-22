@@ -44,11 +44,29 @@ class Settings:
     warehouse_bucket: str = os.getenv("WAREHOUSE_BUCKET", "ttareungyi-warehouse")
 
     # ---- Iceberg 카탈로그 ----
-    # local: hadoop catalog (객체 스토리지 기반) / aws: glue
+    # hadoop: 객체 스토리지 경로 기반(별도 DB 불필요) / glue: AWS Glue Data Catalog /
+    # jdbc: DB(Postgres)에 "테이블 -> 최신 metadata.json 위치" 포인터를 저장 - Spark
+    # 없이도 pyiceberg 등으로 그 포인터를 직접 조회할 수 있게 하려고 도입한다
+    # (hadoop catalog는 파일 규칙 기반이라 pyiceberg가 못 읽음 - spark_session.py 참고).
     iceberg_catalog_type: str = os.getenv("ICEBERG_CATALOG_TYPE", "hadoop")
     iceberg_catalog_name: str = os.getenv("ICEBERG_CATALOG_NAME", "bike_catalog")
     iceberg_warehouse_path: str = os.getenv(
         "ICEBERG_WAREHOUSE_PATH", f"s3a://{warehouse_bucket}/warehouse"
+    )
+    # jdbc 카탈로그 전용 - 데이터/메타데이터 파일은 그대로 iceberg_warehouse_path(S3)에
+    # 남고, 이 DB에는 "테이블 이름 -> 최신 metadata.json 위치" 포인터만 저장된다.
+    # docker-compose의 postgres 컨테이너 안에 Airflow 메타데이터 DB(POSTGRES_DB)와
+    # 분리된 별도 DB(iceberg_catalog)를 쓴다 (docker/postgres-init/ 참고).
+    iceberg_jdbc_catalog_uri: str = os.getenv(
+        "ICEBERG_JDBC_CATALOG_URI", "jdbc:postgresql://postgres:5432/iceberg_catalog"
+    )
+    # 같은 postgres 컨테이너의 계정을 그대로 재사용 (DB만 분리) - 루트 .env의
+    # POSTGRES_USER/PASSWORD와 항상 같아야 하므로 별도 하드코딩 기본값을 두지 않는다.
+    iceberg_jdbc_catalog_user: str = os.getenv(
+        "ICEBERG_JDBC_CATALOG_USER", os.getenv("POSTGRES_USER", "airflow")
+    )
+    iceberg_jdbc_catalog_password: str = os.getenv(
+        "ICEBERG_JDBC_CATALOG_PASSWORD", os.getenv("POSTGRES_PASSWORD", "airflow")
     )
 
     # ---- 서울 열린데이터광장 Open API (실제 스펙 확인됨, 2026-08-11) ----

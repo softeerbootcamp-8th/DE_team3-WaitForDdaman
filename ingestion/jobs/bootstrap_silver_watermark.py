@@ -18,6 +18,10 @@ read_watermark()는 없으면 backfill_start_date로 폴백해버려서 "진짜 
 구분 못 하므로, get_json()으로 키 존재 자체를 직접 확인한다.
 bronze_initial_load_all_sources_dag.py에서만 태스크로 연결한다.
 
+Spark를 안 쓴다 (2026-08-22 변경) - MIN 하나 뽑는데 Spark JVM을 통째로 띄울 필요가
+없다. pyiceberg로 매니페스트(파티션 메타데이터)만 읽어서 훨씬 가볍게 조회한다
+(common/iceberg_catalog.py 참고) - ICEBERG_CATALOG_TYPE=jdbc 전용.
+
 사용법:
     DATASET=rental_history python -m jobs.bootstrap_silver_watermark
 """
@@ -27,8 +31,8 @@ import sys
 from datetime import date, timedelta
 
 import config
+from common.iceberg_catalog import build_iceberg_catalog
 from common.s3_utils import get_json
-from common.spark_session import build_spark_session
 from common.watermark import write_watermark
 from config.watermark_keys import SILVER_RENTAL_HISTORY
 
@@ -49,9 +53,8 @@ def run(dataset: str) -> None:
         print(f"알 수 없는 DATASET: {dataset} (가능한 값: {list(DATASETS.keys())})")
         sys.exit(1)
 
-    table, partition_col, watermark_key = DATASETS[dataset]
+    table_name, partition_col, watermark_key = DATASETS[dataset]
     settings = config.SETTINGS
-    catalog = settings.iceberg_catalog_name
 
     # get_json()으로 키 존재 자체를 직접 본다 - read_watermark()는 없으면 backfill_start_date로
     # 폴백해서 "이미 설정됨"과 "설정된 적 없음"을 구분할 수 없다.
@@ -63,22 +66,25 @@ def run(dataset: str) -> None:
         )
         return
 
-    spark = build_spark_session(f"bootstrap-silver-watermark-{dataset}")
-    try:
-        # rent_dt가 NULL인 원본 행은 파티션 컬럼이 빈 문자열("")로 떨어진다(_derive_date_partition의
-        # concat_ws가 전부 NULL이면 NULL이 아니라 ""를 반환함). ""가 실제 날짜보다 사전식으로
-        # 작아서 걸러내지 않으면 MIN()이 그 값을 집어 "데이터 없음"으로 오판하게 된다
-        # (실측: rental_history에서 malformed 행 2개로 인해 재현됨, 2026-08-20).
-        row = spark.sql(
-            f"SELECT MIN({partition_col}) AS min_date FROM {catalog}.{table} "
-            f"WHERE {partition_col} IS NOT NULL AND {partition_col} != ''"
-        ).collect()[0]
-    finally:
-        spark.stop()
+    catalog = build_iceberg_catalog()
+    table = catalog.load_table(table_name)
+    # table.inspect.partitions()는 매니페스트(파티션 메타데이터)만 읽는다 - 실제
+    # 데이터 파일을 스캔하지 않아 Spark로 SELECT MIN(...)하는 것보다 훨씬 가볍다.
+    parts = table.inspect.partitions().to_pandas()
 
-    min_date_str = row["min_date"]
+    # rent_dt가 NULL인 원본 행은 파티션 컬럼이 빈 문자열("")로 떨어진다(_derive_date_partition의
+    # concat_ws가 전부 NULL이면 NULL이 아니라 ""를 반환함). ""가 실제 날짜보다 사전식으로
+    # 작아서 걸러내지 않으면 MIN이 그 값을 집어 "데이터 없음"으로 오판하게 된다
+    # (실측: rental_history에서 malformed 행 2개로 인해 재현됨, 2026-08-20).
+    min_date_str = None
+    if not parts.empty:
+        values = parts["partition"].apply(lambda p: p[partition_col])
+        values = values[values.notna() & (values != "")]
+        if not values.empty:
+            min_date_str = values.min()
+
     if not min_date_str:
-        logger.error("%s: Bronze 테이블에 데이터가 없음 - 백필을 먼저 실행하세요.", table)
+        logger.error("%s: Bronze 테이블에 데이터가 없음 - 백필을 먼저 실행하세요.", table_name)
         sys.exit(1)
 
     min_date = date.fromisoformat(min_date_str)
