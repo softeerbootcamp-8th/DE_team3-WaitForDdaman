@@ -17,71 +17,24 @@ import os
 import sys
 from datetime import date, timedelta
 
-from pyspark.sql import functions as F
-
 import config
 from common.api_client import (
     SeoulApiError,
     SeoulApiTransientError,
     fetch_rent_history_by_date,
-    strip_pagination_meta,
 )
 from common.s3_utils import ensure_bucket, put_json
 from common.spark_session import build_spark_session
 from common.watermark import read_watermark, write_watermark
-from schema.rental_history_schema import (
-    SchemaValidationError,
-    build_select_exprs,
-    validate_and_report,
+from jobs.promote_rental_history_raw import (
+    bronze_table_name,
+    build_bronze_dataframe,
+    ensure_bronze_table,
 )
+from schema.rental_history_schema import SchemaValidationError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
-
-
-def _table_name() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.bronze.rental_history"
-
-
-def _ensure_bronze_table(spark) -> None:
-    """
-    initial_load_rental_history.py와 동일한 DDL - 초기 적재 없이 daily_batch만 단독으로
-    먼저 돌리는 경우(신규 환경, 최근 N일치만 받고 싶은 경우 등)에도 테이블이 없어서
-    writeTo().overwritePartitions()가 TABLE_OR_VIEW_NOT_FOUND로 실패하지 않게 한다.
-    이미 초기 적재로 테이블이 있어도 CREATE TABLE IF NOT EXISTS라 안전하다(no-op).
-    """
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {config.SETTINGS.iceberg_catalog_name}.bronze")
-    spark.sql(
-        f"""
-        CREATE TABLE IF NOT EXISTS {_table_name()} (
-            bike_id STRING,
-            rent_dt STRING,
-            rent_station_no STRING,
-            rent_station_name STRING,
-            rent_hold STRING,
-            return_dt STRING,
-            return_station_no STRING,
-            return_station_name STRING,
-            return_hold STRING,
-            use_min STRING,
-            use_distance_m STRING,
-            user_class_cd STRING,
-            sex_cd STRING,
-            birth_year STRING,
-            rent_station_id STRING,
-            return_station_id STRING,
-            bike_se_cd STRING,
-            rent_date_partition STRING,
-            source_file STRING,
-            ingested_at TIMESTAMP
-        )
-        USING iceberg
-        PARTITIONED BY (rent_date_partition)
-        """
-    )
-    spark.sql(
-        f"ALTER TABLE {_table_name()} SET TBLPROPERTIES ('write.distribution-mode'='hash')"
-    )
 
 
 def _process_one_day(spark, target_date: date) -> int:
@@ -101,25 +54,11 @@ def _process_one_day(spark, target_date: date) -> int:
         logger.info("%s: 신규 데이터 없음", date_str)
         return 0
 
-    # START_INDEX/END_INDEX/RNUM은 페이징 메타데이터일 뿐 실제 데이터 컬럼이 아니므로
-    # 스키마 검증 전에 제거한다 (안 지우면 매 호출마다 "알 수 없는 컬럼" 경고가 계속 발생함)
-    rows = [strip_pagination_meta(r) for r in raw_rows]
-
-    actual_columns = list(rows[0].keys())
-    validate_and_report(actual_columns)  # 필수 컬럼 없으면 SchemaValidationError -> 상위에서 배치 중단
-
-    raw_df = spark.createDataFrame(rows)
-    select_exprs = build_select_exprs(actual_columns)
-    mapped_df = raw_df.select(*select_exprs)
-
-    bronze_df = (
-        mapped_df.withColumn("rent_date_partition", F.lit(date_str))
-        .withColumn("source_file", F.lit(f"api:{date_str}"))
-        .withColumn("ingested_at", F.current_timestamp())
-        .cache()
-    )
+    # 매핑/검증은 승격 잡과 같은 helper를 쓴다. 이 legacy 경로의 source_file은
+    # 수동 catch-up 결과와의 호환을 위해 기존 "api:<날짜>" 표기를 유지한다.
+    bronze_df = build_bronze_dataframe(spark, raw_rows, date_str, f"api:{date_str}").cache()
     row_count = bronze_df.count()
-    bronze_df.writeTo(_table_name()).overwritePartitions()
+    bronze_df.writeTo(bronze_table_name()).overwritePartitions()
     bronze_df.unpersist()
 
     logger.info("%s: %d행 적재 완료", date_str, row_count)
@@ -132,7 +71,7 @@ def run() -> None:
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
     spark = build_spark_session("bronze-daily-batch-rental-history")
-    _ensure_bronze_table(spark)
+    ensure_bronze_table(spark)
 
     last_processed = read_watermark()
     start_date = last_processed + timedelta(days=1)
