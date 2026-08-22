@@ -30,6 +30,25 @@ bikeman은 워터마크로 며칠 밀려도 따라잡는다).
 
 `max_active_runs=1` 자체는 유지한다. 두 run이 동시에 같은 파티션을 덮어쓰는 것을 막는다.
 
+### 대여이력만 TaskGroup인 이유
+대여이력은 06:00 FINAL 관측이 실패해도 05:00 예비 관측본으로 그날의 Bronze를 살릴 수
+있어야 한다(#136). 그래서 이 원천만 수집 / 후보 선택 / 승격 / 확정 워터마크 / Asset
+발행을 별도 태스크로 쪼갠다.
+
+    collect_final_raw
+        >> select_final_or_preliminary   (ALL_DONE - 수집이 실패해도 반드시 실행)
+        >> promote_to_bronze             (유일한 Spark/Iceberg 단계, BRONZE_POOL)
+        >> update_confirmed_watermark
+        >> publish_bronze_asset          (RENTAL_HISTORY_BRONZE의 유일한 producer)
+
+- 수집 실패는 Airflow에서 그대로 보이되, 예비 관측본으로 복구되면 파이프라인은 성공한다.
+  따라서 이 원천의 외부 성공 조건은 "FINAL 수집 성공"이 아니라 "Bronze commit 완료"다.
+- Asset을 마지막 빈 태스크에만 두는 이유는, 승격이나 워터마크가 실패한 상태가 Silver로
+  전파되는 걸 막기 위함이다. 앞 단계에 outlet이 있으면 부분 상태가 그대로 하류에 흘러간다.
+- 기본값은 RENTAL_HISTORY_FALLBACK_ENABLED=false, RENTAL_HISTORY_T0_ENABLED=false다.
+  이 상태의 처리 범위·실패 의미는 기존 단일 태스크와 같고, 예비 관측본은 쓰지 않는다.
+- 대규모 수동 gap 메우기는 기존대로 bronze_catchup_all_sources의 legacy 잡이 담당한다.
+
 ### 원천별 성격
 | 소스 | 조회 방식 | 증분 기준 | 재처리 |
 |---|---|---|---|
@@ -58,7 +77,9 @@ from datetime import timedelta
 
 import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.sdk import dag
+from airflow.providers.standard.operators.empty import EmptyOperator
+from airflow.sdk import TaskGroup, dag
+from airflow.task.trigger_rule import TriggerRule
 
 from dag_assets import (
     BIKEMAN_EVENT_BRONZE,
@@ -67,11 +88,28 @@ from dag_assets import (
     STATION_ACTIVE_BRONZE,
     STATION_MASTER_BRONZE,
 )
-from dag_common import BRONZE_POOL, DEFAULT_ARGS, bash_job
+from dag_common import (
+    BRONZE_POOL,
+    COLLECTION_CUTOFF_AT_TEMPLATE,
+    DEFAULT_ARGS,
+    bash_job,
+)
 
 # 밀린 날짜가 많아도 한 run이 이만큼만 처리하고 끝낸다. run이 하루를 넘겨
 # 다음 날 station_master 스냅샷을 굶기지 않게 하는 안전장치 (위 doc 참고).
 DEFAULT_MAX_DAYS_PER_RUN = "3"
+
+MAX_DAYS_PER_RUN_TEMPLATE = "{{ params.max_days_per_run }}"
+
+# 운영 플래그는 Airflow Variable로 두고 DAG가 문자열 env로만 주입한다.
+# ingestion 잡은 Airflow를 import하지도, Variable을 직접 읽지도 않는다.
+FALLBACK_ENABLED_TEMPLATE = (
+    "{{ var.value.get('RENTAL_HISTORY_FALLBACK_ENABLED', 'false') }}"
+)
+T0_ENABLED_TEMPLATE = "{{ var.value.get('RENTAL_HISTORY_T0_ENABLED', 'false') }}"
+PRELIMINARY_MAX_AGE_MINUTES_TEMPLATE = (
+    "{{ var.value.get('RENTAL_HISTORY_PRELIMINARY_MAX_AGE_MINUTES', '120') }}"
+)
 
 
 @dag(
@@ -101,17 +139,75 @@ def bronze_daily_batch_all_sources():
         priority_weight=10,
     )
 
-    # 대여이력: 하루치가 시간 단위 24회 호출 + 페이징이라 가장 오래 걸린다
-    BashOperator(
-        task_id="daily_batch_rental_history",
-        bash_command=bash_job(
-            "daily_batch_rental_history",
-            "MAX_DAYS_PER_RUN='{{ params.max_days_per_run }}' ",
-        ),
-        execution_timeout=timedelta(hours=2),
-        outlets=[RENTAL_HISTORY_BRONZE],
-        pool=BRONZE_POOL,
-    )
+    # 대여이력: 하루치가 시간 단위 24회 호출 + 페이징이라 가장 오래 걸린다.
+    # 이 원천만 예비 관측본 fallback이 필요해 단계별 태스크로 쪼갠다 (위 doc 참고).
+    with TaskGroup(group_id="rental_history"):
+        collect_final_raw = BashOperator(
+            task_id="collect_final_raw",
+            bash_command=bash_job("collect_rental_history_raw"),
+            env={
+                "COLLECTION_CUTOFF_AT": COLLECTION_CUTOFF_AT_TEMPLATE,
+                "SNAPSHOT_TYPE": "FINAL",
+                "MAX_DAYS_PER_RUN": MAX_DAYS_PER_RUN_TEMPLATE,
+                "RENTAL_HISTORY_T0_ENABLED": T0_ENABLED_TEMPLATE,
+            },
+            append_env=True,
+            # HTTP/페이지 단위 일시 오류는 api_client의 tenacity가 이미 재시도한다.
+            # 여기에 Airflow 지수 백오프 3회를 더하면 fallback 진입이 06:30을 넘겨
+            # 예비 관측본을 쓸 수 있는 시간대를 놓친다.
+            retries=0,
+            execution_timeout=timedelta(minutes=15),
+        )
+
+        # 수집이 실패해도 반드시 실행돼야 예비 관측본으로 복구할 수 있다.
+        select_final_or_preliminary = BashOperator(
+            task_id="select_final_or_preliminary",
+            bash_command=bash_job("select_rental_history_snapshot"),
+            env={
+                "COLLECTION_CUTOFF_AT": COLLECTION_CUTOFF_AT_TEMPLATE,
+                "MAX_DAYS_PER_RUN": MAX_DAYS_PER_RUN_TEMPLATE,
+                "RENTAL_HISTORY_FALLBACK_ENABLED": FALLBACK_ENABLED_TEMPLATE,
+                "RENTAL_HISTORY_T0_ENABLED": T0_ENABLED_TEMPLATE,
+                "RENTAL_HISTORY_PRELIMINARY_MAX_AGE_MINUTES": (
+                    PRELIMINARY_MAX_AGE_MINUTES_TEMPLATE
+                ),
+            },
+            append_env=True,
+            trigger_rule=TriggerRule.ALL_DONE,
+            execution_timeout=timedelta(minutes=15),
+        )
+
+        # 유일한 Spark/Iceberg 단계라 이 태스크만 BRONZE_POOL을 점유한다.
+        promote_to_bronze = BashOperator(
+            task_id="promote_to_bronze",
+            bash_command=bash_job("promote_rental_history_raw"),
+            env={"COLLECTION_CUTOFF_AT": COLLECTION_CUTOFF_AT_TEMPLATE},
+            append_env=True,
+            execution_timeout=timedelta(hours=2),
+            pool=BRONZE_POOL,
+        )
+
+        update_confirmed_watermark = BashOperator(
+            task_id="update_confirmed_watermark",
+            bash_command=bash_job("update_rental_history_confirmed_watermark"),
+            env={"COLLECTION_CUTOFF_AT": COLLECTION_CUTOFF_AT_TEMPLATE},
+            append_env=True,
+            execution_timeout=timedelta(minutes=15),
+        )
+
+        # Bronze commit과 확정 워터마크가 모두 정합한 뒤에만 Asset을 발행한다.
+        publish_bronze_asset = EmptyOperator(
+            task_id="publish_bronze_asset",
+            outlets=[RENTAL_HISTORY_BRONZE],
+        )
+
+        (
+            collect_final_raw
+            >> select_final_or_preliminary
+            >> promote_to_bronze
+            >> update_confirmed_watermark
+            >> publish_bronze_asset
+        )
 
     BashOperator(
         task_id="daily_batch_failure_report",
