@@ -1,14 +1,18 @@
 """
-Gold 테이블 유지보수 DAG - Iceberg 컴팩션(rewrite_data_files)
+Iceberg 테이블 유지보수 DAG - 컴팩션(rewrite_data_files) + 스냅샷 만료
+(expire_snapshots) + 고아 파일 정리(remove_orphan_files)
+
+### 대상: Gold TEMP 4개 + Bronze/Silver rental_history (#173)
+gold.bike_location/station_active/fact_station_inventory/bike_last_action은
+매일 전체 덮어쓰기(overwritePartitions)라 실행마다 새 데이터 파일이 쌓이고
+(small file 문제), bronze/silver.rental_history는 초기 적재가 작은 파일을
+대량 생성해서 대상에 포함된다(#173).
 
 ### 왜 gold_dim_fact와 분리된 별도 DAG인가
-gold.bike_location/station_active/fact_station_inventory/bike_last_action은
-매일 전체 덮어쓰기(overwritePartitions)라 실행마다 새 데이터 파일이 쌓인다
-(small file 문제). 컴팩션은 daily 배치의 SLA와 무관하고, 하루에 1~2개씩만
-늘어나는 파일을 매일 정리할 필요는 없으므로 주간 1회로 충분하다 -
-gold_dim_fact에 태스크를 얹으면 daily 배치가 컴팩션 실패에 영향받게 되므로
-분리했다(자세한 이유는 pipeline/collection_priority/jobs/compact_gold_tables.py
-docstring 참고).
+컴팩션은 daily 배치의 SLA와 무관하고, 하루에 1~2개씩만 늘어나는 파일을 매일
+정리할 필요는 없으므로 주간 1회로 충분하다 - gold_dim_fact에 태스크를 얹으면
+daily 배치가 컴팩션 실패에 영향받게 되므로 분리했다(자세한 이유는
+pipeline/collection_priority/jobs/compact_gold_tables.py docstring 참고).
 
 ### 스케줄
 매주 일요일 03:00 KST - daily 배치(08:00 KST)와 겹치지 않는 새벽 시간대,
