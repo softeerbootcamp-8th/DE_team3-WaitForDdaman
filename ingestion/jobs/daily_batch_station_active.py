@@ -9,7 +9,11 @@ station_master(tbCycleStationInfo)와 같은 "날짜 파라미터 없는 전체 
 워터마크가 필요 없고, 파티션 키도 이벤트 발생일이 아니라 snapshot_date다.
 
 ⚠️ 과거를 소급 조회할 수 없다. 오늘 스냅샷을 놓치면 오늘 어떤 대여소가 실제로
-   운영 중이었는지 영구히 알 수 없게 된다. 실패 시 반드시 사람이 인지해야 한다.
+   운영 중이었는지 영구히 알 수 없게 된다. 그래서 Lambda(fetch_station_active_raw)가
+   매일 00:10 KST에 S3 raw 영역에 먼저 착지시키고, 이 잡은 S3 raw payload를 읽어
+   Bronze Iceberg 테이블에 파티션 단위로 적재한다.
+
+Spark를 완전히 제거하고 PyArrow + PyIceberg(SqlCatalog)로 경량화/고속화되었다 (Issue #142).
 
 사용법:
     python -m jobs.daily_batch_station_active
@@ -18,9 +22,10 @@ station_master(tbCycleStationInfo)와 같은 "날짜 파라미터 없는 전체 
 import logging
 import os
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
+from typing import Any, Dict, List
 
-from pyspark.sql import functions as F
+import pyarrow as pa
 
 import config
 from common.api_client import (
@@ -29,11 +34,10 @@ from common.api_client import (
     fetch_station_active,
     strip_pagination_meta,
 )
+from common.iceberg_io import overwrite_partition
 from common.s3_utils import ensure_bucket, get_json, put_json
-from common.spark_session import build_spark_session
 from schema.station_active_schema import (
     SchemaValidationError,
-    build_select_exprs,
     collect_response_fields,
     validate_and_report,
 )
@@ -43,42 +47,42 @@ logger = logging.getLogger(__name__)
 
 
 def _table_name() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.bronze.station_active"
+    return "bronze.station_active"
 
 
-def _ensure_bronze_table(spark) -> None:
-    """
-    Bronze 원칙대로 원본 필드를 전부 STRING으로 보존한다.
-    타입 캐스팅은 Silver 책임 - 여기서 캐스팅하면 실패한 값이 조용히 null이 되어
-    원천에 무엇이 왔는지 알 수 없게 된다.
-    """
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {config.SETTINGS.iceberg_catalog_name}.bronze")
-    spark.sql(
-        f"""
-        CREATE TABLE IF NOT EXISTS {_table_name()} (
-            station_id           STRING COMMENT '대여소 ID (ST-4), 골드 조인 키',
-            station_name         STRING COMMENT '대여소명',
-            rack_tot_cnt         STRING COMMENT '거치대 수',
-            parking_bike_tot_cnt STRING COMMENT '주차된 자전거 수',
-            shared               STRING COMMENT '거치율 (100 초과 가능)',
-            latitude             STRING COMMENT '위도',
-            longitude            STRING COMMENT '경도',
-            snapshot_date        STRING COMMENT '스냅샷 기준일 (YYYY-MM-DD), 파티션 키',
-            source_file          STRING COMMENT '출처 (api:YYYY-MM-DD)',
-            ingested_at          TIMESTAMP COMMENT '적재 시각'
-        )
-        USING iceberg
-        PARTITIONED BY (snapshot_date)
-        """
-    )
-    # Iceberg가 직접 분산/정렬하게 해서 FanoutWriter의 높은 메모리 사용
-    # (파티션별 파일 동시 오픈)을 피한다.
-    spark.sql(
-        f"ALTER TABLE {_table_name()} SET TBLPROPERTIES ('write.distribution-mode'='hash')"
-    )
+def _build_arrow_table(rows: List[Dict[str, Any]], snapshot_date: str) -> pa.Table:
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    source_file_val = f"api:{snapshot_date}"
+
+    cols: Dict[str, list] = {
+        "station_id": [],
+        "station_name": [],
+        "rack_tot_cnt": [],
+        "parking_bike_tot_cnt": [],
+        "shared": [],
+        "latitude": [],
+        "longitude": [],
+        "snapshot_date": [],
+        "source_file": [],
+        "ingested_at": [],
+    }
+
+    for r in rows:
+        cols["station_id"].append(str(r.get("stationId") or r.get("station_id") or "") or None)
+        cols["station_name"].append(str(r.get("stationName") or r.get("station_name") or "") or None)
+        cols["rack_tot_cnt"].append(str(r.get("rackTotCnt") or r.get("rack_tot_cnt") or "") or None)
+        cols["parking_bike_tot_cnt"].append(str(r.get("parkingBikeTotCnt") or r.get("parking_bike_tot_cnt") or "") or None)
+        cols["shared"].append(str(r.get("shared") or "") or None)
+        cols["latitude"].append(str(r.get("stationLatitude") or r.get("latitude") or "") or None)
+        cols["longitude"].append(str(r.get("stationLongitude") or r.get("longitude") or "") or None)
+        cols["snapshot_date"].append(snapshot_date)
+        cols["source_file"].append(source_file_val)
+        cols["ingested_at"].append(now_iso)
+
+    return pa.table(cols)
 
 
-def _process_snapshot(spark, snapshot_date: str) -> int:
+def _process_snapshot(snapshot_date: str) -> int:
     settings = config.SETTINGS
     s3_key = f"raw/station_active/api/snapshot_date={snapshot_date}/payload.json"
 
@@ -95,7 +99,6 @@ def _process_snapshot(spark, snapshot_date: str) -> int:
         logger.info("%s: 공공 API 직접 호출 (RAW_SOURCE=api)", snapshot_date)
         raw_rows = list(fetch_station_active())
 
-        # 변환 전 원본 응답을 그대로 보존한다 (lineage).
         ensure_bucket(settings.raw_bucket)
         put_json(
             settings.raw_bucket,
@@ -112,20 +115,11 @@ def _process_snapshot(spark, snapshot_date: str) -> int:
     logger.info("필드 목록: %s", actual_columns)
     validate_and_report(actual_columns)
 
-    raw_df = spark.createDataFrame(rows)
-    mapped_df = raw_df.select(*build_select_exprs(actual_columns))
+    arrow_table = _build_arrow_table(rows, snapshot_date)
+    row_count = len(arrow_table)
 
-    bronze_df = (
-        mapped_df.withColumn("snapshot_date", F.lit(snapshot_date))
-        .withColumn("source_file", F.lit(f"api:{snapshot_date}"))
-        .withColumn("ingested_at", F.current_timestamp())
-        .cache()
-    )
-    row_count = bronze_df.count()
-    bronze_df.writeTo(_table_name()).overwritePartitions()
-    bronze_df.unpersist()
-
-    logger.info("%s: %d행 적재 완료", snapshot_date, row_count)
+    overwrite_partition(_table_name(), arrow_table, "snapshot_date", snapshot_date)
+    logger.info("%s: %d행 PyIceberg 적재 완료", snapshot_date, row_count)
     return row_count
 
 
@@ -141,15 +135,10 @@ def run() -> None:
     ensure_bucket(settings.raw_bucket)
     ensure_bucket(settings.warehouse_bucket)
 
-    spark = build_spark_session("bronze-daily-batch-station-active")
-    _ensure_bronze_table(spark)
-
-    # 이 API는 "지금 시점의 전체 스냅샷"만 주므로 과거 날짜를 소급 조회할 수 없다.
-    # 기본값은 오늘이며, SNAPSHOT_DATE는 재처리 목적으로만 쓴다.
     snapshot_date = os.getenv("SNAPSHOT_DATE") or date.today().strftime("%Y-%m-%d")
 
     try:
-        _process_snapshot(spark, snapshot_date)
+        _process_snapshot(snapshot_date)
     except (SchemaValidationError, SeoulApiError, SeoulApiTransientError, FileNotFoundError) as e:
         logger.error("%s 스냅샷 처리 실패: %s", snapshot_date, e)
         sys.exit(1)

@@ -174,6 +174,40 @@ def fetch_rent_history_by_date(target_date: date) -> Iterator[dict]:
         yield from fetch_rent_history_by_hour(target_date, hour)
 
 
+def fetch_rent_history_by_date_parallel(target_date: date, max_workers: int = 8) -> list[dict]:
+    """
+    하루 24시간(0~23)의 tbCycleRentData 호출을 ThreadPoolExecutor로 병렬 실행하여
+    수집 시간을 수 분대로 대폭 단축합니다.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    date_str = target_date.strftime("%Y-%m-%d")
+    logger.info("대여이력 API 24시간 병렬 호출 시작: %s (max_workers=%d)", date_str, max_workers)
+
+    hour_results: dict[int, list[dict]] = {}
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_hour = {
+            executor.submit(lambda h: list(fetch_rent_history_by_hour(target_date, h)), hour): hour
+            for hour in range(24)
+        }
+        for future in as_completed(future_to_hour):
+            h = future_to_hour[future]
+            try:
+                hour_results[h] = future.result()
+            except Exception as e:
+                logger.error("대여이력 %s %d시 수집 실패: %s", date_str, h, e)
+                raise
+
+    # 0시부터 23시까지 시간순 정렬 결합
+    all_rows: list[dict] = []
+    for hour in range(24):
+        all_rows.extend(hour_results.get(hour, []))
+
+    logger.info("대여이력 API 24시간 병렬 수집 완료: %s (총 %d행)", date_str, len(all_rows))
+    return all_rows
+
+
 def fetch_failure_reports_by_date(target_date: date) -> Iterator[dict]:
     """tbCycleFailureReport: 특정 날짜(YYYYMMDD)의 고장신고 내역을 전부 가져온다."""
     date_str = target_date.strftime("%Y%m%d")
