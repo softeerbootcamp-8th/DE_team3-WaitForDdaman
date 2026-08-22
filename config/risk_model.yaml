@@ -64,14 +64,17 @@ models:
   logreg:
     max_iter: 1000
   lgbm:
+    # #132: 0812_risk_model_code_optimize.ipynb lgbm3 실험 반영 - num_leaves/min_child_samples/
+    # reg_lambda를 완화. held-out(2026-04-15~06-16) 기준 capture_at_k 4.56%→4.62%로 개선되고,
+    # risk_score 분포도 넓어져 Critical 등급이 실제로 나옴(기존 lgbm은 사실상 0%).
     n_estimators: 100
     learning_rate: 0.05
-    num_leaves: 7
-    min_child_samples: 500
+    num_leaves: 31
+    min_child_samples: 50
     subsample: 0.8
     subsample_freq: 1
     colsample_bytree: 0.8
-    reg_lambda: 10
+    reg_lambda: 1
     random_state: 42
     n_jobs: 1              # 결정론 확보 (스레드 수에 따라 결과가 흔들리지 않게)
     verbose: -1

@@ -23,11 +23,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 
-# 임시값 - 2026-07-06, champion(lgbm, is_unbalance=True, run_key=20260706) 실측 분포
-# 기준(p95=67.06, p99=76.06)으로 잡음. risk_score가 이제 raw 확률이라 재학습마다
-# (특히 양성비율이 바뀌면) 분포가 드리프트할 수 있어 고정 컷오프는 근본 해법이 아님 -
-# 컷오프를 하드코딩하는 대신 그때그때의 분포에 맞춰 재계산하는 방식으로 바꿀지 검토 필요.
-RISK_GRADE_BINS = [-1, 67, 76, 101]
+# 임시값 - #132 재조정. 0812_risk_model_code_optimize.ipynb에서 lgbm3(num_leaves=31,
+# min_child_samples=50, reg_lambda=1, is_unbalance=True) 기준 held-out(2026-04-15~06-16,
+# 187만 건) 분포로 다시 잡음: Warning 2.45%, Critical 0.77%. risk_score가 raw 확률이라
+# 재학습마다(특히 양성비율이 바뀌면) 분포가 드리프트할 수 있어 고정 컷오프는 근본 해법이
+# 아님 - 컷오프를 하드코딩하는 대신 그때그때의 분포에 맞춰 재계산하는 방식으로 바꿀지 검토 필요.
+RISK_GRADE_BINS = [-1, 66, 70, 101]
 RISK_GRADE_LABELS = ["Normal", "Warning", "Critical"]
 
 
