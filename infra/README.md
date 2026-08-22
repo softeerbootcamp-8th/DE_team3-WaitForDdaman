@@ -188,6 +188,73 @@ GitHub Actions에 정적 AWS 키를 저장하지 않는 이유: 계정 SCP가 MF
 이미지만 갱신할 때). 사전에 `aws login --profile console`로 브라우저 인증이 필요하다 —
 `aws configure`의 정적 키는 위 SCP 때문에 ECR이 거부된다.
 
+## 복구 / 인프라 이관 runbook (2026-08-22 신규 VPC/RDS/EC2 컷오버 실전 기록)
+
+병행 구축 → 컷오버 과정에서 실제로 겪은 문제와 해결 순서. RDS 스냅샷 복원이나
+EC2 교체가 다시 필요할 때 이 순서를 그대로 따른다.
+
+### 1. RDS 스냅샷 복원 직후 - DAG pause 상태를 신뢰하지 말 것 [중요]
+
+**문제**: 스냅샷 생성 시각이 "구 환경 DAG 전체 pause" 시각보다 먼저였던 경우,
+복원된 메타DB는 pause 이전 상태를 그대로 담고 있다. 새 스택을 `docker compose up -d`로
+올리는 순간 스케줄러가 즉시 살아나고, `is_paused=false`인 DAG들이 스케줄/Asset
+트리거 조건을 만나면 곧바로 실행될 수 있다. 실측: 새 환경에서 `airflow dags list`로
+확인해보니 17개 DAG 전부 `is_paused=false` 상태로 복원됨.
+
+**대응 순서**:
+1. `airflow-init`만 먼저 올려 DB 마이그레이션을 완료한다 (스케줄러는 아직 올리지 않음)
+2. 스케줄러를 포함한 나머지 컨테이너를 올리기 **전에** 위험을 인지하고 있다가,
+   올리자마자 즉시 전체 pause한다:
+   ```bash
+   docker exec airflow-scheduler airflow dags pause --treat-dag-id-as-regex ".*" --yes
+   ```
+3. 이후 `SELECT count(*) FILTER (WHERE is_paused=false) FROM dag;`를 메타DB에 직접
+   쿼리해 0인지 확인한다 (CLI 출력이 실제 반영 전 상태를 보여줄 때가 있어 CLI 응답만
+   믿지 말 것)
+4. `dag_run` 테이블에 스택 기동 이후 시각의 row가 있는지 확인해 실제 피해가 없었는지
+   검증한다:
+   ```sql
+   SELECT count(*) FROM dag_run WHERE start_date > '<스택 기동 시각>';
+   ```
+
+### 2. Airflow Connection은 스냅샷에 있어도 검증 없이 믿지 말 것
+
+`bikeman_postgres`처럼 UI로만 생성되고 프로비저닝 코드가 없는 Connection은, 메타DB
+복원이 이론상 이를 보존해야 함에도 실측에서는 존재하지 않았다(원인 불명 - 스냅샷
+시점에 애초에 없었을 가능성). 복원 후 반드시 직접 확인:
+```bash
+docker exec airflow-scheduler airflow connections get bikeman_postgres
+```
+없으면 이 Connection을 실제로 쓰는 역할(`bikeman_writer` - bikeman 쓰기 + serving
+읽기)로 재생성한다:
+```bash
+docker exec airflow-scheduler airflow connections add "bikeman_postgres" \
+  --conn-type "postgres" --conn-host "<domain-db 엔드포인트>" \
+  --conn-schema "<db명>" --conn-login "bikeman_writer" \
+  --conn-password "<bikeman_writer 비밀번호>" --conn-port 5432
+```
+
+### 3. Iceberg JDBC 카탈로그로 기존 테이블 이관
+
+`ingestion/jobs/register_tables_in_jdbc_catalog.py`로 hadoop 카탈로그의 기존
+테이블을 JDBC 카탈로그에 전부 등록한다(멱등 - 재실행 시 이미 등록된 건 스킵).
+등록 전 S3에서 `version-hint.text`를 리스팅해 실제 테이블 목록을 직접 확정할 것 -
+`airflow/scripts/check_silver_catalog.py`의 하드코딩된 테이블 상수는 최신이 아닐 수
+있다(실측: silver/gold 각 5종으로 적혀 있었으나 실제로는 24개 테이블 존재).
+등록 후 hadoop(구)/jdbc(신) 카탈로그의 행수를 대조해 검증한다.
+
+**주의**: 구 환경 DAG가 계속 hadoop 카탈로그로 커밋 중이면 새 카탈로그가 그 갱신을
+못 본다(포인터 메커니즘이 다름) - 반드시 구 DAG 전체 pause 후 등록할 것.
+
+### 4. CD가 사용하는 IAM 정책의 보안그룹 ARN은 새 SG로 교체해야 함 [중요]
+
+`waitforddaman-gha-role`의 인라인 정책 `sg-ssh-manage`가 `ec2:AuthorizeSecurityGroupIngress`
+/ `RevokeSecurityGroupIngress`의 `Resource`를 특정 보안그룹 ARN으로 하드코딩하고
+있다. EC2를 새 인스턴스(새 SG)로 교체하면 GitHub Secrets(`SSH_SECURITY_GROUP_ID`)만
+바꿔서는 부족하고, 이 IAM 정책의 `Resource`도 새 SG ARN으로 같이 바꿔야 CD의
+"러너 IP 임시 허용" 스텝이 통과한다. 안 바꾸면 `UnauthorizedOperation`으로 배포
+job이 SSH를 열기 전 단계에서 실패한다(타겟 서버는 건드려지지 않아 안전하게 실패).
+
 ## 알려진 제약 / 후속 작업
 
 - 이 계정은 조직 SCP로 일부 AWS 서비스(ECR 등)가 막혀 있을 수 있음 — 계정 관리자 확인 필요.
