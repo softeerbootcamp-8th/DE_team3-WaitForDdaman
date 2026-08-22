@@ -8,6 +8,7 @@ dag_assets.py와 같은 방식으로, Airflow가 dags 폴더를 sys.path에 넣�
 from datetime import timedelta
 
 INGESTION_DIR = "/opt/airflow/ingestion"
+STAGING_DIR = "/opt/airflow/staging"  # staging/jobs/ 잡(Silver 등) 실행 위치
 INGESTION_PYTHON = "python"
 
 # 로컬(LocalStack)에서 여러 Spark 잡이 동시에 대량 PutObject를 보내면
@@ -62,5 +63,24 @@ def bash_job(job_module: str, extra_env: str = "") -> str:
     """
     return (
         f"cd {INGESTION_DIR} && set -a && source .env && set +a && "
+        f"PYTHONDONTWRITEBYTECODE=1 {extra_env}{INGESTION_PYTHON} -m jobs.{job_module}"
+    )
+
+
+def bash_staging_job(job_module: str, extra_env: str = "") -> str:
+    """
+    staging/jobs/(Silver 등) 잡 실행 커맨드. staging에는 자체 common/이 없어
+    ingestion/common/(config, spark_session, watermark)을 PYTHONPATH로 그대로
+    재사용한다 - PYTHONPATH에 ingestion과 staging을 같이 잡으면 `jobs`는 두
+    디렉터리의 jobs/가 네임스페이스 패키지로 합쳐지고(PEP 420), `common`은
+    ingestion 쪽에서만 찾힌다. .env도 ingestion/.env를 그대로 source한다.
+
+    PYTHONDONTWRITEBYTECODE=1: bash_job()과 동일한 이유 - Silver DAG 여러 개가
+    SILVER_POOL 안에서 동시에 같은 ingestion/common을 처음 import할 때의 .pyc
+    캐시 쓰기 경합을 막는다.
+    """
+    return (
+        f"cd {STAGING_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
+        f"PYTHONPATH={INGESTION_DIR}:{STAGING_DIR}:$PYTHONPATH "
         f"PYTHONDONTWRITEBYTECODE=1 {extra_env}{INGESTION_PYTHON} -m jobs.{job_module}"
     )

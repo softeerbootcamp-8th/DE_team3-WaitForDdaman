@@ -26,7 +26,7 @@ from pathlib import Path
 from pyspark.sql import functions as F
 
 import config
-from common.encoding_utils import convert_euckr_file_to_utf8
+from common.encoding_utils import EncodingMismatchError, convert_euckr_file_to_utf8
 from common.file_utils import NotThisDatasetError, convert_xlsx_to_utf8_csv, is_xlsx, unzip_if_needed
 from common.s3_utils import ensure_bucket, upload_file
 from common.spark_session import build_spark_session
@@ -154,6 +154,11 @@ def run(input_file: str) -> None:
                 skipped = True
             except SchemaValidationError as e:
                 logger.error("스키마 검증 실패: %s (%s)", target_path.name, e)
+                failed = True
+            except EncodingMismatchError as e:
+                # EUC-KR/CP949가 아닌 다른 인코딩으로 추정됨 - 조용히 깨진 데이터를
+                # 적재하는 대신 스키마 검증 실패와 동일하게 취급한다 (이 파일만 스킵).
+                logger.error("인코딩 불일치로 스킵: %s (%s)", target_path.name, e)
                 failed = True
 
     logger.info(
