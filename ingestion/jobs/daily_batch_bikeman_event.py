@@ -56,6 +56,15 @@ def _json_safe_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [{k: _json_safe(v) for k, v in r.items()} for r in rows]
 
 
+def _to_utc_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    parsed = datetime.fromisoformat(value) if isinstance(value, str) else value
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _table_name() -> str:
     return "bronze.bikeman_event"
 
@@ -65,35 +74,33 @@ def _quarantine_table_name() -> str:
 
 
 def _build_arrow_table(rows: List[Dict[str, Any]], date_str: str) -> pa.Table:
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    ingested_at = datetime.now(timezone.utc)
     source_file_val = f"postgres:bikeman.fact_worker_event:{date_str}"
-
-    cols: Dict[str, list] = {
-        "event_id": [],
-        "event_type": [],
-        "bike_id": [],
-        "station_id": [],
-        "worker_id": [],
-        "occurred_at": [],
-        "received_at": [],
-        "occurred_date_partition": [],
-        "source_file": [],
-        "ingested_at": [],
-    }
-
-    for r in rows:
-        cols["event_id"].append(str(r.get("event_id") or "") or None)
-        cols["event_type"].append(str(r.get("event_type") or "") or None)
-        cols["bike_id"].append(str(r.get("bike_id") or "") or None)
-        cols["station_id"].append(str(r.get("station_id") or "") or None)
-        cols["worker_id"].append(str(r.get("worker_id") or "") or None)
-        cols["occurred_at"].append(_json_safe(r.get("occurred_at")))
-        cols["received_at"].append(_json_safe(r.get("received_at")))
-        cols["occurred_date_partition"].append(date_str)
-        cols["source_file"].append(source_file_val)
-        cols["ingested_at"].append(now_iso)
-
-    return pa.table(cols)
+    normalized = [{
+        "event_id": str(r.get("event_id") or "") or None,
+        "event_type": str(r.get("event_type") or "") or None,
+        "bike_id": str(r.get("bike_id") or "") or None,
+        "station_id": str(r.get("station_id") or "") or None,
+        "worker_id": str(r.get("worker_id") or "") or None,
+        "occurred_at": _to_utc_datetime(r.get("occurred_at")),
+        "received_at": _to_utc_datetime(r.get("received_at")),
+        "occurred_date_partition": date_str,
+        "source_file": source_file_val,
+        "ingested_at": ingested_at,
+    } for r in rows]
+    schema = pa.schema([
+        pa.field("event_id", pa.string()),
+        pa.field("event_type", pa.string()),
+        pa.field("bike_id", pa.string()),
+        pa.field("station_id", pa.string()),
+        pa.field("worker_id", pa.string()),
+        pa.field("occurred_at", pa.timestamp("us", tz="UTC")),
+        pa.field("received_at", pa.timestamp("us", tz="UTC")),
+        pa.field("occurred_date_partition", pa.string()),
+        pa.field("source_file", pa.string()),
+        pa.field("ingested_at", pa.timestamp("us", tz="UTC")),
+    ])
+    return pa.Table.from_pylist(normalized, schema=schema)
 
 
 def _process_one_day(target_date: date) -> int:
