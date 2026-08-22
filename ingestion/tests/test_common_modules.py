@@ -1,7 +1,7 @@
 """
 신설 공통 모듈 (partition_listing, iceberg_io, sql_assert) 단위 테스트 (Issue #140)
 """
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pyarrow as pa
 import pytest
@@ -165,3 +165,35 @@ def test_sql_assert_failures_raise_with_details():
     assert "isNonNegative(count)" in err_text
     assert "satisfies(status = 'OK')" in err_text
     assert "hasUniqueness(['bike_id'])" in err_text
+
+
+def test_is_contained_in_allows_null():
+    """Deequ isContainedIn은 non-null 값만 검사한다 - null은 위반이 아니다."""
+    table = pa.table({"risk_grade": ["Normal", None, "Critical"]})
+
+    result = QualityCheck("t").is_contained_in("risk_grade", ["Normal", "Warning", "Critical"]).run(table)
+
+    assert result.is_success
+
+
+def test_satisfies_treats_null_condition_as_violation():
+    """Deequ satisfies는 조건이 NULL로 평가되는 행(예: 컬럼 자체가 null)도 위반으로
+    센다 (CASE WHEN <조건> THEN 1 ELSE 0 END로 컴파일하는 것과 동일)."""
+    table = pa.table({"risk_score": [50.0, None, 150.0]})
+
+    result = QualityCheck("t").satisfies("risk_score >= 0 AND risk_score <= 100", "range").run(table)
+
+    assert not result.is_success
+    assert result.failed_constraints[0].violation_count == 2  # null 1건 + 150 1건
+
+
+def test_has_uniqueness_uses_deequ_definition_not_distinctness():
+    """중복이 3개 몰린 키 하나(A) + 유일값 하나(B) - Deequ 원래 정의(정확히 1번만
+    등장하는 행의 비율)로는 1/4=0.25인데, distinctness(COUNT(DISTINCT)/COUNT(*))로는
+    2/4=0.5로 값이 갈린다. 회귀 비교를 위해 Deequ 정의를 재현해야 한다(#140/#146)."""
+    table = pa.table({"bike_id": ["A", "A", "A", "B"]})
+
+    result = QualityCheck("t").has_uniqueness("bike_id", threshold=0.99).run(table)
+
+    assert not result.is_success
+    assert abs(result.failed_constraints[0].metric_value - 0.25) < 1e-9

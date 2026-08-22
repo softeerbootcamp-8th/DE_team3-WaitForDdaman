@@ -3,15 +3,12 @@ import os
 import sys
 from datetime import date, timedelta
 
-os.environ.setdefault("SPARK_VERSION", "3.5")
-
-from pydeequ.checks import Check, CheckLevel
-from pydeequ.verification import VerificationResult, VerificationSuite
 from pyspark.sql import functions as F
 
 import config
 from common.s3_utils import ensure_bucket
-from common.spark_session import build_spark_session_with_deequ, stop_spark_session_with_deequ
+from common.spark_session import build_spark_session
+from common.sql_assert import QualityCheck, QualityCheckError
 from common.watermark import read_watermark, write_watermark
 from config.watermark_keys import GOLD_DIM_BIKE, SILVER_RENTAL_HISTORY
 
@@ -28,10 +25,6 @@ def _silver_table() -> str:
 
 def _gold_table() -> str:
     return f"{config.SETTINGS.iceberg_catalog_name}.gold.dim_bike"
-
-
-class GoldValidationError(Exception):
-    """PyDeequ 품질 검증 실패 - 이 예외는 배치를 즉시 중단시켜야 한다."""
 
 
 def _ensure_dim_bike_table(spark) -> None:
@@ -51,24 +44,17 @@ def _ensure_dim_bike_table(spark) -> None:
     )
 
 
-def _validate_dim_bike(spark, dim_bike_df) -> None:
-    check = Check(spark, CheckLevel.Error, "dim_bike_check")
-    result = (
-        VerificationSuite(spark)
-        .onData(dim_bike_df)
-        .addCheck(
-            check.hasUniqueness(["bike_id"], lambda fraction: fraction > 0.99)
-            .isComplete("first_seen_at")
-            .isComplete("start_year")
-        )
-        .run()
+def _validate_dim_bike(dim_bike_df) -> None:
+    """common/sql_assert.py(#140)를 재사용 - DuckDB 기반이라 검증 직전에 pandas로
+    collect한다 (dim_bike 전체 누적 행 수 기준이라도 자전거 대수 규모라 부담 없음)."""
+    (
+        QualityCheck("dim_bike_check")
+        .is_complete("first_seen_at")
+        .is_complete("start_year")
+        .has_uniqueness("bike_id", threshold=0.99)
+        .run(dim_bike_df.toPandas())
+        .raise_if_failed(QualityCheckError)
     )
-    result_df = VerificationResult.checkResultsAsDataFrame(spark, result)
-    result_df.show(truncate=False)
-
-    if result.status != "Success":
-        failed_constraints = [r["constraint"] for r in result_df.collect() if r["constraint_status"] != "Success"]
-        raise GoldValidationError(f"dim_bike 품질 검증 실패: {failed_constraints}")
 
 
 def _process_range(spark, start_date: date, end_date: date) -> int:
@@ -105,7 +91,7 @@ def _process_range(spark, start_date: date, end_date: date) -> int:
     out_df.writeTo(_gold_table()).overwritePartitions()
     new_bikes.unpersist()
 
-    _validate_dim_bike(spark, spark.read.table(_gold_table()))  # 실패 시 GoldValidationError -> 배치 중단
+    _validate_dim_bike(spark.read.table(_gold_table()))  # 실패 시 QualityCheckError -> 배치 중단
 
     logger.info("%s: 신규 자전거 %d대 dim_bike 추가", range_label, new_count)
     return new_count
@@ -116,7 +102,7 @@ def run() -> None:
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
-    spark = build_spark_session_with_deequ("gold-build-dim-bike")
+    spark = build_spark_session("gold-build-dim-bike")
     try:
         _ensure_dim_bike_table(spark)
 
@@ -148,11 +134,11 @@ def run() -> None:
         try:
             _process_range(spark, start_date, end_date)
             write_watermark(end_date, watermark_key=GOLD_WATERMARK_KEY)
-        except GoldValidationError as e:
+        except QualityCheckError as e:
             logger.error("%s~%s 처리 실패, 배치 중단: %s", start_date, end_date, e)
             sys.exit(1)
     finally:
-        stop_spark_session_with_deequ(spark)
+        spark.stop()
 
 
 if __name__ == "__main__":

@@ -4,19 +4,27 @@ SQL 기반 데이터 품질 검증 유틸리티 (PyDeequ 대체 모듈)
 Spark 및 JVM 기반 PyDeequ를 완전히 대체하여, DuckDB / PyArrow / Pandas 기반으로
 동일한 품질 검증(완전성, 허용값, 비음수, 임의 조건식, 고유성 등)을 마이크로초 단위로 고속 수행합니다.
 
-제공 제약 조건:
-  - is_complete(col): NULL 또는 빈 문자열 결측치 검증
-  - is_contained_in(col, allowed_values): 허용 목록 포함 여부
-  - is_non_negative(col): 0 이상(비음수) 검증
-  - satisfies(expr, desc): 임의의 SQL 불리언 조건 검증
-  - has_uniqueness(cols, threshold): 고유값 비율 검증 (기본 임계 1.0 / 0.99)
+제공 제약 조건 (Deequ의 null 처리 의미를 그대로 따른다 - #146 Gold 잡 7개가
+이 어서션의 판정을 옛 PyDeequ와 병행 비교해 확인했다):
+  - is_complete(col): NULL 결측치 검증
+  - is_contained_in(col, allowed_values): 허용 목록 포함 여부 (null은 통과 -
+    Deequ 원문: "asserts that every *non-null* value ... is contained")
+  - is_non_negative(col): 0 이상(비음수) 검증 (null은 통과)
+  - satisfies(expr, desc): 임의의 SQL 불리언 조건 검증 (조건이 NULL로 평가되는
+    행은 위반으로 센다 - Deequ가 내부적으로 CASE WHEN <조건> THEN 1 ELSE 0 END로
+    컴파일하는 것과 동일)
+  - has_uniqueness(cols, threshold): 고유값 비율 검증 (기본 임계 1.0 / 0.99) -
+    "컬럼 조합이 정확히 1번만 등장하는 행의 비율"(Deequ 원래 정의)이지
+    COUNT(DISTINCT)/COUNT(*)(distinctness)가 아니다. 중복이 2개 이상인 키가
+    늘어날수록 두 정의가 갈린다(#140/#146) - PyDeequ 결과와의 회귀 비교를
+    위해 distinctness가 아니라 Deequ 원래 정의를 그대로 재현한다.
   - has_min_rows(min_rows): 최소 행 수 검증
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import duckdb
 import pyarrow as pa
@@ -84,7 +92,7 @@ class QualityCheck:
         return self
 
     def is_contained_in(self, column: str, allowed_values: Sequence[Any]) -> QualityCheck:
-        """지정된 컬럼의 값이 허용 목록에 포함되는지 검증합니다."""
+        """지정된 컬럼의 non-null 값이 허용 목록에 포함되는지 검증합니다 (null은 통과)."""
         self._constraints.append({
             "type": "is_contained_in",
             "column": column,
@@ -105,7 +113,8 @@ class QualityCheck:
         return self
 
     def satisfies(self, sql_expression: str, desc: str = "") -> QualityCheck:
-        """임의의 SQL 조건식을 만족하는지 검증합니다."""
+        """임의의 SQL 조건식을 만족하는지 검증합니다 (조건이 NULL로 평가되는
+        행도 위반으로 처리 - Deequ와 동일)."""
         self._constraints.append({
             "type": "satisfies",
             "expr": sql_expression,
@@ -120,8 +129,9 @@ class QualityCheck:
         threshold: float = 1.0,
     ) -> QualityCheck:
         """
-        컬럼 조합의 고유값 비율(COUNT(DISTINCT cols) / COUNT(*))이 threshold 이상인지 검증합니다.
-        Deequ 정의(중복 없는 고유행 비율)와의 정합성을 보장합니다.
+        컬럼 조합이 "정확히 1번만 등장하는 행"의 비율이 threshold 이상인지 검증합니다.
+        (Deequ hasUniqueness 원래 정의 - COUNT(DISTINCT)/COUNT(*)인 distinctness와는
+        다르다. 모듈 docstring 참고.)
         """
         cols = [columns] if isinstance(columns, str) else list(columns)
         self._constraints.append({
@@ -209,7 +219,8 @@ class QualityCheck:
                 col = c["column"]
                 vals = c["allowed_values"]
                 formatted_vals = ", ".join(f"'{v}'" if isinstance(v, str) else str(v) for v in vals)
-                sql = f"SELECT COUNT(*) FROM check_target WHERE {col} NOT IN ({formatted_vals}) OR {col} IS NULL"
+                # null은 통과(Deequ isContainedIn 의미) - non-null인데 목록에 없는 값만 위반
+                sql = f"SELECT COUNT(*) FROM check_target WHERE {col} IS NOT NULL AND {col} NOT IN ({formatted_vals})"
                 violations = conn.execute(sql).fetchone()[0]
                 passed = violations == 0
                 results.append(ConstraintResult(
@@ -237,7 +248,11 @@ class QualityCheck:
 
             elif c_type == "satisfies":
                 expr = c["expr"]
-                sql = f"SELECT COUNT(*) FROM check_target WHERE NOT ({expr})"
+                # 조건이 NULL로 평가되는 행(예: 컬럼 자체가 null)도 위반으로 센다 -
+                # Deequ가 CASE WHEN <조건> THEN 1 ELSE 0 END로 컴파일하는 것과 동일한
+                # 의미. 단순히 WHERE NOT (expr)만 쓰면 NULL은 WHERE에서 자동 제외돼
+                # 위반이 아닌 것처럼 빠지므로 COALESCE로 명시적으로 위반 처리한다.
+                sql = f"SELECT COUNT(*) FROM check_target WHERE NOT (COALESCE(({expr}), FALSE))"
                 violations = conn.execute(sql).fetchone()[0]
                 passed = violations == 0
                 results.append(ConstraintResult(
@@ -253,11 +268,19 @@ class QualityCheck:
                 cols = c["columns"]
                 cols_str = ", ".join(cols)
                 thresh = c["threshold"]
-                sql = f"SELECT COUNT(DISTINCT ({cols_str})) FROM check_target"
-                distinct_count = conn.execute(sql).fetchone()[0]
-                ratio = distinct_count / total_rows if total_rows > 0 else 1.0
+                # Deequ 원래 정의: 컬럼 조합 값이 "정확히 1번만" 등장하는 행의 비율.
+                # COUNT(DISTINCT)/COUNT(*)(distinctness)와 달리 중복 그룹의 행은
+                # 분자에서 전부 빠진다 (모듈 docstring 참고).
+                sql = f"""
+                    WITH grp AS (
+                        SELECT COUNT(*) AS cnt FROM check_target GROUP BY {cols_str}
+                    )
+                    SELECT COALESCE(SUM(CASE WHEN cnt = 1 THEN cnt ELSE 0 END), 0) FROM grp
+                """
+                unique_row_count = conn.execute(sql).fetchone()[0]
+                ratio = unique_row_count / total_rows if total_rows > 0 else 1.0
                 passed = ratio >= thresh
-                violations = total_rows - distinct_count
+                violations = total_rows - unique_row_count
                 results.append(ConstraintResult(
                     name=c["name"],
                     description=c["desc"],

@@ -26,16 +26,13 @@ import os
 import sys
 from datetime import date
 
-os.environ.setdefault("SPARK_VERSION", "3.5")
-
-from pydeequ.checks import Check, CheckLevel
-from pydeequ.verification import VerificationResult, VerificationSuite
 from pyspark.sql import DataFrame, functions as F
 from pyspark.sql import types as T
 
 import config
 from common.s3_utils import ensure_bucket
-from common.spark_session import build_spark_session_with_deequ, stop_spark_session_with_deequ
+from common.spark_session import build_spark_session
+from common.sql_assert import QualityCheck, QualityCheckError
 from pipeline.train_risk_model.features import apply_trip_filters, build_samples, read_rental
 from pipeline.train_risk_model.settings import load_config
 
@@ -53,10 +50,6 @@ SUSPENDED_BIKE_DAYS_SCHEMA = T.StructType([
     T.StructField("bike_id", T.StringType()),
     T.StructField("snapshot_date", T.DateType()),
 ])
-
-
-class GoldValidationError(Exception):
-    """PyDeequ 품질 검증 실패 - 이 예외는 배치를 즉시 중단시켜야 한다."""
 
 
 def _gold_table() -> str:
@@ -89,25 +82,16 @@ def _ensure_bike_features_daily_table(spark) -> None:
     )
 
 
-def _validate_bike_features_daily(spark, df) -> None:
-    check = Check(spark, CheckLevel.Error, "bike_features_daily_check")
-    result = (
-        VerificationSuite(spark)
-        .onData(df)
-        .addCheck(
-            check.isComplete("bike_id")
-            .hasUniqueness(["bike_id"], lambda fraction: fraction > 0.99)
-            .isComplete("trips")
-            .isComplete("trend_ratio")
-        )
-        .run()
+def _validate_bike_features_daily(df) -> None:
+    (
+        QualityCheck("bike_features_daily_check")
+        .is_complete("bike_id")
+        .is_complete("trips")
+        .is_complete("trend_ratio")
+        .has_uniqueness("bike_id", threshold=0.99)
+        .run(df.toPandas())
+        .raise_if_failed(QualityCheckError)
     )
-    result_df = VerificationResult.checkResultsAsDataFrame(spark, result)
-    result_df.show(truncate=False)
-
-    if result.status != "Success":
-        failed_constraints = [r["constraint"] for r in result_df.collect() if r["constraint_status"] != "Success"]
-        raise GoldValidationError(f"bike_features_daily 품질 검증 실패: {failed_constraints}")
 
 
 def _suspended_bike_days(spark, target_date: date, window_days: int) -> DataFrame:
@@ -170,7 +154,7 @@ def _process_date(spark, cfg, target_date: date) -> int:
     feat_df.writeTo(_gold_table()).overwritePartitions()
 
     written = spark.read.table(_gold_table()).filter(F.col("snapshot_date") == date_str)
-    _validate_bike_features_daily(spark, written)  # 실패 시 GoldValidationError -> 배치 중단
+    _validate_bike_features_daily(written)  # 실패 시 QualityCheckError -> 배치 중단
 
     logger.info("%s: 자전거 %d대 feature 산출", date_str, row_count)
     return row_count
@@ -181,7 +165,7 @@ def run() -> None:
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
     cfg = load_config()
-    spark = build_spark_session_with_deequ("gold-build-bike-features-daily")
+    spark = build_spark_session("gold-build-bike-features-daily")
     try:
         _ensure_bike_features_daily_table(spark)
 
@@ -190,11 +174,11 @@ def run() -> None:
 
         try:
             _process_date(spark, cfg, target_date)
-        except GoldValidationError as e:
+        except QualityCheckError as e:
             logger.error("%s 처리 실패, 배치 중단: %s", target_date, e)
             sys.exit(1)
     finally:
-        stop_spark_session_with_deequ(spark)
+        spark.stop()
 
 
 if __name__ == "__main__":

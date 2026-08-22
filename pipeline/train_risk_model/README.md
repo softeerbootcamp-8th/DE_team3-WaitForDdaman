@@ -73,7 +73,7 @@ window_days: 14 / horizon_days: 3 / exclude_recent_days: 30
 
 `train_and_evaluate` 태스크는 매 실행마다 `models.candidates`(`rule_trips`/`logreg`/`lgbm`) 전부를 학습·평가하지만, **승격 후보는 항상 `models.primary`(lgbm)로 고정**한다. `select_best()`가 고르는 "이번 평가 1등"은 리포트로만 로그에 남고 승격에는 안 쓰인다. 이유:
 
-- `rule_trips`는 `score()`가 확률이 아니라 trips 개수를 그대로 반환한다 - 그게 승격되면 `risk_score`가 0~100 범위를 벗어나 추론 쪽 PyDeequ 검증이 깨진다. 애초에 "rule 대조군이 발표 근거가 된다"(위 표 참고)는 리포트용 설계다.
+- `rule_trips`는 `score()`가 확률이 아니라 trips 개수를 그대로 반환한다 - 그게 승격되면 `risk_score`가 0~100 범위를 벗어나 추론 쪽 SQL 어서션 검증이 깨진다. 애초에 "rule 대조군이 발표 근거가 된다"(위 표 참고)는 리포트용 설계다.
 - `logreg`/`lgbm`처럼 둘 다 확률을 반환하는 타입끼리도 캘리브레이션(확률 분포)이 달라서, 재학습마다 champion 타입이 바뀌면 `risk_grade` 컷오프가 조용히 안 맞게 된다(에러 없이 등급만 이상해짐). 모델 아키텍처를 바꾸는 건 재학습이 자동으로 정할 일이 아니라 `models.primary`를 사람이 바꾸는 명시적 결정이어야 한다.
 
 ## 테스트 방법
