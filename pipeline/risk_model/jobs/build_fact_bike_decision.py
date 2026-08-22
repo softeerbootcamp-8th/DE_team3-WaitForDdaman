@@ -14,26 +14,19 @@ import os
 import sys
 from datetime import date
 
-os.environ.setdefault("SPARK_VERSION", "3.5")
-
-from pydeequ.checks import Check, CheckLevel
-from pydeequ.verification import VerificationResult, VerificationSuite
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
 import config
 from common.s3_utils import ensure_bucket
-from common.spark_session import build_spark_session_with_deequ, stop_spark_session_with_deequ
+from common.spark_session import build_spark_session
+from common.sql_assert import QualityCheck, QualityCheckError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 SUSPEND = "대여중단"
 HOLD = "보류"
-
-
-class GoldValidationError(Exception):
-    """PyDeequ 품질 검증 실패 - 이 예외는 배치를 즉시 중단시켜야 한다."""
 
 
 def _fact_bike_risk_table():
@@ -71,30 +64,24 @@ def _ensure_fact_bike_decision_table(spark) -> None:
     )
 
 
-def _validate_fact_bike_decision(spark, df, risk_df) -> None:
-    """오늘자 파티션만 검증한다 (OVERWRITE 구조)."""
-    check = Check(spark, CheckLevel.Error, "fact_bike_decision_check")
-    result = (
-        VerificationSuite(spark)
-        .onData(df)
-        .addCheck(
-            check.isComplete("bike_id")
-            .isComplete("action")
-            .isContainedIn("action", [SUSPEND, HOLD])
-        )
-        .run()
+def _validate_fact_bike_decision(df, risk_df) -> None:
+    """오늘자 파티션만 검증한다 (OVERWRITE 구조). Gold는 Spark를 벗어난 공용
+    common/sql_assert.py(#140)를 그대로 재사용한다 - DuckDB 기반이라 검증 직전에
+    pandas로 collect한다(Gold 스냅샷 단위 행 수라 부담 없음, build_fact_bike_risk.py의
+    기존 toPandas() 패턴과 동일)."""
+    (
+        QualityCheck("fact_bike_decision_check")
+        .is_complete("bike_id")
+        .is_complete("action")
+        .is_contained_in("action", [SUSPEND, HOLD])
+        .run(df.toPandas())
+        .raise_if_failed(QualityCheckError)
     )
-    result_df = VerificationResult.checkResultsAsDataFrame(spark, result)
-    result_df.show(truncate=False)
-
-    if result.status != "Success":
-        failed_constraints = [r["constraint"] for r in result_df.collect() if r["constraint_status"] != "Success"]
-        raise GoldValidationError(f"fact_bike_decision 품질 검증 실패: {failed_constraints}")
 
     # 참조 무결성: 오늘자 fact_bike_decision의 모든 bike_id는 오늘자 fact_bike_risk에도 있어야 한다.
     orphan_count = df.join(risk_df.select("bike_id"), on="bike_id", how="left_anti").count()
     if orphan_count > 0:
-        raise GoldValidationError(f"fact_bike_risk에 없는 bike_id {orphan_count}건 발견")
+        raise QualityCheckError(f"fact_bike_risk에 없는 bike_id {orphan_count}건 발견")
 
 
 def _process_date(spark, target_date):
@@ -157,7 +144,7 @@ def _process_date(spark, target_date):
     out_df.writeTo(_gold_table()).overwritePartitions()
 
     written = spark.read.table(_gold_table()).filter(F.col("snapshot_date") == date_str)
-    _validate_fact_bike_decision(spark, written, risk_df)  # 실패 시 GoldValidationError -> 배치 중단
+    _validate_fact_bike_decision(written, risk_df)  # 실패 시 QualityCheckError -> 배치 중단
 
     suspend_count = out_df.filter(F.col("action") == SUSPEND).count()
     logger.info("%s: 자전거 %d대 중 %d대 대여중단 결정", date_str, row_count, suspend_count)
@@ -168,7 +155,7 @@ def run():
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
-    spark = build_spark_session_with_deequ("gold-build-fact-bike-decision")
+    spark = build_spark_session("gold-build-fact-bike-decision")
     try:
         _ensure_fact_bike_decision_table(spark)
 
@@ -177,11 +164,11 @@ def run():
 
         try:
             _process_date(spark, target_date)
-        except GoldValidationError as e:
+        except QualityCheckError as e:
             logger.error("%s 처리 실패, 배치 중단: %s", target_date, e)
             sys.exit(1)
     finally:
-        stop_spark_session_with_deequ(spark)
+        spark.stop()
 
 
 if __name__ == "__main__":

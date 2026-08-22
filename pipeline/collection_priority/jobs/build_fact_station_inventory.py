@@ -50,9 +50,9 @@ Iceberg hidden partitioning(`days(occurred_at)`)을 쓰므로, 파생 표현식�
 원본 컬럼에 대한 범위 비교여야 파티션 프루닝이 확실히 걸린다.
 
 ### 전체 덮어쓰기 (TEMP류 입력에 의존하는 최신 상태)
-### 적재 전 PyDeequ 검증
+### 적재 전 품질 검증 (common/sql_assert.py, #146에서 PyDeequ 제거)
 build_dim_bike.py와 동일한 패턴으로 gold.bike_last_action/gold.fact_station_inventory
-둘 다 쓰기 전에 검증한다. 실패하면 GoldValidationError로 배치를 즉시 중단한다.
+둘 다 쓰기 전에 검증한다. 실패하면 QualityCheckError로 배치를 즉시 중단한다.
 
 사용법:
     python -m jobs.build_fact_station_inventory
@@ -68,14 +68,11 @@ from pyspark.sql.window import Window
 
 import config
 from common.s3_utils import ensure_bucket
-from common.spark_session import build_spark_session_with_deequ, stop_spark_session_with_deequ
+from common.spark_session import build_spark_session
+from common.sql_assert import QualityCheck, QualityCheckError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
-
-
-class GoldValidationError(Exception):
-    """PyDeequ 품질 검증 실패 - 이 예외는 배치를 즉시 중단시켜야 한다."""
 
 
 def _bike_location_table() -> str:
@@ -273,61 +270,30 @@ def build_fact_station_inventory(spark, snapshot_date: date, latest_action):
     return _aggregate_station_inventory(resolved, station_active, snapshot_date)
 
 
-def _validate_bike_last_action(spark, df) -> None:
+def _validate_bike_last_action(df) -> None:
     # bikeman_action(수거/배치) 이벤트가 아직 하나도 없는 환경(신규 배포 직후 등)에서는
-    # 이 결과가 통째로 0행일 수 있다 - 정상 상태다. PyDeequ의 hasUniqueness/isComplete는
-    # 빈 데이터셋에서 "값이 전부 NULL이었다"는 의미로 실패 처리해버리므로(실측으로 확인),
-    # 빈 경우엔 검증 자체를 스킵한다 - 안 그러면 실제로는 문제 없는 정상 배치가
-    # 이벤트 데이터가 아직 없다는 이유만으로 계속 막히게 된다.
-    if df.isEmpty():
-        logger.info("gold.bike_last_action 결과가 비어있음(bikeman_action 이벤트 없음) - PyDeequ 검증 스킵")
-        return
-
-    from pydeequ.checks import Check, CheckLevel
-    from pydeequ.verification import VerificationResult, VerificationSuite
-
-    check = Check(spark, CheckLevel.Error, "bike_last_action_check")
-    result = (
-        VerificationSuite(spark)
-        .onData(df)
-        .addCheck(check.hasUniqueness(["bike_id"], lambda fraction: fraction > 0.99).isComplete("bike_id"))
-        .run()
+    # 이 결과가 통째로 0행일 수 있다 - 정상 상태다. common/sql_assert.py(#140)는 0행에서
+    # 위반이 자연히 0건이라 별도 스킵 분기가 필요 없다.
+    (
+        QualityCheck("bike_last_action_check")
+        .is_complete("bike_id")
+        .has_uniqueness("bike_id", threshold=0.99)
+        .run(df.toPandas())
+        .raise_if_failed(QualityCheckError)
     )
-    result_df = VerificationResult.checkResultsAsDataFrame(spark, result)
-    result_df.show(truncate=False)
-
-    if result.status != "Success":
-        failed_constraints = [r["constraint"] for r in result_df.collect() if r["constraint_status"] != "Success"]
-        raise GoldValidationError(f"gold.bike_last_action 품질 검증 실패: {failed_constraints}")
 
 
-def _validate_fact_station_inventory(spark, df) -> None:
+def _validate_fact_station_inventory(df) -> None:
     # gold.station_active(운영 중 대여소)가 아직 없으면 이 결과도 0행일 수 있다 -
-    # bike_last_action과 동일한 이유로 빈 데이터셋에서는 PyDeequ 검증을 스킵한다.
-    if df.isEmpty():
-        logger.info("gold.fact_station_inventory 결과가 비어있음 - PyDeequ 검증 스킵")
-        return
-
-    from pydeequ.checks import Check, CheckLevel
-    from pydeequ.verification import VerificationResult, VerificationSuite
-
-    check = Check(spark, CheckLevel.Error, "fact_station_inventory_check")
-    result = (
-        VerificationSuite(spark)
-        .onData(df)
-        .addCheck(
-            check.hasUniqueness(["station_id"], lambda fraction: fraction > 0.99)
-            .isComplete("station_id")
-            .isNonNegative("bike_cnt")
-        )
-        .run()
+    # bike_last_action과 동일한 이유로 별도 스킵 분기가 필요 없다.
+    (
+        QualityCheck("fact_station_inventory_check")
+        .is_complete("station_id")
+        .is_non_negative("bike_cnt")
+        .has_uniqueness("station_id", threshold=0.99)
+        .run(df.toPandas())
+        .raise_if_failed(QualityCheckError)
     )
-    result_df = VerificationResult.checkResultsAsDataFrame(spark, result)
-    result_df.show(truncate=False)
-
-    if result.status != "Success":
-        failed_constraints = [r["constraint"] for r in result_df.collect() if r["constraint_status"] != "Success"]
-        raise GoldValidationError(f"gold.fact_station_inventory 품질 검증 실패: {failed_constraints}")
 
 
 def run() -> None:
@@ -337,7 +303,7 @@ def run() -> None:
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
-    spark = build_spark_session_with_deequ("gold-build-fact-station-inventory")
+    spark = build_spark_session("gold-build-fact-station-inventory")
     try:
         _ensure_gold_table(spark)
 
@@ -346,8 +312,8 @@ def run() -> None:
         latest_action = build_bike_last_action(spark, snapshot_date).cache()
         latest_action.count()
         try:
-            _validate_bike_last_action(spark, latest_action)
-        except GoldValidationError as e:
+            _validate_bike_last_action(latest_action)
+        except QualityCheckError as e:
             logger.error("%s: gold.bike_last_action 검증 실패, 적재 중단: %s", snapshot_date_str, e)
             latest_action.unpersist()
             sys.exit(1)
@@ -356,8 +322,8 @@ def run() -> None:
         out_df = build_fact_station_inventory(spark, snapshot_date, latest_action).cache()
         row_count = out_df.count()
         try:
-            _validate_fact_station_inventory(spark, out_df)
-        except GoldValidationError as e:
+            _validate_fact_station_inventory(out_df)
+        except QualityCheckError as e:
             logger.error("%s: gold.fact_station_inventory 검증 실패, 적재 중단: %s", snapshot_date_str, e)
             out_df.unpersist()
             latest_action.unpersist()
@@ -372,7 +338,7 @@ def run() -> None:
             snapshot_date_str, row_count,
         )
     finally:
-        stop_spark_session_with_deequ(spark)
+        spark.stop()
 
 
 if __name__ == "__main__":

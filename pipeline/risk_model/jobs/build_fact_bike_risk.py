@@ -17,17 +17,14 @@ import os
 import sys
 from datetime import date
 
-os.environ.setdefault("SPARK_VERSION", "3.5")
-
-from pydeequ.checks import Check, CheckLevel
-from pydeequ.verification import VerificationResult, VerificationSuite
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 from pyspark.sql.window import Window
 
 import config
 from common.s3_utils import ensure_bucket
-from common.spark_session import build_spark_session_with_deequ, stop_spark_session_with_deequ
+from common.spark_session import build_spark_session
+from common.sql_assert import QualityCheck, QualityCheckError
 from jobs.run_risk_scoring_model import load_model, score
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -42,10 +39,6 @@ OUTPUT_SCHEMA = T.StructType(
         T.StructField("model_version", T.StringType()),
     ]
 )
-
-
-class GoldValidationError(Exception):
-    """PyDeequ 품질 검증 실패 - 이 예외는 배치를 즉시 중단시켜야 한다."""
 
 
 def _bike_features_table() -> str:
@@ -78,28 +71,19 @@ def _ensure_fact_bike_risk_table(spark) -> None:
     )
 
 
-def _validate_fact_bike_risk(spark, df) -> None:
+def _validate_fact_bike_risk(df) -> None:
     """오늘자 파티션만 검증한다 (OVERWRITE 구조라 dim_bike처럼 테이블 전체를 볼 필요 없음)."""
-    check = Check(spark, CheckLevel.Error, "fact_bike_risk_check")
-    result = (
-        VerificationSuite(spark)
-        .onData(df)
-        .addCheck(
-            check.isComplete("bike_id")
-            .isComplete("risk_score")
-            .isComplete("risk_grade")
-            .hasUniqueness(["bike_id"], lambda fraction: fraction > 0.99)
-            .isContainedIn("risk_grade", ["Normal", "Warning", "Critical"])
-            .satisfies("risk_score >= 0 AND risk_score <= 100", "risk_score_range")
-        )
-        .run()
+    (
+        QualityCheck("fact_bike_risk_check")
+        .is_complete("bike_id")
+        .is_complete("risk_score")
+        .is_complete("risk_grade")
+        .is_contained_in("risk_grade", ["Normal", "Warning", "Critical"])
+        .satisfies("risk_score >= 0 AND risk_score <= 100", "risk_score_range")
+        .has_uniqueness("bike_id", threshold=0.99)
+        .run(df.toPandas())
+        .raise_if_failed(QualityCheckError)
     )
-    result_df = VerificationResult.checkResultsAsDataFrame(spark, result)
-    result_df.show(truncate=False)
-
-    if result.status != "Success":
-        failed_constraints = [r["constraint"] for r in result_df.collect() if r["constraint_status"] != "Success"]
-        raise GoldValidationError(f"fact_bike_risk 품질 검증 실패: {failed_constraints}")
 
     # Critical 컷오프를 상위 1%로 잡았으니, 실제 비율이 크게 벗어나면 모델/입력 데이터
     # 이상 신호다 (예: feature 스케일이 이상해서 다들 같은 leaf로 몰리는 경우).
@@ -162,7 +146,7 @@ def _process_date(spark, target_date: date) -> int:
     out_df.writeTo(_gold_table()).overwritePartitions()
 
     written = spark.read.table(_gold_table()).filter(F.col("snapshot_date") == date_str)
-    _validate_fact_bike_risk(spark, written)  # 실패 시 GoldValidationError -> 배치 중단
+    _validate_fact_bike_risk(written)  # 실패 시 QualityCheckError -> 배치 중단
 
     logger.info("%s: 자전거 %d대 risk_score 산출 (정비중 %d대 제외)", date_str, eligible_count, row_count - eligible_count)
     return eligible_count
@@ -172,7 +156,7 @@ def run() -> None:
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
-    spark = build_spark_session_with_deequ("gold-build-fact-bike-risk")
+    spark = build_spark_session("gold-build-fact-bike-risk")
     try:
         _ensure_fact_bike_risk_table(spark)
 
@@ -181,11 +165,11 @@ def run() -> None:
 
         try:
             _process_date(spark, target_date)
-        except GoldValidationError as e:
+        except QualityCheckError as e:
             logger.error("%s 처리 실패, 배치 중단: %s", target_date, e)
             sys.exit(1)
     finally:
-        stop_spark_session_with_deequ(spark)
+        spark.stop()
 
 
 if __name__ == "__main__":

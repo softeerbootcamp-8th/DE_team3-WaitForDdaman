@@ -52,10 +52,10 @@ gold.fact_station_inventory가 이 위치 정보와 silver.bikeman_action(수거
 Spark가 같은 테이블을 읽고 쓰는 도중 참조하려다 꼬일 수 있어 병합 결과를
 한 번 caching한 뒤 쓴다.
 
-### 적재 전 PyDeequ 검증
+### 적재 전 품질 검증 (common/sql_assert.py, #146에서 PyDeequ 제거)
 build_dim_bike.py와 동일한 패턴 - bike_id는 병합 키이므로 병합 결과에서 항상
 유일해야 하고(hasUniqueness), bike_id/snapshot_date는 결측이 있으면 안 된다.
-실패하면 GoldValidationError로 배치를 즉시 중단한다(적재 전 검증이므로 gold
+실패하면 QualityCheckError로 배치를 즉시 중단한다(적재 전 검증이므로 gold
 테이블에는 아무 영향 없음 - writeTo보다 먼저 검증함).
 
 사용법:
@@ -72,14 +72,11 @@ from pyspark.sql.window import Window
 
 import config
 from common.s3_utils import ensure_bucket
-from common.spark_session import build_spark_session_with_deequ, stop_spark_session_with_deequ
+from common.spark_session import build_spark_session
+from common.sql_assert import QualityCheck, QualityCheckError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
-
-
-class GoldValidationError(Exception):
-    """PyDeequ 품질 검증 실패 - 이 예외는 배치를 즉시 중단시켜야 한다."""
 
 
 def _silver_table() -> str:
@@ -176,36 +173,19 @@ def build_bike_location(spark, snapshot_date: date):
     return _merge_baseline_delta(baseline, delta, snapshot_date)
 
 
-def _validate_bike_location(spark, df) -> None:
+def _validate_bike_location(df) -> None:
     # 아직 반납 완료된 대여이력이 하나도 없는 환경(서비스 최초 구동 직후 등)에서는
-    # 이 결과도 0행일 수 있다. PyDeequ의 hasUniqueness/isComplete는 빈 데이터셋을
-    # "값이 전부 NULL이었다"로 취급해 실패 처리하므로(실측으로 확인), 빈 경우엔
-    # 검증을 스킵한다 - 그렇지 않으면 문제 없는 배치가 데이터가 아직 없다는
-    # 이유만으로 계속 막히게 된다.
-    if df.isEmpty():
-        logger.info("gold.bike_location 결과가 비어있음 - PyDeequ 검증 스킵")
-        return
-
-    from pydeequ.checks import Check, CheckLevel
-    from pydeequ.verification import VerificationResult, VerificationSuite
-
-    check = Check(spark, CheckLevel.Error, "bike_location_check")
-    result = (
-        VerificationSuite(spark)
-        .onData(df)
-        .addCheck(
-            check.hasUniqueness(["bike_id"], lambda fraction: fraction > 0.99)
-            .isComplete("bike_id")
-            .isComplete("snapshot_date")
-        )
-        .run()
+    # 이 결과도 0행일 수 있다. common/sql_assert.py(#140)는 0행에서 위반이 자연히
+    # 0건이라(과거 PyDeequ와 달리 빈 데이터셋을 실패로 취급하지 않음) 별도 스킵
+    # 분기가 필요 없다. DuckDB 기반이라 검증 직전에 pandas로 collect한다.
+    (
+        QualityCheck("bike_location_check")
+        .is_complete("bike_id")
+        .is_complete("snapshot_date")
+        .has_uniqueness("bike_id", threshold=0.99)
+        .run(df.toPandas())
+        .raise_if_failed(QualityCheckError)
     )
-    result_df = VerificationResult.checkResultsAsDataFrame(spark, result)
-    result_df.show(truncate=False)
-
-    if result.status != "Success":
-        failed_constraints = [r["constraint"] for r in result_df.collect() if r["constraint_status"] != "Success"]
-        raise GoldValidationError(f"gold.bike_location 품질 검증 실패: {failed_constraints}")
 
 
 def run() -> None:
@@ -215,15 +195,15 @@ def run() -> None:
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
-    spark = build_spark_session_with_deequ("gold-build-bike-location")
+    spark = build_spark_session("gold-build-bike-location")
     try:
         _ensure_gold_table(spark)
 
         out_df = build_bike_location(spark, snapshot_date).cache()
         row_count = out_df.count()
         try:
-            _validate_bike_location(spark, out_df)  # 실패 시 GoldValidationError -> 적재 없이 배치 중단
-        except GoldValidationError as e:
+            _validate_bike_location(out_df)  # 실패 시 QualityCheckError -> 적재 없이 배치 중단
+        except QualityCheckError as e:
             logger.error("%s: gold.bike_location 검증 실패, 적재 중단: %s", snapshot_date_str, e)
             sys.exit(1)
 
@@ -232,7 +212,7 @@ def run() -> None:
 
         logger.info("%s: gold.bike_location %d행 갱신 완료 (증분 처리)", snapshot_date_str, row_count)
     finally:
-        stop_spark_session_with_deequ(spark)
+        spark.stop()
 
 
 if __name__ == "__main__":
