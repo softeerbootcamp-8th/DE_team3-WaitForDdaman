@@ -44,10 +44,8 @@ bikeman_action 이벤트는 어떤 미래 실행에서도 다시는 스캔되지
 [직전 snapshot_date, 이번 snapshot_date - 1] 구간을 스캔한다 - 평소엔 하루뿐이라
 성능은 동일하고, 실행이 밀렸을 때만 구간이 넓어져 스스로 복구된다.
 
-occurred_at 비교는 `to_date(occurred_at) == 날짜` 대신 타임스탬프 범위
-(`occurred_at >= 시작 AND occurred_at < 끝+1일`)로 건다 - silver.bikeman_action은
-Iceberg hidden partitioning(`days(occurred_at)`)을 쓰므로, 파생 표현식이 아니라
-원본 컬럼에 대한 범위 비교여야 파티션 프루닝이 확실히 걸린다.
+`occurred_date_partition` identity 파티션 범위로 파일을 먼저 줄이고, 정확한 경계는
+기존처럼 occurred_at 타임스탬프 범위(`>= 시작 AND < 끝+1일`)로 다시 제한한다.
 
 ### 전체 덮어쓰기 (TEMP류 입력에 의존하는 최신 상태)
 ### 적재 전 품질 검증 (common/sql_assert.py, #146에서 PyDeequ 제거)
@@ -147,11 +145,15 @@ def _bike_last_action_delta(spark, start_date: date | None, end_date: date):
     하한 없이 end_date까지 전체를 스캔한다."""
     end_exclusive = datetime.combine(end_date + timedelta(days=1), time.min)
     bikeman_action_df = spark.read.table(_bikeman_action_table()).filter(
-        F.col("occurred_at") < F.lit(end_exclusive)
+        (F.col("occurred_date_partition") <= F.lit(end_date.isoformat()))
+        & (F.col("occurred_at") < F.lit(end_exclusive))
     )
     if start_date is not None:
         start_inclusive = datetime.combine(start_date, time.min)
-        bikeman_action_df = bikeman_action_df.filter(F.col("occurred_at") >= F.lit(start_inclusive))
+        bikeman_action_df = bikeman_action_df.filter(
+            (F.col("occurred_date_partition") >= F.lit(start_date.isoformat()))
+            & (F.col("occurred_at") >= F.lit(start_inclusive))
+        )
 
     window = Window.partitionBy("bike_id").orderBy(F.col("occurred_at").desc())
     return (

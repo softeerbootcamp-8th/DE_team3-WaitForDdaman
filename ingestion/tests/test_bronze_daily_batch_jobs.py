@@ -1,7 +1,7 @@
 """
 Bronze 일 배치 5개 잡 Spark 제거 및 PyArrow + PyIceberg 전환 테스트 (Issue #142)
 """
-from datetime import date
+from datetime import date, datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
@@ -11,10 +11,13 @@ from moto import mock_aws
 import config as config_module
 from common.api_client import fetch_rent_history_by_date_parallel
 from common.s3_utils import get_s3_client, put_json
+from jobs.daily_batch_bikeman_event import _build_arrow_table as build_bikeman_event_arrow
 from jobs.daily_batch_bikeman_event import _process_one_day as process_bikeman_event
 from jobs.daily_batch_failure_report import _process_one_day as process_failure_report
 from jobs.daily_batch_rental_history import _process_one_day as process_rental_history
+from jobs.daily_batch_station_active import _build_arrow_table as build_station_active_arrow
 from jobs.daily_batch_station_active import _process_snapshot as process_station_active
+from jobs.daily_batch_station_master import _build_arrow_table as build_station_master_arrow
 from jobs.daily_batch_station_master import _process_snapshot as process_station_master
 
 BUCKET = "test-bronze-batch-bucket"
@@ -102,6 +105,43 @@ def test_station_active_pure_arrow_write(s3_env):
     assert val == "2026-08-22"
 
 
+def test_station_active_arrow_matches_iceberg_ingested_at_type():
+    table = build_station_active_arrow(
+        [{
+            "stationId": "ST-4",
+            "stationName": "망원역",
+            "rackTotCnt": "15",
+            "parkingBikeTotCnt": "5",
+            "shared": "33",
+            "stationLatitude": "37.55",
+            "stationLongitude": "126.91",
+        }],
+        "2026-08-22",
+    )
+
+    assert table.schema.field("ingested_at").type == pa.timestamp("us", tz="UTC")
+
+
+def test_station_master_arrow_matches_iceberg_ingested_at_type():
+    table = build_station_master_arrow(
+        [{
+            "STA_LOC": "마포구",
+            "RENT_ID": "ST-10",
+            "RENT_NO": "00108",
+            "RENT_NM": "서교동",
+            "RENT_ID_NM": "108. 서교동",
+            "HOLD_NUM": "10",
+            "STA_ADD1": "서울시",
+            "STA_ADD2": "마포구",
+            "STA_LAT": "37.5",
+            "STA_LONG": "126.9",
+        }],
+        "2026-08-22",
+    )
+
+    assert table.schema.field("ingested_at").type == pa.timestamp("us", tz="UTC")
+
+
 def test_rental_history_parallel_fetch_and_arrow_write(s3_env):
     sample_rows = [
         {
@@ -186,3 +226,23 @@ def test_bikeman_event_valid_and_quarantine_split(s3_env):
 
     mock_append.assert_called_once()  # 1 quarantined row
     assert mock_append.call_args[0][0] == "bronze.bikeman_event_quarantine"
+
+
+def test_bikeman_event_arrow_matches_iceberg_timestamp_types():
+    table = build_bikeman_event_arrow(
+        [{
+            "event_id": "EV-1",
+            "event_type": "COLLECT",
+            "bike_id": "SPB-001",
+            "station_id": "ST-10",
+            "worker_id": "W-1",
+            "occurred_at": datetime(2026, 8, 21, 9, 0, tzinfo=timezone.utc),
+            "received_at": datetime(2026, 8, 21, 9, 1, tzinfo=timezone.utc),
+        }],
+        "2026-08-21",
+    )
+
+    expected = pa.timestamp("us", tz="UTC")
+    assert table.schema.field("occurred_at").type == expected
+    assert table.schema.field("received_at").type == expected
+    assert table.schema.field("ingested_at").type == expected

@@ -105,7 +105,10 @@ def _currently_collected_bike_ids(spark, as_of: date):
     아직 없으면 자연히 아무도 안 걸러지므로, 원안의 4-a(필터 스킵)와 4-b(필터 적용)가
     실질적으로 같은 코드가 된다. 그래서 DAG에는 두 이름이 남아있지만 여기 함수는 하나뿐이다.
     """
-    actions = spark.read.table(_bikeman_action_table()).filter(F.col("occurred_at") <= F.lit(str(as_of)))
+    actions = spark.read.table(_bikeman_action_table()).filter(
+        (F.col("occurred_date_partition") <= F.lit(as_of.isoformat()))
+        & (F.col("occurred_at") <= F.lit(str(as_of)))
+    )
     w = Window.partitionBy("bike_id").orderBy(F.col("occurred_at").desc())
     latest = (
         actions.withColumn("rn", F.row_number().over(w))

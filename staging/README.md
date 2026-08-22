@@ -2,15 +2,28 @@
 
 Bronze / Silver 생성
 
-- Spark ETL
+- DuckDB(변환) + PyIceberg(입출력) ETL. Spark 세션을 쓰지 않는다 (#143)
+  - 볼륨상 엔진이 필요한 건 `transform_silver_rental_history`의 중복 제거 윈도우뿐이고,
+    나머지는 기존 Spark SQL 표현을 번역 오류 없이 옮기려고 같은 SQL 엔진으로 통일했다
+  - 공통 모듈은 `ingestion/common/`을 그대로 재사용한다
+    (`iceberg_catalog`, `iceberg_io`, `duckdb_io`, `sql_assert`, `partition_listing`, `watermark`)
+  - 별도 requirements 파일이 없다 - `duckdb` / `pyarrow` / `pyiceberg`는 이미
+    `ingestion/requirements.txt`에 있고 컨테이너 이미지가 그걸 설치한다
 
 ## jobs
 
-- `transform_silver_rental_history.py`: `bronze.rental_history` -> `silver.rental_history` 타입 캐스팅 + PyDeequ 검증 (대여이력 전용, 워터마크 기반 증분 처리)
+- `transform_silver_rental_history.py`: `bronze.rental_history` -> `silver.rental_history` 타입 캐스팅 + 품질 검증 (`common/sql_assert.py`, PyDeequ 대체) (대여이력 전용, 워터마크 기반 증분 처리)
   - 컬럼: `bike_id`, `rent_dt`, `return_dt`, `use_distance_m`, `rent_station_id`, `return_station_id`, `rent_date_partition`, `source_file`, `ingested_at`(Bronze lineage 승계)
   - `rent_dt`/`return_dt`는 소스(API/CSV 백필)마다 포맷이 달라 알려진 포맷을 순서대로 시도하고, 전부 실패하면 배치를 중단시킴(조용히 드롭/오염 방지)
   - 상한선: Bronze 워터마크(`_meta/watermark/rental_history.json`), 하한선: Silver 전용 워터마크(`config/watermark_keys.py`의 `SILVER_RENTAL_HISTORY`)
   - `MAX_DAYS_PER_RUN` 미지정 시 기본 31일로 캡됨(`DEFAULT_MAX_DAYS_PER_RUN`) - 워터마크가 오래 밀린 채 처음 돌아도 통째로 큰 배치가 되지 않게 함
+  - 중복 제거 윈도우 `(bike_id, rent_dt)`는 하루 안에서 닫힌다(`rent_date_partition`이 `rent_dt`에서 파생됨) - 날짜 청크로 나눠 여러 번 돌려도 결과가 같다. 정렬키를 전순서로 잡아 재실행 결과가 값까지 동일하다
+
+- `silver_failure_report.py`: `bronze.failure_report` -> `silver.failure_report` 전체 재처리 (워터마크로 구간을 자르지 않음, 태스크 1개)
+  - 컬럼: `bike_no`, `reg_dttm`, `failure_type` + 파티션 컬럼 `reg_date_partition`
+  - **파티션 `reg_date_partition`(identity, `yyyy-MM-dd` = `date(reg_dttm)`)** - 브론즈의 동명 컬럼(적재일)과 의미가 다르다. Gold 담당자와의 인터페이스 계약
+
+- `silver_station_master.py`: `bronze.station_master`(api 파티션만) -> `silver.station_master` 타입 캐스팅 + region 파생 + 대여소명 공백 정규화
 
 - `silver_station_active.py`: `bronze.station_active` -> `silver.station_active` station_id 필터 테이블 (날짜 파라미터 없는 전체 스냅샷, 워터마크 없음)
   - 컬럼: `snapshot_date`, `station_id` 두 개뿐 — 대여소명/위경도/자치구 등은 `silver.station_master`에서 station_id로 조인해서 사용
@@ -55,6 +68,6 @@ SNAPSHOT_DATE=2026-08-14 python -m jobs.silver_station_active   # 특정 날짜 
 | 파티션 | `snapshot_date` |
 | 의미 | 그 날 station_id가 있으면 = 그 날 실시간 대여정보 API 응답에 실제로 잡힌 대여소 (운영 중 최종 판정은 Gold 몫) |
 | NULL 처리 | station_id 없는/중복 행은 Silver에서 이미 제거됨 |
-| 재실행 동작 | 같은 snapshot_date 파티션을 덮어씀(`overwritePartitions`), 멱등 |
+| 재실행 동작 | 같은 snapshot_date 파티션을 덮어씀(`common/iceberg_io.py`의 `overwrite_partition`), 멱등 |
 | 적재 완료 시점 | `silver_station_active_daily` DAG, 매일 07:00 KST |
 | 다른 속성 필요시 | `silver.station_master`를 `station_id`로 조인 |

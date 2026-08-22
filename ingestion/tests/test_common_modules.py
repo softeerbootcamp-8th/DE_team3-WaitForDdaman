@@ -8,7 +8,8 @@ import pytest
 from moto import mock_aws
 
 import config as config_module
-from common.iceberg_io import append, overwrite_partition
+from common.duckdb_io import query_arrow
+from common.iceberg_io import append, overwrite_all, overwrite_partition
 from common.partition_listing import (
     get_table_data_prefix,
     list_partitions,
@@ -104,6 +105,54 @@ def test_iceberg_io_append():
 
     append("bronze.quarantine", sample_arrow, catalog=mock_catalog)
     mock_table.append.assert_called_once_with(sample_arrow)
+
+
+def test_iceberg_io_overwrite_all():
+    """전량 교체 - overwrite_filter를 안 넘겨서 테이블 전체가 대체되게 한다 (#143)."""
+    mock_table = MagicMock()
+    mock_table.name.return_value = "silver.failure_report"
+
+    mock_catalog = MagicMock()
+    mock_catalog.load_table.return_value = mock_table
+
+    sample_arrow = pa.table({"bike_no": ["SPB-1"], "reg_date_partition": ["2026-08-22"]})
+
+    overwrite_all("silver.failure_report", sample_arrow, catalog=mock_catalog)
+
+    mock_table.overwrite.assert_called_once_with(sample_arrow)
+
+
+# ------------------------------------------------------------------------------
+# duckdb_io Tests
+# ------------------------------------------------------------------------------
+def test_query_arrow_returns_materialized_table():
+    """
+    duckdb 버전에 따라 .arrow()가 RecordBatchReader를 돌려주는데, 그걸 같은 커넥션에
+    다시 register하면 교착이 난다(실측). query_arrow는 항상 pa.Table을 준다.
+    """
+    import duckdb
+
+    con = duckdb.connect(":memory:")
+    con.register("src", pa.table({"a": [1, 2, 3]}))
+
+    result = query_arrow(con, "SELECT a FROM src WHERE a > 1")
+
+    assert isinstance(result, pa.Table)
+    assert result.column("a").to_pylist() == [2, 3]
+
+    # 결과를 같은 커넥션에 다시 등록해서 이어 질의해도 멈추지 않아야 한다
+    con.register("step2", result)
+    assert query_arrow(con, "SELECT count(*) AS n FROM step2").column("n").to_pylist() == [2]
+
+
+def test_query_arrow_accepts_parameters():
+    import duckdb
+
+    con = duckdb.connect(":memory:")
+    con.register("src", pa.table({"a": [1, 2, 3]}))
+
+    result = query_arrow(con, "SELECT a FROM src WHERE a = ?", [2])
+    assert result.column("a").to_pylist() == [2]
 
 
 # ------------------------------------------------------------------------------

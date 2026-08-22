@@ -45,13 +45,26 @@ from schema.station_active_schema import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+ARROW_SCHEMA = pa.schema([
+    pa.field("station_id", pa.string()),
+    pa.field("station_name", pa.string()),
+    pa.field("rack_tot_cnt", pa.string()),
+    pa.field("parking_bike_tot_cnt", pa.string()),
+    pa.field("shared", pa.string()),
+    pa.field("latitude", pa.string()),
+    pa.field("longitude", pa.string()),
+    pa.field("snapshot_date", pa.string()),
+    pa.field("source_file", pa.string()),
+    pa.field("ingested_at", pa.timestamp("us", tz="UTC")),
+])
+
 
 def _table_name() -> str:
     return "bronze.station_active"
 
 
 def _build_arrow_table(rows: List[Dict[str, Any]], snapshot_date: str) -> pa.Table:
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    ingested_at = datetime.now(timezone.utc)
     source_file_val = f"api:{snapshot_date}"
 
     cols: Dict[str, list] = {
@@ -77,9 +90,9 @@ def _build_arrow_table(rows: List[Dict[str, Any]], snapshot_date: str) -> pa.Tab
         cols["longitude"].append(str(r.get("stationLongitude") or r.get("longitude") or "") or None)
         cols["snapshot_date"].append(snapshot_date)
         cols["source_file"].append(source_file_val)
-        cols["ingested_at"].append(now_iso)
+        cols["ingested_at"].append(ingested_at)
 
-    return pa.table(cols)
+    return pa.table(cols, schema=ARROW_SCHEMA)
 
 
 def _process_snapshot(snapshot_date: str) -> int:
