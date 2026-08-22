@@ -25,6 +25,7 @@ jobs:
       has_python: ${{ steps.check.outputs.has_python }}
       has_web: ${{ steps.check.outputs.has_web }}
       has_prod_dockerfiles: ${{ steps.check.outputs.has_prod_dockerfiles }}
+      has_api: ${{ steps.check.outputs.has_api }}
     steps:
       - uses: actions/checkout@v4
 
@@ -49,10 +50,16 @@ jobs:
             has_prod=true
           fi
 
+          has_api=false
+          if [ -f services/api/requirements-dev.txt ] && [ -d services/api/tests ]; then
+            has_api=true
+          fi
+
           echo "has_python=$has_python" >> "$GITHUB_OUTPUT"
           echo "has_web=$has_web" >> "$GITHUB_OUTPUT"
           echo "has_prod_dockerfiles=$has_prod" >> "$GITHUB_OUTPUT"
-          echo "has_python=$has_python  has_web=$has_web  has_prod_dockerfiles=$has_prod"
+          echo "has_api=$has_api" >> "$GITHUB_OUTPUT"
+          echo "has_python=$has_python  has_web=$has_web  has_prod_dockerfiles=$has_prod  has_api=$has_api"
 
   python-tests:
     needs: detect-layout
@@ -114,6 +121,30 @@ jobs:
           echo "::group::pipeline/train_risk_model"
           PYTHONPATH="$ROOT" pytest pipeline/train_risk_model/test_risk_model.py -q
           echo "::endgroup::"
+
+  api-tests:
+    needs: detect-layout
+    if: needs.detect-layout.outputs.has_api == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # services/api/Dockerfile(.prod)이 python:3.11-slim이라 런타임과 같은 마이너
+      # 버전으로 맞춘다.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # requirements-dev.txt가 `-r requirements.txt`로 런타임 의존성을 끌어온다
+      # (pip은 이 상대 경로를 requirements 파일 기준으로 해석한다).
+      - name: Install Python deps
+        run: pip install --no-cache-dir -r services/api/requirements-dev.txt
+
+      # app이 `services.api.app.*` 절대 임포트를 쓰는데 services/ 와 services/api/ 에
+      # __init__.py가 없어 네임스페이스 패키지로 해석된다 - 저장소 루트가
+      # PYTHONPATH에 있어야 import가 된다. seed_dim_district.py도 같은 전제로 동작한다.
+      - name: Run tests
+        run: PYTHONPATH="$GITHUB_WORKSPACE" pytest services/api/tests -q
 
   web-lint-build:
     needs: detect-layout
