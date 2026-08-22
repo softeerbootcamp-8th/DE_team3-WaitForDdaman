@@ -20,20 +20,26 @@ serving.bike_risk_daily에서 action 컬럼이 제거된 뒤에는 최신 snapsh
 상위 500대를 COLLECT 대상으로 삼는다. 세부 설계는
 docs/superpowers/specs/2026-08-18-bikeman-event-generator-design.md 참고.
 """
+import json
 import os
 import sys
 from datetime import timedelta
 
 import pendulum
 import requests
-from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.amazon.aws.operators.lambda_function import LambdaInvokeFunctionOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import dag
 
 SERVING_SYNC_DIR = "/opt/airflow/pipeline/serving_sync"
 INGESTION_DIR = "/opt/airflow/ingestion"
-PYTHON = "python"
+
+# write_*/verify_* 4개 태스크가 부르는 Lambda 함수 이름 - infra/terraform/serving_sync.tf의
+# aws_lambda_function.function_name과 반드시 같아야 한다 (#172).
+WRITE_BIKE_RISK_DAILY_LAMBDA = "serving-sync-write-bike-risk-daily"
+WRITE_STATION_DAILY_LAMBDA = "serving-sync-write-station-daily"
+VERIFY_SERVING_SYNC_LAMBDA = "serving-sync-verify"
 
 
 def _load_ingestion_env(env_path: str) -> None:
@@ -103,22 +109,14 @@ def _notify_slack_on_failure(context: dict) -> None:
 default_args["on_failure_callback"] = _notify_slack_on_failure
 
 
-def _bash(job_module: str, extra_env: str = "") -> str:
-    return (
-        f"cd {SERVING_SYNC_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
-        f"PYTHONPATH={INGESTION_DIR}:{SERVING_SYNC_DIR}/jobs:$PYTHONPATH "
-        f"PYTHONDONTWRITEBYTECODE=1 {extra_env}{PYTHON} -m jobs.{job_module}"
-    )
-
-
-def _verify_bash(iceberg_table: str, postgres_table: str) -> str:
-    # gold_risk_decision이 conf로 넘긴 snapshot_date가 있으면 그걸 우선한다 (아래
-    # SNAPSHOT_DATE 주석 참고) - 없으면(수동 트리거 등) 이 DAG 자신의 ds로 폴백.
-    return _bash(
-        "verify_serving_sync",
-        f"ICEBERG_TABLE=bike_catalog.gold.{iceberg_table} POSTGRES_TABLE={postgres_table} "
-        "SNAPSHOT_DATE='{{ dag_run.conf.get(\"snapshot_date\") or ds }}' ",
-    )
+def _lambda_payload(**extra: str) -> str:
+    """LambdaInvokeFunctionOperator의 payload(JSON 문자열)를 만든다. snapshot_date는
+    항상 포함하고, gold_risk_decision이 conf로 넘긴 값을 자기 ds보다 우선한다(아래
+    태스크 정의 주석과 동일한 규칙) - Jinja 렌더링은 Airflow가 payload 필드 전체를
+    템플릿으로 처리할 때 일어나므로, 여기서는 렌더 전 원본 표현식을 그대로 넣는다."""
+    payload = dict(extra)
+    payload["snapshot_date"] = "{{ dag_run.conf.get('snapshot_date') or ds }}"
+    return json.dumps(payload)
 
 
 @dag(
@@ -142,14 +140,21 @@ def gold_to_serving_sync():
         op_kwargs={"snapshot_date": "{{ dag_run.conf.get(\"snapshot_date\") or ds }}"},
         execution_timeout=timedelta(minutes=20),
     )
-    write_bike_risk_daily = BashOperator(
+    write_bike_risk_daily = LambdaInvokeFunctionOperator(
         task_id="write_bike_risk_daily",
-        bash_command=_bash("write_bike_risk_daily", "SNAPSHOT_DATE='{{ dag_run.conf.get(\"snapshot_date\") or ds }}' "),
+        function_name=WRITE_BIKE_RISK_DAILY_LAMBDA,
+        invocation_type="RequestResponse",  # 비동기면 Lambda 자체 재시도가 붙어 DELETE+INSERT가 두 번 돌 수 있음
+        payload=_lambda_payload(),
         execution_timeout=timedelta(minutes=15),
     )
-    verify_bike_risk_daily_sync = BashOperator(
+    verify_bike_risk_daily_sync = LambdaInvokeFunctionOperator(
         task_id="verify_bike_risk_daily_sync",
-        bash_command=_verify_bash("mart_bike_risk_daily", "bike_risk_daily"),
+        function_name=VERIFY_SERVING_SYNC_LAMBDA,
+        invocation_type="RequestResponse",
+        payload=_lambda_payload(
+            iceberg_table="bike_catalog.gold.mart_bike_risk_daily",
+            postgres_table="bike_risk_daily",
+        ),
         execution_timeout=timedelta(minutes=10),
     )
     trigger_bikeman_event_generator = TriggerDagRunOperator(
@@ -174,14 +179,21 @@ def gold_to_serving_sync():
         op_kwargs={"snapshot_date": "{{ dag_run.conf.get(\"snapshot_date\") or ds }}"},
         execution_timeout=timedelta(minutes=20),
     )
-    write_station_daily = BashOperator(
+    write_station_daily = LambdaInvokeFunctionOperator(
         task_id="write_station_daily",
-        bash_command=_bash("write_station_daily", "SNAPSHOT_DATE='{{ dag_run.conf.get(\"snapshot_date\") or ds }}' "),
+        function_name=WRITE_STATION_DAILY_LAMBDA,
+        invocation_type="RequestResponse",
+        payload=_lambda_payload(),
         execution_timeout=timedelta(minutes=15),
     )
-    verify_station_daily_sync = BashOperator(
+    verify_station_daily_sync = LambdaInvokeFunctionOperator(
         task_id="verify_station_daily_sync",
-        bash_command=_verify_bash("mart_station_daily", "station_daily"),
+        function_name=VERIFY_SERVING_SYNC_LAMBDA,
+        invocation_type="RequestResponse",
+        payload=_lambda_payload(
+            iceberg_table="bike_catalog.gold.mart_station_daily",
+            postgres_table="station_daily",
+        ),
         execution_timeout=timedelta(minutes=10),
     )
 

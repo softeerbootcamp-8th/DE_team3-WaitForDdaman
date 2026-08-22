@@ -1,0 +1,8 @@
+# write_bike_risk_daily / write_station_daily / verify_serving_sync가 실제로 쓰는
+# 것만 담는다 - DuckDB는 이 3개 잡 어디서도 쓰지 않아서(#172 전환 후 pyiceberg 스캔
+# 결과를 바로 psycopg2로 넘김) 뺐다. ingestion/requirements.txt의 버전과 맞춘다.
+pyiceberg[sql-postgres]==0.11.1
+pyarrow>=14.0.0
+pandas>=2.0
+psycopg2-binary>=2.9
+boto3>=1.34
