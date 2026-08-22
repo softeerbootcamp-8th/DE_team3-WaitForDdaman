@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [production, develop, services]
+
+jobs:
+  # 세 base 브랜치의 레이아웃이 서로 겹치지 않는 반쪽이다 - develop엔 파이썬
+  # 파이프라인만(ingestion/airflow/staging/pipeline), services엔 services/(web·api)만,
+  # production엔 둘 다 + *.Dockerfile.prod. 브랜치마다 잡을 지워서 맞추면 같은 경로의
+  # 파일이 브랜치별로 달라져 release/develop-to-production PR마다 add/add 충돌이 나고,
+  # 충돌을 잘못 해결해 게이트가 빠져도 develop은 자기 사본으로 계속 잘 돌기 때문에
+  # production의 퇴행을 아무도 눈치채지 못한다. 그래서 파일은 세 브랜치에서 동일하게
+  # 두고, 잡은 파일 존재 여부로 켜고 끈다 - 계열이 합쳐지면 해당 잡이 자동으로 켜진다.
+  #
+  # 이 판정을 잡 레벨 `if: hashFiles(...)`로 못 하는 이유: 잡 레벨 if는 체크아웃 전에
+  # 평가되고 그 시점엔 워크스페이스가 비어 있어서 hashFiles가 항상 ''를 돌려준다.
+  # 그래서 체크아웃하는 별도 잡의 output으로 넘긴다.
+  #
+  # paths 필터를 쓰지 않는 이유: required status check와 조합하면 paths로 스킵된 체크가
+  # pending으로 남아 머지가 영구히 막힌다. 잡 스킵(if: false)은 그 문제가 없다.
+  detect-layout:
+    runs-on: ubuntu-latest
+    outputs:
+      has_python: ${{ steps.check.outputs.has_python }}
+      has_web: ${{ steps.check.outputs.has_web }}
+      has_prod_dockerfiles: ${{ steps.check.outputs.has_prod_dockerfiles }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # `[ -f x ] && v=true` 형태로 쓰면 파일이 없을 때 이 스텝의 종료코드가 1이 되어
+      # bash -e로 실행되는 스텝 자체가 실패한다. if 블록으로 쓴다.
+      - id: check
+        run: |
+          has_python=false
+          if [ -f ingestion/requirements.txt ] && [ -f airflow/requirements.txt ]; then
+            has_python=true
+          fi
+
+          has_web=false
+          if [ -f services/web/package-lock.json ]; then
+            has_web=true
+          fi
+
+          has_prod=false
+          if [ -f airflow/Dockerfile.prod ] \
+             && [ -f services/api/Dockerfile.prod ] \
+             && [ -f services/web/Dockerfile.prod ]; then
+            has_prod=true
+          fi
+
+          echo "has_python=$has_python" >> "$GITHUB_OUTPUT"
+          echo "has_web=$has_web" >> "$GITHUB_OUTPUT"
+          echo "has_prod_dockerfiles=$has_prod" >> "$GITHUB_OUTPUT"
+          echo "has_python=$has_python  has_web=$has_web  has_prod_dockerfiles=$has_prod"
+
+  python-tests:
+    needs: detect-layout
+    if: needs.detect-layout.outputs.has_python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system deps (libgomp1 for lightgbm)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
+
+      - name: Install Python deps
+        run: |
+          pip install --no-cache-dir -r ingestion/requirements.txt
+          pip install --no-cache-dir -r airflow/requirements.txt
+
+      # 각 모듈 테스트는 해당 디렉터리를 cwd로 두고 import하도록 작성되어 있어서
+      # (ingestion/tests는 `from schema...`, staging/tests는 `from common...`,
+      # pipeline/*/tests는 jobs/ 안의 모듈을 직접 import) 저장소 루트에서 한 번에
+      # 돌리면 ModuleNotFoundError로 수집 자체가 실패한다. 모듈별로 cwd와
+      # PYTHONPATH를 맞춰 실행한다 - 각 모듈 README에 문서화된 방식과 동일.
+      #
+      # PYSPARK_PYTHON을 명시하는 이유: 안 잡아주면 Spark 워커가 드라이버와 다른
+      # 파이썬(시스템 기본)을 집어서 PYTHON_VERSION_MISMATCH로 전부 실패한다.
+      - name: Run tests
+        env:
+          ROOT: ${{ github.workspace }}
+        run: |
+          set -e
+          export PYSPARK_PYTHON="$(which python)"
+          export PYSPARK_DRIVER_PYTHON="$PYSPARK_PYTHON"
+
+          echo "::group::ingestion"
+          (cd ingestion && PYTHONPATH="$ROOT:$ROOT/ingestion" pytest tests -q)
+          echo "::endgroup::"
+
+          echo "::group::staging"
+          (cd staging && PYTHONPATH="$ROOT:$ROOT/ingestion:$ROOT/staging" pytest tests -q)
+          echo "::endgroup::"
+
+          for mod in bikeman_event_generator serving_sync collection_priority; do
+            echo "::group::pipeline/$mod"
+            (cd "pipeline/$mod" && PYTHONPATH="$ROOT/pipeline/$mod:$ROOT/pipeline/$mod/jobs:$ROOT:$ROOT/ingestion" pytest tests -q)
+            echo "::endgroup::"
+          done
+
+          # train_risk_model만 규칙이 다르다: tests/ 디렉터리가 아니라 모듈 루트에
+          # test_risk_model.py가 있고, `from pipeline.train_risk_model...` 절대
+          # 임포트를 써서 저장소 루트를 cwd/PYTHONPATH로 둬야 한다.
+          echo "::group::pipeline/train_risk_model"
+          PYTHONPATH="$ROOT" pytest pipeline/train_risk_model/test_risk_model.py -q
+          echo "::endgroup::"
+
+  web-lint-build:
+    needs: detect-layout
+    if: needs.detect-layout.outputs.has_web == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: services/web/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  docker-build-check:
+    needs: detect-layout
+    if: needs.detect-layout.outputs.has_prod_dockerfiles == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build airflow prod image (no push)
+        run: docker build -f airflow/Dockerfile.prod -t ci-check-airflow .
+
+      - name: Build api prod image (no push)
+        run: docker build -f services/api/Dockerfile.prod -t ci-check-api .
+
+      - name: Build web prod image (no push)
+        run: docker build -f services/web/Dockerfile.prod -t ci-check-web services/web
