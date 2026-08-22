@@ -82,12 +82,10 @@ def resolve_anchors(cfg, as_of_end: str | date | None = None, label_ready_max: d
 def detect_label_ready_max(cfg) -> dict:
     """고장신고 최신일 - horizon = 라벨 확정 한계. 대여이력 최신일도 함께 본다.
 
-    피처 계산이 아니라 "원천이 어디까지 들어와 있나"만 확인하는 함수라 Spark/DuckDB
-    엔진 패리티가 필요 없다 - ft.read_fault/read_rental(SqlEngine 필수) 대신
-    common.partition_listing(boto3, #140)으로 파티션 디렉터리만 나열해서 구한다.
+    Spark 세션 없이 Iceberg 파티션 디렉터리(boto3)만 나열해서 구한다 (#148).
     fault/rent 둘 다 날짜 identity 파티션(reg_date_partition/rent_date_partition)
-    이라 파티션 디렉터리 존재 여부가 곧 "그 날짜에 데이터가 있다"와 같다 - 파티션을
-    지우는 잡이 없어 오탐이 없다.
+    이라 파티션 디렉터리 존재 여부가 곧 "그 날짜에 데이터가 있다"와 같다 — 파티션을
+    지우는 잡이 없어 오탐이 없다 (common/partition_listing.py 참고).
     """
     from common.partition_listing import list_partitions
 

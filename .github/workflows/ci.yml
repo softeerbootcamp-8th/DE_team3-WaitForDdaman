@@ -141,10 +141,14 @@ jobs:
           done
 
           # train_risk_model만 규칙이 다르다: tests/ 디렉터리가 아니라 모듈 루트에
-          # test_*.py가 있고, `from pipeline.train_risk_model...` 절대 임포트를 써서
-          # 저장소 루트를 cwd/PYTHONPATH로 둬야 한다. sql_engine.py가
-          # common.duckdb_io(ingestion/common)를 쓰므로 다른 pipeline 스텝들과 동일하게
-          # $ROOT/ingestion도 PYTHONPATH에 넣는다 (#149).
+          # test_risk_model.py가 있고, `from pipeline.train_risk_model...` 절대
+          # 임포트를 써서 저장소 루트를 cwd/PYTHONPATH로 둬야 한다.
+          # $ROOT/ingestion도 필요하다 - #148로 resolve_anchors가 common.partition_listing
+          # (bare import, ingestion/common/s3_utils.py를 그 안에서 또 bare import)을
+          # 쓰게 되면서, 다른 pipeline/* 모듈들과 동일하게 ingestion을 경로에 얹어야 한다.
+          # #149: sql_engine.py도 common.duckdb_io(ingestion/common)를 쓰고, 이 PR이
+          # 추가한 parity 테스트(test_features_parity.py 등)가 test_risk_model.py 밖에
+          # 있어서 대상을 모듈 루트 전체로 넓힌다.
           echo "::group::pipeline/train_risk_model"
           PYTHONPATH="$ROOT:$ROOT/ingestion" pytest pipeline/train_risk_model/ -q
           echo "::endgroup::"
