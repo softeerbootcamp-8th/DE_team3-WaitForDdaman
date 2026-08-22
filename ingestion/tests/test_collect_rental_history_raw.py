@@ -307,3 +307,127 @@ def test_run_fails_after_all_windows_when_any_snapshot_is_unusable(monkeypatch):
         raw_job.run()
 
     assert processed_dates == [date(2026, 8, 21), date(2026, 8, 22)]
+
+
+def _fake_collect(calls, status_by_date=None):
+    """collect_snapshot 호출 인자를 기록하고 날짜별로 미리 정한 manifest를 돌려준다."""
+
+    def fake_collect_snapshot(
+        target_date,
+        hours,
+        observed_at,
+        snapshot_type,
+        fetch_pages,
+        write_json,
+        read_json,
+    ):
+        calls.append((target_date, hours, observed_at.isoformat(), snapshot_type))
+        status = (status_by_date or {}).get(target_date, "COMPLETE")
+        return {
+            "target_date": target_date.isoformat(),
+            "status": status,
+            "schema_valid": status == "COMPLETE",
+        }
+
+    return fake_collect_snapshot
+
+
+def test_final_run_reads_confirmed_watermark_and_collects_oldest_capped_backlog(
+    monkeypatch,
+):
+    calls = []
+
+    monkeypatch.setenv("COLLECTION_CUTOFF_AT", "2026-08-22T06:00:00+09:00")
+    monkeypatch.setenv("SNAPSHOT_TYPE", "FINAL")
+    monkeypatch.setenv("MAX_DAYS_PER_RUN", "3")
+    monkeypatch.delenv("RENTAL_HISTORY_T0_ENABLED", raising=False)
+    monkeypatch.setattr(raw_job, "ensure_bucket", lambda bucket: None)
+    monkeypatch.setattr(raw_job, "read_watermark", lambda: date(2026, 8, 15))
+    monkeypatch.setattr(raw_job, "collect_snapshot", _fake_collect(calls))
+
+    raw_job.run()
+
+    assert [(target_date, hours) for target_date, hours, _, _ in calls] == [
+        (date(2026, 8, 16), list(range(24))),
+        (date(2026, 8, 17), list(range(24))),
+        (date(2026, 8, 18), list(range(24))),
+        (date(2026, 8, 22), [0, 1, 2, 3, 4, 5]),
+    ]
+    assert {snapshot_type for _, _, _, snapshot_type in calls} == {"FINAL"}
+
+
+def test_final_current_failure_is_optional_when_t0_false(monkeypatch):
+    calls = []
+
+    monkeypatch.setenv("COLLECTION_CUTOFF_AT", "2026-08-22T06:00:00+09:00")
+    monkeypatch.setenv("SNAPSHOT_TYPE", "FINAL")
+    monkeypatch.setenv("MAX_DAYS_PER_RUN", "3")
+    monkeypatch.setenv("RENTAL_HISTORY_T0_ENABLED", "false")
+    monkeypatch.setattr(raw_job, "ensure_bucket", lambda bucket: None)
+    monkeypatch.setattr(raw_job, "read_watermark", lambda: date(2026, 8, 20))
+    monkeypatch.setattr(
+        raw_job,
+        "collect_snapshot",
+        _fake_collect(calls, {date(2026, 8, 22): "INCOMPLETE"}),
+    )
+
+    manifests = raw_job.run()
+
+    assert [target_date for target_date, _, _, _ in calls] == [
+        date(2026, 8, 21),
+        date(2026, 8, 22),
+    ]
+    assert [m["status"] for m in manifests] == ["COMPLETE", "INCOMPLETE"]
+
+
+def test_final_current_failure_is_required_when_t0_true(monkeypatch):
+    calls = []
+
+    monkeypatch.setenv("COLLECTION_CUTOFF_AT", "2026-08-22T06:00:00+09:00")
+    monkeypatch.setenv("SNAPSHOT_TYPE", "FINAL")
+    monkeypatch.setenv("MAX_DAYS_PER_RUN", "3")
+    monkeypatch.setenv("RENTAL_HISTORY_T0_ENABLED", "true")
+    monkeypatch.setattr(raw_job, "ensure_bucket", lambda bucket: None)
+    monkeypatch.setattr(raw_job, "read_watermark", lambda: date(2026, 8, 20))
+    monkeypatch.setattr(
+        raw_job,
+        "collect_snapshot",
+        _fake_collect(calls, {date(2026, 8, 22): "INCOMPLETE"}),
+    )
+
+    with pytest.raises(raw_job.RawCollectionError, match="unusable"):
+        raw_job.run()
+
+
+def test_final_run_rejects_unparsable_flag(monkeypatch):
+    monkeypatch.setenv("COLLECTION_CUTOFF_AT", "2026-08-22T06:00:00+09:00")
+    monkeypatch.setenv("SNAPSHOT_TYPE", "FINAL")
+    monkeypatch.setenv("RENTAL_HISTORY_T0_ENABLED", "1")
+    monkeypatch.setattr(raw_job, "ensure_bucket", lambda bucket: None)
+    monkeypatch.setattr(raw_job, "read_watermark", lambda: date(2026, 8, 20))
+
+    with pytest.raises(ValueError, match="boolean"):
+        raw_job.run()
+
+
+def test_preliminary_windows_remain_previous_full_day_and_current_closed_hours(
+    monkeypatch,
+):
+    calls = []
+
+    def forbidden_watermark():
+        raise AssertionError("예비 수집은 확정 워터마크를 읽지 않는다")
+
+    monkeypatch.setenv("COLLECTION_CUTOFF_AT", "2026-08-22T05:00:00+09:00")
+    monkeypatch.setenv("SNAPSHOT_TYPE", "PRELIMINARY")
+    monkeypatch.setenv("MAX_DAYS_PER_RUN", "3")
+    monkeypatch.setattr(raw_job, "ensure_bucket", lambda bucket: None)
+    monkeypatch.setattr(raw_job, "read_watermark", forbidden_watermark)
+    monkeypatch.setattr(raw_job, "collect_snapshot", _fake_collect(calls))
+
+    raw_job.run()
+
+    assert [(target_date, hours) for target_date, hours, _, _ in calls] == [
+        (date(2026, 8, 21), list(range(24))),
+        (date(2026, 8, 22), [0, 1, 2, 3, 4]),
+    ]

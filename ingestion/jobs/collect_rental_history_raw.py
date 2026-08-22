@@ -15,6 +15,15 @@ from common.api_client import (
     strip_pagination_meta,
 )
 from common.s3_utils import ensure_bucket, get_json, put_json
+from common.watermark import read_watermark
+from jobs.rental_history_snapshot_policy import (
+    ROLE_CONFIRMED,
+    ROLE_CURRENT,
+    CollectionWindow,
+    build_final_windows,
+    parse_bool,
+    parse_max_days,
+)
 from schema.rental_history_schema import SchemaValidationError, validate_and_report
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -42,6 +51,46 @@ def build_collection_windows(cutoff: datetime) -> list[tuple[date, list[int]]]:
     windows = [(previous_date, list(range(24)))]
     if cutoff.hour > 0:
         windows.append((cutoff.date(), list(range(cutoff.hour))))
+    return windows
+
+
+def build_run_windows(cutoff: datetime, snapshot_type: str) -> list[CollectionWindow]:
+    """snapshot type별 수집 대상 window를 만든다.
+
+    PRELIMINARY는 #135와 동일하게 전날 전체와 당일 완료 시간대만 본다(둘 다 필수).
+    FINAL은 확정 워터마크 다음 날부터의 backlog를 필수로 잡고, 당일 window는
+    RENTAL_HISTORY_T0_ENABLED에 따라 필수/관측 전용으로 갈린다.
+    """
+    if snapshot_type == "PRELIMINARY":
+        return [
+            CollectionWindow(
+                target_date=target_date,
+                hours=hours,
+                required=True,
+                role=ROLE_CURRENT if target_date == cutoff.date() else ROLE_CONFIRMED,
+            )
+            for target_date, hours in build_collection_windows(cutoff)
+        ]
+
+    t0_enabled = parse_bool(os.getenv("RENTAL_HISTORY_T0_ENABLED"))
+    max_days = parse_max_days(os.getenv("MAX_DAYS_PER_RUN"))
+    confirmed_through = read_watermark()
+    windows = build_final_windows(
+        cutoff=cutoff,
+        confirmed_through=confirmed_through,
+        max_days=max_days,
+        t0_enabled=t0_enabled,
+    )
+    logger.info(
+        "확정 수집 window 계산: watermark=%s max_days=%s t0_enabled=%s windows=%s",
+        confirmed_through,
+        max_days,
+        t0_enabled,
+        [
+            (w.target_date.isoformat(), len(w.hours), "required" if w.required else "optional")
+            for w in windows
+        ],
+    )
     return windows
 
 
@@ -175,7 +224,11 @@ def collect_snapshot(
 
 
 def run() -> list[dict]:
-    """논리 cutoff의 전날 전체와 당일 완료 시간대를 날짜별 Raw로 수집한다."""
+    """snapshot type별 수집 window를 날짜별 Raw payload/manifest로 저장한다.
+
+    필수 window가 하나라도 쓸 수 없는 상태면 실패한다. 관측 전용 window(T0=false의 당일)는
+    실패해도 경고만 남기고 run 실패로 보지 않는다.
+    """
     cutoff_value = os.getenv("COLLECTION_CUTOFF_AT")
     if not cutoff_value:
         raise RawCollectionError("COLLECTION_CUTOFF_AT is required")
@@ -196,34 +249,42 @@ def run() -> list[dict]:
     def read_json(key: str) -> Any | None:
         return get_json(bucket, key)
 
-    manifests = [
-        collect_snapshot(
-            target_date=target_date,
-            hours=hours,
+    windows = build_run_windows(cutoff, snapshot_type)
+    if not windows:
+        logger.info("수집할 window 없음 (cutoff=%s)", cutoff.isoformat())
+        return []
+
+    manifests = []
+    unusable = []
+    for window in windows:
+        manifest = collect_snapshot(
+            target_date=window.target_date,
+            hours=window.hours,
             observed_at=cutoff,
             snapshot_type=snapshot_type,
             fetch_pages=fetch_rent_history_pages_by_hour,
             write_json=write_json,
             read_json=read_json,
         )
-        for target_date, hours in build_collection_windows(cutoff)
-    ]
+        manifests.append(manifest)
 
-    unusable = [
-        manifest
-        for manifest in manifests
-        if manifest["status"] != "COMPLETE" or not manifest["schema_valid"]
-    ]
+        if manifest["status"] == "COMPLETE" and manifest["schema_valid"]:
+            continue
+
+        summary = {
+            "target_date": manifest.get("target_date", window.target_date.isoformat()),
+            "status": manifest["status"],
+            "schema_valid": manifest["schema_valid"],
+        }
+        if window.required:
+            unusable.append(summary)
+        else:
+            # 관측 전용 window(T0=false의 당일)는 실패해도 확정 결과를 바꾸지 않는다.
+            # 다만 degraded 관측 지표로 남기기 위해 경고는 반드시 남긴다.
+            logger.warning("관측 전용 window 수집 실패 (승격 대상 아님): %s", summary)
+
     if unusable:
-        summary = [
-            {
-                "target_date": manifest.get("target_date"),
-                "status": manifest["status"],
-                "schema_valid": manifest["schema_valid"],
-            }
-            for manifest in unusable
-        ]
-        raise RawCollectionError(f"unusable rental history Raw snapshots: {summary}")
+        raise RawCollectionError(f"unusable rental history Raw snapshots: {unusable}")
 
     return manifests
 

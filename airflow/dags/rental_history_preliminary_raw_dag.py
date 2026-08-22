@@ -15,15 +15,10 @@ import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag
 
-from dag_common import DEFAULT_ARGS, bash_job
+from dag_common import COLLECTION_CUTOFF_AT_TEMPLATE, DEFAULT_ARGS, bash_job
 
 PRELIMINARY_SCHEDULE = os.getenv(
     "RENTAL_HISTORY_PRELIMINARY_SCHEDULE", "0 5 * * *"
-)
-COLLECTION_CUTOFF_AT_TEMPLATE = (
-    '{{ dag_run.conf.get("collection_cutoff_at") '
-    'if dag_run and dag_run.conf.get("collection_cutoff_at") '
-    'else data_interval_end.in_timezone("Asia/Seoul").isoformat() }}'
 )
 
 
