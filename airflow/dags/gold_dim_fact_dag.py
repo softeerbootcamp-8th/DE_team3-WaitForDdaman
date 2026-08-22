@@ -116,7 +116,16 @@ PYTHON = "python"
 
 def _load_ingestion_env(env_path: str) -> None:
     """`source .env`(BashSensor 시절)와 동일하게, ingestion/.env의 값을 컨테이너
-    환경변수 위에 그대로 덮어쓴다 (export 없는 단순 KEY=VALUE 라인만 있는 파일)."""
+    환경변수 위에 그대로 덮어쓴다 (export 없는 단순 KEY=VALUE 라인만 있는 파일).
+
+    이 파일은 docker-compose.local.yml 컨테이너에만 존재한다 - DagBag이 DAG
+    폴더 전체를 import하는 CI/로컬 테스트(예: 다른 DAG의 회귀 테스트가 같은
+    폴더를 통째로 로드하는 경우) 등 그 컨테이너 밖에서는 없는 게 정상이라,
+    없으면 조용히 건너뛴다(그 환경에서는 config.SETTINGS가 컨테이너/러너 자체
+    환경변수 기준으로 평가되어도 DAG import 자체는 깨지면 안 된다).
+    """
+    if not os.path.exists(env_path):
+        return
     with open(env_path) as f:
         for line in f:
             line = line.strip()
