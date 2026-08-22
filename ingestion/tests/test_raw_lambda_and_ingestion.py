@@ -96,24 +96,20 @@ def test_fetch_station_active_lambda_success(s3_env, monkeypatch):
 def test_station_master_process_snapshot_missing_raw_fails_fast(s3_env, monkeypatch):
     from jobs.daily_batch_station_master import _process_snapshot
 
-    mock_spark = MagicMock()
-    # S3 raw payload가 없는 상태에서 snapshot 처리 시 FileNotFoundError가 발생해야 함
     with pytest.raises(FileNotFoundError, match="S3 raw payload가 존재하지 않습니다"):
-        _process_snapshot(mock_spark, "2026-08-22")
+        _process_snapshot("2026-08-22")
 
 
 def test_station_active_process_snapshot_missing_raw_fails_fast(s3_env, monkeypatch):
     from jobs.daily_batch_station_active import _process_snapshot
 
-    mock_spark = MagicMock()
     with pytest.raises(FileNotFoundError, match="S3 raw payload가 존재하지 않습니다"):
-        _process_snapshot(mock_spark, "2026-08-22")
+        _process_snapshot("2026-08-22")
 
 
 def test_station_master_process_snapshot_reads_s3_payload(s3_env, monkeypatch):
     from jobs.daily_batch_station_master import _process_snapshot
 
-    # S3에 raw payload 미리 적재
     sample_rows = [
         {
             "STA_LOC": "마포구",
@@ -134,21 +130,11 @@ def test_station_master_process_snapshot_reads_s3_payload(s3_env, monkeypatch):
         {"snapshot_date": "2026-08-22", "row_count": len(sample_rows), "rows": sample_rows},
     )
 
-    mock_spark = MagicMock()
-    mock_df = MagicMock()
-    mock_spark.createDataFrame.return_value = mock_df
-    mock_df.select.return_value = mock_df
-    mock_df.withColumn.return_value = mock_df
-    mock_df.cache.return_value = mock_df
-    mock_df.count.return_value = 1
-
-    with patch("jobs.daily_batch_station_master.build_select_exprs", return_value=[MagicMock()]), \
-         patch("jobs.daily_batch_station_master.F.lit", return_value=MagicMock()), \
-         patch("jobs.daily_batch_station_master.F.current_timestamp", return_value=MagicMock()):
-        row_count = _process_snapshot(mock_spark, "2026-08-22")
+    with patch("jobs.daily_batch_station_master.overwrite_partition") as mock_overwrite:
+        row_count = _process_snapshot("2026-08-22")
 
     assert row_count == 1
-    mock_spark.createDataFrame.assert_called_once()
+    mock_overwrite.assert_called_once()
 
 
 def test_station_active_process_snapshot_reads_s3_payload(s3_env, monkeypatch):
@@ -171,18 +157,8 @@ def test_station_active_process_snapshot_reads_s3_payload(s3_env, monkeypatch):
         {"snapshot_date": "2026-08-22", "row_count": len(sample_rows), "rows": sample_rows},
     )
 
-    mock_spark = MagicMock()
-    mock_df = MagicMock()
-    mock_spark.createDataFrame.return_value = mock_df
-    mock_df.select.return_value = mock_df
-    mock_df.withColumn.return_value = mock_df
-    mock_df.cache.return_value = mock_df
-    mock_df.count.return_value = 1
-
-    with patch("jobs.daily_batch_station_active.build_select_exprs", return_value=[MagicMock()]), \
-         patch("jobs.daily_batch_station_active.F.lit", return_value=MagicMock()), \
-         patch("jobs.daily_batch_station_active.F.current_timestamp", return_value=MagicMock()):
-        row_count = _process_snapshot(mock_spark, "2026-08-22")
+    with patch("jobs.daily_batch_station_active.overwrite_partition") as mock_overwrite:
+        row_count = _process_snapshot("2026-08-22")
 
     assert row_count == 1
-    mock_spark.createDataFrame.assert_called_once()
+    mock_overwrite.assert_called_once()
