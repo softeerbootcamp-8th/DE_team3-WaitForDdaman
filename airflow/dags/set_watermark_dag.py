@@ -18,14 +18,27 @@
 ### 실행 방법
 Airflow UI에서 "Trigger DAG w/ config"로 watermark_date / dataset을 지정해 실행한다.
 데이터셋별로 워터마크를 다 찍어야 하면 dataset을 바꿔서 여러 번 트리거하면 된다.
-데이터셋별로 워터마크를 다 찍어야 하면 dataset을 바꿔서 여러 번 트리거하면 된다.
+
+Spark를 쓰지 않는 유틸리티이므로 BashOperator에서 PythonOperator로 전환하여
+셸/인터프리터 기동 오버헤드를 없애고 오류 시 스택트레이스를 UI에 직접 노출한다 (Issue #144).
 """
+import sys
 import pendulum
-from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import dag
 
 INGESTION_DIR = "/opt/airflow/ingestion"
-INGESTION_PYTHON = "python"
+
+
+def _set_watermark_callable(params, **kwargs):
+    if INGESTION_DIR not in sys.path:
+        sys.path.insert(0, INGESTION_DIR)
+
+    from jobs.set_watermark import run as run_set_watermark
+
+    watermark_date = params.get("watermark_date")
+    dataset = params.get("dataset")
+    run_set_watermark(watermark_date, dataset)
 
 
 @dag(
@@ -36,19 +49,14 @@ INGESTION_PYTHON = "python"
     tags=["independent", "manual"],
     params={
         "watermark_date": "2026-06-30",
-        "dataset": "rental_history",  # rental_history | failure_report | silver_rental_history | gold_dim_bike
+        "dataset": "rental_history",  # rental_history | failure_report | silver_rental_history | gold_dim_bike | bikeman_event | silver_bikeman_action
     },
     doc_md=__doc__,
 )
 def set_watermark():
-    BashOperator(
+    PythonOperator(
         task_id="run_set_watermark",
-        bash_command=(
-            f"cd {INGESTION_DIR} && set -a && source .env && set +a && "
-            "WATERMARK_DATE='{{ params.watermark_date }}' "
-            "DATASET='{{ params.dataset }}' "
-            f"{INGESTION_PYTHON} -m jobs.set_watermark"
-        ),
+        python_callable=_set_watermark_callable,
     )
 
 

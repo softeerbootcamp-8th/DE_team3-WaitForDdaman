@@ -160,7 +160,7 @@ services:
     command:
       - bash
       - -c
-      - airflow version && airflow pools set bronze_ingest 2 'Bronze 적재 동시 실행 제한 (LocalStack 쓰기 경합 방지)' && airflow pools set silver_process 2 'Silver 변환 동시 실행 제한 (LocalStack 쓰기 경합 방지)'
+      - airflow version && airflow pools set bronze_ingest 2 'Bronze 적재 워커 메모리 가드 (PyArrow 동시 실행 제한)' && airflow pools set silver_process 2 'Silver 변환 워커 메모리 가드 (DuckDB 동시 실행 제한)'
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'

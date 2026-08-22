@@ -57,3 +57,31 @@ def test_watermark_persisted_payload_shape(s3_env):
     body = json.loads(obj["Body"].read())
     assert body["last_processed_date"] == "2026-08-05"
     assert "updated_at" in body
+
+
+def test_set_watermark_job_all_datasets(s3_env):
+    from common.watermark import read_watermark
+    from config.watermark_keys import GOLD_DIM_BIKE, SILVER_BIKEMAN_ACTION, SILVER_RENTAL_HISTORY
+    from jobs.set_watermark import run as run_set_watermark
+
+    # 1. rental_history
+    run_set_watermark("2026-06-30", "rental_history")
+    assert read_watermark(watermark_key="_meta/watermark/rental_history.json") == date(2026, 6, 30)
+
+    # 2. failure_report
+    run_set_watermark("2026-06-30", "failure_report")
+    assert read_watermark(watermark_key="_meta/watermark/failure_report.json") == date(2026, 6, 30)
+
+    # 3. bikeman_event (6/30 서비스 시작 전날 6/29 세팅)
+    run_set_watermark("2026-06-29", "bikeman_event")
+    assert read_watermark(watermark_key="_meta/watermark/bikeman_event.json") == date(2026, 6, 29)
+
+    # 4. silver_rental_history
+    run_set_watermark("2026-07-01", "silver_rental_history")
+    assert read_watermark(watermark_key=SILVER_RENTAL_HISTORY) == date(2026, 7, 1)
+
+    # 5. gold_dim_bike
+    run_set_watermark("2026-07-02", "gold_dim_bike")
+    assert read_watermark(watermark_key=GOLD_DIM_BIKE) == date(2026, 7, 2)
+
+
