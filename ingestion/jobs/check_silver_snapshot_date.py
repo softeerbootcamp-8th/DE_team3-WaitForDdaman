@@ -42,44 +42,16 @@ from urllib.parse import urlparse
 from botocore.exceptions import ClientError
 
 import config
-from common.s3_utils import get_s3_client
+from common.partition_listing import max_partition
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def _table_data_prefix(namespace: str, table: str) -> tuple[str, str]:
-    """Iceberg Hadoop 카탈로그가 identity 파티션 테이블에 실제로 쓰는 S3 (bucket, prefix)."""
-    parsed = urlparse(config.SETTINGS.iceberg_warehouse_path)
-    root = parsed.path.lstrip("/")
-    prefix = f"{root}/{namespace}/{table}/data/" if root else f"{namespace}/{table}/data/"
-    return parsed.netloc, prefix
-
-
 def get_max_snapshot_date(namespace: str, table: str) -> date | None:
     """스냅샷 파티션 디렉터리 목록만 나열해 MAX(snapshot_date)를 구한다 (Spark 세션 미사용)."""
-    bucket, prefix = _table_data_prefix(namespace, table)
-    s3 = get_s3_client()
-    paginator = s3.get_paginator("list_objects_v2")
-
-    latest = None
-    try:
-        pages = paginator.paginate(Bucket=bucket, Prefix=prefix, Delimiter="/")
-        for page in pages:
-            for common_prefix in page.get("CommonPrefixes", []):
-                dir_name = common_prefix["Prefix"][len(prefix):].rstrip("/")
-                if not dir_name.startswith("snapshot_date="):
-                    continue
-                partition_date = datetime.strptime(dir_name.split("=", 1)[1], "%Y-%m-%d").date()
-                if latest is None or partition_date > latest:
-                    latest = partition_date
-    except ClientError as e:
-        # warehouse 버킷 자체가 아직 없는 완전 초기 상태(첫 Silver ETL 이전)도
-        # "테이블 없음"과 같은 "아직 준비 안 됨"으로 취급한다. 그 외 에러(권한 등
-        # 진짜 설정 문제)는 삼키지 않고 그대로 올려서 태스크가 실패로 보이게 한다.
-        if e.response.get("Error", {}).get("Code") != "NoSuchBucket":
-            raise
-    return latest
+    val = max_partition(f"{namespace}.{table}", "snapshot_date")
+    return datetime.strptime(val, "%Y-%m-%d").date() if val else None
 
 
 def is_ready(table_name: str, target_date: str) -> bool:
