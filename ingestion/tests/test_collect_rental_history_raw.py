@@ -1,3 +1,5 @@
+import threading
+import time
 from datetime import date
 
 import pytest
@@ -199,6 +201,7 @@ def test_collect_snapshot_marks_successful_zero_rows_complete_empty():
 
 
 def test_collect_snapshot_marks_partial_api_failure_incomplete():
+    """한 시간대 실패는 다른 시간대 처리를 막지 않고, 그 시간대만 completed_hours에서 빠진다."""
     from common.api_client import SeoulApiError
 
     cutoff = raw_job.parse_collection_cutoff("2026-08-22T05:00:00+09:00")
@@ -219,11 +222,96 @@ def test_collect_snapshot_marks_partial_api_failure_incomplete():
     )
 
     assert manifest["status"] == "INCOMPLETE"
-    assert manifest["completed_hours"] == [0]
-    assert manifest["page_count"] == 1
-    assert manifest["row_count"] == 1
+    assert manifest["completed_hours"] == [0, 2]
+    assert manifest["page_count"] == 2
+    assert manifest["row_count"] == 2
     assert "hour 1 failed" in manifest["error"]
-    assert writes[0][1] == [VALID_ROW]
+    assert writes[0][1] == [VALID_ROW, VALID_ROW]
+
+
+def test_collect_snapshot_preserves_partial_pages_of_a_failing_hour():
+    """실패한 시간대라도 실패 전에 성공한 페이지의 행은 payload에서 숨기지 않는다."""
+    cutoff = raw_job.parse_collection_cutoff("2026-08-22T05:00:00+09:00")
+    writes, write_json = _recording_writer()
+
+    def fetch_pages(target_date, hour):
+        if hour == 1:
+            yield [dict(VALID_ROW, REQUEST_HOUR=1, PAGE=1)]
+            raise raw_job.SeoulApiError("hour 1 second page failed")
+        yield [dict(VALID_ROW, REQUEST_HOUR=hour)]
+
+    manifest = raw_job.collect_snapshot(
+        date(2026, 8, 22),
+        [0, 1],
+        cutoff,
+        "PRELIMINARY",
+        fetch_pages,
+        write_json,
+    )
+
+    assert manifest["status"] == "INCOMPLETE"
+    assert manifest["completed_hours"] == [0]
+    assert manifest["page_count"] == 2
+    assert manifest["row_count"] == 2
+    assert dict(VALID_ROW, REQUEST_HOUR=1, PAGE=1) in writes[0][1]
+
+
+def test_collect_snapshot_runs_requested_hours_concurrently_up_to_max_eight():
+    """요청된 시간대 API 호출이 최대 8개 동시성 이내에서 실제 병렬 실행된다."""
+    cutoff = raw_job.parse_collection_cutoff("2026-08-22T05:00:00+09:00")
+    _, write_json = _recording_writer()
+
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def fetch_pages(target_date, hour):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            time.sleep(0.05)
+            yield [dict(VALID_ROW, REQUEST_HOUR=hour)]
+        finally:
+            with lock:
+                active -= 1
+
+    manifest = raw_job.collect_snapshot(
+        date(2026, 8, 22),
+        list(range(12)),
+        cutoff,
+        "PRELIMINARY",
+        fetch_pages,
+        write_json,
+    )
+
+    assert manifest["status"] == "COMPLETE"
+    assert manifest["completed_hours"] == list(range(12))
+    assert 1 < max_active <= 8
+
+
+def test_collect_snapshot_combines_hours_in_ascending_order_regardless_of_finish_order():
+    """완료 순서가 뒤섞여도 payload/manifest는 항상 시간순으로 결정적으로 결합된다."""
+    cutoff = raw_job.parse_collection_cutoff("2026-08-22T05:00:00+09:00")
+    writes, write_json = _recording_writer()
+
+    # 시간대가 낮을수록 늦게 끝나도록 하여 완료 순서와 시간 순서를 어긋나게 만든다.
+    def fetch_pages(target_date, hour):
+        time.sleep(0.01 * (5 - hour))
+        yield [dict(VALID_ROW, REQUEST_HOUR=hour)]
+
+    manifest = raw_job.collect_snapshot(
+        date(2026, 8, 22),
+        [0, 1, 2, 3, 4],
+        cutoff,
+        "PRELIMINARY",
+        fetch_pages,
+        write_json,
+    )
+
+    assert manifest["completed_hours"] == [0, 1, 2, 3, 4]
+    assert writes[0][1] == [dict(VALID_ROW, REQUEST_HOUR=h) for h in range(5)]
 
 
 def test_collect_snapshot_records_schema_mismatch_separately_from_api_completeness():
