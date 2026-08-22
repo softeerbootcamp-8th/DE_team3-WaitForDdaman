@@ -1,0 +1,53 @@
+"""
+대여이력 예비 Raw 수집 DAG
+
+업무 마감 전 복구 지점을 확보하기 위해 API 원본 payload와 manifest만 저장한다.
+Spark/Iceberg를 실행하지 않고 Bronze·워터마크·Asset을 변경하지 않는다.
+
+예약 실행의 수집 기준시각은 실제 태스크 시작 시각이 아니라 data_interval_end다.
+수동 실행에서 더 최신 논리 시각이 필요할 때만 dag_run.conf의
+collection_cutoff_at을 명시적으로 전달한다. 같은 DAGRun의 재시도는 같은 값을 사용한다.
+"""
+import os
+from datetime import timedelta
+
+import pendulum
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.sdk import dag
+
+from dag_common import DEFAULT_ARGS, bash_job
+
+PRELIMINARY_SCHEDULE = os.getenv(
+    "RENTAL_HISTORY_PRELIMINARY_SCHEDULE", "0 5 * * *"
+)
+COLLECTION_CUTOFF_AT_TEMPLATE = (
+    '{{ dag_run.conf.get("collection_cutoff_at") '
+    'if dag_run and dag_run.conf.get("collection_cutoff_at") '
+    'else data_interval_end.in_timezone("Asia/Seoul").isoformat() }}'
+)
+
+
+@dag(
+    dag_id="rental_history_preliminary_raw",
+    schedule=PRELIMINARY_SCHEDULE,
+    start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Seoul"),
+    catchup=False,
+    max_active_runs=1,
+    default_args=DEFAULT_ARGS,
+    tags=["bronze", "raw", "rental_history"],
+    doc_md=__doc__,
+)
+def rental_history_preliminary_raw():
+    BashOperator(
+        task_id="collect_preliminary_raw",
+        bash_command=bash_job("collect_rental_history_raw"),
+        env={
+            "COLLECTION_CUTOFF_AT": COLLECTION_CUTOFF_AT_TEMPLATE,
+            "SNAPSHOT_TYPE": "PRELIMINARY",
+        },
+        append_env=True,
+        execution_timeout=timedelta(hours=2),
+    )
+
+
+rental_history_preliminary_raw()
