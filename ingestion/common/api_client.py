@@ -91,7 +91,10 @@ def _fetch_page(service: str, start_idx: int, end_idx: int, extra_path_segments:
 
     if resp.status_code == 429 or resp.status_code >= 500:
         raise SeoulApiTransientError(f"HTTP {resp.status_code}")
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        raise SeoulApiError(f"HTTP {resp.status_code}") from e
 
     try:
         body = resp.json()
@@ -126,23 +129,34 @@ def _fetch_page(service: str, start_idx: int, end_idx: int, extra_path_segments:
     raise SeoulApiTransientError(f"{code}: {node.get('RESULT', {}).get('MESSAGE')}")
 
 
-def _paginate(service: str, extra_path_segments: list) -> Iterator[dict]:
-    """공통 페이징 루프: 마지막 페이지(rows < page_size)까지 순회하며 row를 그대로 yield."""
+def _paginate_pages(service: str, extra_path_segments: list) -> Iterator[list[dict]]:
+    """공통 페이징 루프: 성공한 API 페이지별 원본 row 목록을 그대로 yield한다."""
     page_size = config.SETTINGS.api_page_size
     start_idx = 1
     while True:
         end_idx = start_idx + page_size - 1
         node = _fetch_page(service, start_idx, end_idx, extra_path_segments)
         rows = node.get("row", [])
+        yield rows
 
         if not rows:
             break
-        for row in rows:
-            yield row
-
         if len(rows) < page_size:
             break  # 마지막 페이지
         start_idx += page_size
+
+
+def _paginate(service: str, extra_path_segments: list) -> Iterator[dict]:
+    """페이지 경계를 숨기고 기존 호출자에게 row를 하나씩 전달한다."""
+    for rows in _paginate_pages(service, extra_path_segments):
+        yield from rows
+
+
+def fetch_rent_history_pages_by_hour(target_date: date, hour: int) -> Iterator[list[dict]]:
+    """특정 시간대의 대여이력을 API 페이지 단위로 가져온다."""
+    date_str = target_date.strftime("%Y-%m-%d")
+    logger.info("대여이력 API 호출: %s %d시", date_str, hour)
+    yield from _paginate_pages("tbCycleRentData", [date_str, hour])
 
 
 def fetch_rent_history_by_hour(target_date: date, hour: int) -> Iterator[dict]:
@@ -150,9 +164,8 @@ def fetch_rent_history_by_hour(target_date: date, hour: int) -> Iterator[dict]:
     tbCycleRentData: 특정 날짜의 특정 시간(0~23)치 대여이력을 전부 가져온다.
     (이 서비스는 하루 전체를 한 번에 조회할 수 없고 시간 단위로 쪼개야 함)
     """
-    date_str = target_date.strftime("%Y-%m-%d")
-    logger.info("대여이력 API 호출: %s %d시", date_str, hour)
-    yield from _paginate("tbCycleRentData", [date_str, hour])
+    for rows in fetch_rent_history_pages_by_hour(target_date, hour):
+        yield from rows
 
 
 def fetch_rent_history_by_date(target_date: date) -> Iterator[dict]:

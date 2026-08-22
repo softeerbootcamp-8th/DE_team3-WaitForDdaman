@@ -68,18 +68,85 @@ silver_station_active.py`)가 `bronze.station_active`에서 station_id만 추려
 매일 적재한다. `build_station_active`(gold)의 조인 로직은 station_active에서
 station_id만 쓰므로 이 잡의 실제 컬럼 스키마(snapshot_date, station_id 2개뿐)와
 그대로 맞는다 - 코드 변경 없이 정상 동작한다.
+
+### BashSensor(exit code) → PythonSensor 전환 (2026-08-22, #145)
+위 절들이 설명하는 "왜 BashSensor로 전환했는가"(ExternalTaskSensor의
+execution_delta 전제가 Asset 트리거로 깨짐)는 그대로 유효하다. 다만 BashSensor는
+poke마다 새 `python -m jobs.X` 서브프로세스를 띄웠고, 그중 station_master/
+station_active용 check_silver_snapshot_date.py는 그 서브프로세스 안에서 Spark
+세션까지 새로 띄웠다(poke_interval=300s/timeout=6h 기준 센서당 최대 72회). 판정
+로직 자체(워터마크 비교, 스냅샷 파티션 존재 확인)는 그대로 두고, `bikeman_event_
+generator_dag.py`와 같은 방식으로 ingestion 잡 모듈을 sys.path에 얹어 Airflow
+워커 프로세스 안에서 직접 호출하는 PythonSensor로 바꿔 서브프로세스/Spark 세션
+기동을 없앤다. station_master/station_active 판정은 Spark의 MAX(snapshot_date)
+대신, Iceberg Hadoop 카탈로그가 identity 파티션마다 만드는 Hive 스타일 S3
+디렉터리(`data/snapshot_date=YYYY-MM-DD/`)를 boto3로 나열해서 구한다
+(check_silver_snapshot_date.py 참고) - 이 테이블들에 파티션을 지우는 잡이 없어
+오탐이 없다.
+
+### ingestion/.env를 여기서 직접 로드하는 이유 (2026-08-22, #145)
+`_ingestion_bash`(BashSensor 시절)는 매 poke마다 `cd ingestion && source .env`로
+서브프로세스를 띄워, 컨테이너 자체의 환경변수(루트 `.env` - "AWS 배포 시 바꾸는
+파일"로 문서화됨, 배포 시 APP_ENV=aws + 실 AWS 키가 됨)와 무관하게 ingestion 잡을
+항상 `ingestion/.env`(APP_ENV=local + LocalStack 엔드포인트) 기준으로 실행해왔다.
+PythonSensor는 서브프로세스를 띄우지 않고 이 태스크 프로세스 안에서 바로
+`is_ready()`를 호출하므로, `config.SETTINGS`가 평가되는 시점(첫 `import config`)에
+컨테이너가 물려받은 환경변수를 그대로 쓴다 - `source .env` 단계가 없으면 루트
+`.env`가 APP_ENV=aws인 상태에서 컨테이너가 뜬 경우 LocalStack 대신 진짜 AWS S3로
+나가버린다(#145 검증 중 AccessDenied로 실측 확인). 그래서 `jobs.check_silver_*`를
+import(=config 첫 평가)하기 전에 `ingestion/.env`를 직접 읽어 os.environ에
+덮어써서, 서브프로세스 시절과 동일한 값으로 config.SETTINGS가 만들어지게 한다.
+Task SDK가 태스크마다 새 프로세스를 띄우므로(다른 DAG 태스크와 프로세스를 공유하지
+않음) 여기서 os.environ을 덮어써도 다른 DAG에 영향이 없다.
 """
+import os
+import sys
 from datetime import timedelta
 
 import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
-from airflow.providers.standard.sensors.bash import BashSensor
+from airflow.providers.standard.sensors.python import PythonSensor
 from airflow.sdk import dag
 
 INGESTION_DIR = "/opt/airflow/ingestion"
 COLLECTION_PRIORITY_DIR = "/opt/airflow/pipeline/collection_priority"
 PYTHON = "python"
+
+
+def _load_ingestion_env(env_path: str) -> None:
+    """`source .env`(BashSensor 시절)와 동일하게, ingestion/.env의 값을 컨테이너
+    환경변수 위에 그대로 덮어쓴다 (export 없는 단순 KEY=VALUE 라인만 있는 파일).
+
+    이 파일은 docker-compose.local.yml 컨테이너에만 존재한다 - DagBag이 DAG
+    폴더 전체를 import하는 CI/로컬 테스트(예: 다른 DAG의 회귀 테스트가 같은
+    폴더를 통째로 로드하는 경우) 등 그 컨테이너 밖에서는 없는 게 정상이라,
+    없으면 조용히 건너뛴다(그 환경에서는 config.SETTINGS가 컨테이너/러너 자체
+    환경변수 기준으로 평가되어도 DAG import 자체는 깨지면 안 된다).
+    """
+    if not os.path.exists(env_path):
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ[key.strip()] = value.strip()
+
+
+_load_ingestion_env(f"{INGESTION_DIR}/.env")
+
+# PythonSensor가 Spark/서브프로세스 없이 판정 함수를 직접 호출할 수 있도록,
+# ingestion을 네임스페이스 패키지 루트로 sys.path에 얹는다 (bikeman_event_
+# generator_dag.py와 동일한 패턴). config가 위에서 로드한 ingestion/.env 값으로
+# 평가되도록 반드시 _load_ingestion_env 다음에 import한다.
+if INGESTION_DIR not in sys.path:
+    sys.path.insert(0, INGESTION_DIR)
+
+from jobs.check_silver_bikeman_action_watermark import is_ready as bikeman_action_ready  # noqa: E402
+from jobs.check_silver_snapshot_date import is_ready as snapshot_date_ready  # noqa: E402
+from jobs.check_silver_watermark import is_ready as watermark_ready  # noqa: E402
 
 SENSOR_TIMEOUT = timedelta(hours=6).total_seconds()  # 전부 Asset 트리거라 여유 있게
 POKE_INTERVAL = 300  # 5분
@@ -90,16 +157,6 @@ default_args = {
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=30),
 }
-
-
-def _ingestion_bash(job_module: str, extra_env: str = "") -> str:
-    # PYTHONDONTWRITEBYTECODE=1: 이 DAG도 여러 태스크가 동시에 같은 ingestion/common
-    # 모듈을 처음 import한다 - dag_common.py의 bash_job()과 동일한 이유로 .pyc
-    # 쓰기 경합("EOFError: marshal data too short")을 피하려고 캐시를 아예 안 만든다.
-    return (
-        f"cd {INGESTION_DIR} && set -a && source .env && set +a && "
-        f"PYTHONDONTWRITEBYTECODE=1 {extra_env}{PYTHON} -m jobs.{job_module}"
-    )
 
 
 def _collection_priority_bash(job_module: str, extra_env: str = "") -> str:
@@ -126,42 +183,34 @@ def _collection_priority_bash(job_module: str, extra_env: str = "") -> str:
     doc_md=__doc__,
 )
 def gold_dim_fact():
-    wait_rental_history = BashSensor(
+    wait_rental_history = PythonSensor(
         task_id="wait_for_silver_rental_history",
-        bash_command=_ingestion_bash(
-            "check_silver_watermark",
-            "DATASET=rental_history REQUIRED_OFFSET_DAYS=1 TARGET_DATE='{{ ds }}' ",
-        ),
+        python_callable=watermark_ready,
+        op_kwargs={"dataset": "rental_history", "target_date": "{{ ds }}", "required_offset_days": 1},
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,
     )
-    wait_station_master = BashSensor(
+    wait_station_master = PythonSensor(
         task_id="wait_for_silver_station_master",
-        bash_command=_ingestion_bash(
-            "check_silver_snapshot_date",
-            "TABLE_NAME=silver.station_master TARGET_DATE='{{ ds }}' ",
-        ),
+        python_callable=snapshot_date_ready,
+        op_kwargs={"table_name": "silver.station_master", "target_date": "{{ ds }}"},
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,
     )
-    wait_station_active = BashSensor(
+    wait_station_active = PythonSensor(
         task_id="wait_for_silver_station_active",
-        bash_command=_ingestion_bash(
-            "check_silver_snapshot_date",
-            "TABLE_NAME=silver.station_active TARGET_DATE='{{ ds }}' ",
-        ),
+        python_callable=snapshot_date_ready,
+        op_kwargs={"table_name": "silver.station_active", "target_date": "{{ ds }}"},
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,
     )
-    wait_bikeman_action = BashSensor(
+    wait_bikeman_action = PythonSensor(
         task_id="wait_for_silver_bikeman_action",
-        bash_command=_ingestion_bash(
-            "check_silver_bikeman_action_watermark",
-            "TARGET_DATE='{{ macros.ds_add(ds, -1) }}' ",
-        ),
+        python_callable=bikeman_action_ready,
+        op_kwargs={"target_date": "{{ macros.ds_add(ds, -1) }}"},
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,

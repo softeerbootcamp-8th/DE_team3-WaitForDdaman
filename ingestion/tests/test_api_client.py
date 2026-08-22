@@ -1,8 +1,11 @@
+from dataclasses import replace
 from datetime import date
 from unittest.mock import patch
 
 import requests
+import pytest
 
+from common import api_client
 from common.api_client import (
     SeoulApiError,
     SeoulApiTransientError,
@@ -105,6 +108,26 @@ def test_rent_history_uses_rentData_root_key_and_hourly_urls():
     assert rows[0]["BIKE_ID"] == "SPB-33174"
 
 
+def test_rent_history_page_iterator_preserves_page_boundaries():
+    first_page = [{"BIKE_ID": "SPB-1"}, {"BIKE_ID": "SPB-2"}]
+    last_page = [{"BIKE_ID": "SPB-3"}]
+
+    with patch.object(
+        api_client,
+        "_fetch_page",
+        side_effect=[{"row": first_page}, {"row": last_page}],
+    ), patch.object(
+        api_client.config,
+        "SETTINGS",
+        replace(api_client.config.SETTINGS, api_page_size=2),
+    ):
+        pages = list(
+            api_client.fetch_rent_history_pages_by_hour(date(2026, 8, 22), 4)
+        )
+
+    assert pages == [first_page, last_page]
+
+
 def test_failure_report_uses_failureReport_root_key_and_yyyymmdd():
     called_urls = []
 
@@ -135,6 +158,12 @@ def test_non_retryable_error_336_fails_immediately():
             assert False, "SeoulApiError가 발생해야 함"
         except SeoulApiError:
             pass
+
+
+def test_non_retryable_http_4xx_is_normalized_to_seoul_api_error():
+    with patch("requests.get", return_value=_FakeResp(400)):
+        with pytest.raises(SeoulApiError, match="HTTP 400"):
+            list(api_client.fetch_rent_history_pages_by_hour(date(2026, 8, 22), 4))
 
 
 def test_transient_5xx_recovers_after_retry():

@@ -8,7 +8,7 @@ boto3는 endpoint_url만 다르면 LocalStack과 실제 AWS S3를 동일한 코�
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import boto3
 from botocore.config import Config
@@ -78,7 +78,7 @@ def upload_file(local_path: Path, bucket: str, key: str) -> None:
     logger.info("업로드 완료: %s -> s3://%s/%s", local_path, bucket, key)
 
 
-def put_json(bucket: str, key: str, payload: dict) -> None:
+def put_json(bucket: str, key: str, payload: Any) -> None:
     s3 = get_s3_client()
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     s3.put_object(Bucket=bucket, Key=key, Body=body)
@@ -90,7 +90,7 @@ def put_text(bucket: str, key: str, text: str) -> None:
     s3.put_object(Bucket=bucket, Key=key, Body=text.encode("utf-8"))
 
 
-def get_json(bucket: str, key: str) -> Optional[dict]:
+def get_json(bucket: str, key: str) -> Optional[Any]:
     s3 = get_s3_client()
     try:
         resp = s3.get_object(Bucket=bucket, Key=key)
@@ -100,3 +100,15 @@ def get_json(bucket: str, key: str) -> Optional[dict]:
         if error_code in ("NoSuchKey", "404"):
             return None
         raise
+
+
+def list_keys(bucket: str, prefix: str) -> list[str]:
+    """prefix 아래의 모든 객체 key를 페이지 누락 없이 정렬해 반환한다."""
+    s3 = get_s3_client()
+    paginator = s3.get_paginator("list_objects_v2")
+    keys = [
+        item["Key"]
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix)
+        for item in page.get("Contents", [])
+    ]
+    return sorted(keys)
