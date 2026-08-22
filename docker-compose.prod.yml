@@ -28,9 +28,14 @@ x-airflow-common:
     # (ingestion/README.md에 문서화된 설계). 여기서 빈 문자열 기본값조차 주면 STS
     # 자격증명 체인을 오히려 방해할 수 있어 아예 생략한다.
     APP_ENV: aws
-    ICEBERG_CATALOG_TYPE: hadoop  # Glue 권한이 없어 hadoop 카탈로그로 고정
+    ICEBERG_CATALOG_TYPE: ${ICEBERG_CATALOG_TYPE:-jdbc}  # RDS(domain-db) 기반 JDBC 카탈로그로 전환 (2026-08-22)
     ICEBERG_CATALOG_NAME: ${ICEBERG_CATALOG_NAME:-bike_catalog}
     ICEBERG_WAREHOUSE_PATH: ${ICEBERG_WAREHOUSE_PATH}
+    # jdbc 카탈로그 전용 - domain-db RDS의 iceberg_catalog 스키마를 가리킨다
+    # (전용 role iceberg_catalog_rw, sql/bike_man/bikeman_seed_init.sql 참고).
+    ICEBERG_JDBC_CATALOG_URI: ${ICEBERG_JDBC_CATALOG_URI}
+    ICEBERG_JDBC_CATALOG_USER: ${ICEBERG_JDBC_CATALOG_USER}
+    ICEBERG_JDBC_CATALOG_PASSWORD: ${ICEBERG_JDBC_CATALOG_PASSWORD}
     RAW_BUCKET: ${RAW_BUCKET}
     WAREHOUSE_BUCKET: ${WAREHOUSE_BUCKET}
     # t4g.large(8GB)에서 6g 힙 JVM을 동시에 여러 개 띄우면 OOM 위험이 크므로
