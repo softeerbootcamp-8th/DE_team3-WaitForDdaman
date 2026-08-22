@@ -3,6 +3,22 @@ name: CD
 on:
   push:
     branches: [production]
+    # 배포 산출물에 영향이 없는 것만 보수적으로 제외한다. paths-ignore는 "이 경로들
+    # 만 바뀐 경우 실행하지 않는다"는 뜻이라, 앱 코드와 문서를 같이 바꾼 머지는 정상
+    # 배포된다 - 배포가 필요한데 안 도는 상황은 만들어지지 않는다.
+    #
+    # 이게 없으면 README 한 줄이나 CI YAML만 고치는 머지도 arm64 QEMU 크로스빌드로
+    # 이미지 3개를 다시 만들고 EC2에서 컨테이너를 교체한다. down -v가 아니라 로그
+    # 볼륨/RDS는 안전하지만 실행 중인 Airflow 태스크는 끊긴다.
+    #
+    # cd.yml 자신은 넣지 않는다 - 배포 경로가 바뀌었으면 실제로 한 번 돌려봐야 한다.
+    # docker-compose.prod.yml / Dockerfile.prod / services/** 도 절대 넣지 말 것.
+    paths-ignore:
+      - '**.md'
+      - '.github/workflows/ci.yml'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/PULL_REQUEST_TEMPLATE.md'
+  # paths-ignore로 배포가 스킵됐는데 그래도 배포해야 할 때의 탈출구.
   workflow_dispatch:   # 이미지 재빌드/재배포를 수동으로 돌리고 싶을 때
 
 permissions:
