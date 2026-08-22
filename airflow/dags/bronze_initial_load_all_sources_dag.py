@@ -97,11 +97,14 @@ default_args = {
         "failure_report_dir": f"{INGESTION_DIR}/data/failure_report",
         "failure_report_pattern": "*",
         "failure_report_watermark_date": "2026-06-30",
-        # daily silver_rental_history의 기본 상한(31일)은 매일 하루치를 처리하는 전제라, 초기
-        # 적재처럼 몇 년치를 한 번에 승격해야 하는 경우엔 그대로 쓰면 여러 번 재트리거해야 한다.
-        # 초기 적재는 사람이 붙어서 지켜보는 1회성 작업이라 기본값을 넉넉히(10년) 잡아 한 번에
-        # 끝내고, 필요하면 Trigger DAG w/ config로 좁힐 수 있게 둔다.
-        "rental_history_silver_max_days_per_run": "3650",
+        # transform_silver_rental_history.py(다른 DAG인 silver_rental_history_dag.py와
+        # 공유하는 잡)는 손대지 않는다 - 대신 이 DAG의 load_silver_rental_history 태스크가
+        # 그 잡을 여러 번 순차 호출해서 몇 년치를 나눠 처리한다. 청크 크기(chunk_days)는
+        # daily가 이미 안전하다고 검증한 기본값(31일)과 동일하게 두고, total_days_cap만큼
+        # 반복 호출한다 - 한 번의 Spark 잡이 다년치를 한 번에 캐시/처리하다 OOM 나는 걸
+        # 피하기 위함(Bronze 초기 적재를 파일 단위로 쪼갠 것과 같은 이유).
+        "rental_history_silver_chunk_days": "31",
+        "rental_history_silver_total_days_cap": "3650",
     },
     doc_md=__doc__,
 )
@@ -246,13 +249,32 @@ def bronze_initial_load_all_sources():
     # 키=Bronze rental_history)와 SILVER_RENTAL_HISTORY(하한)를 직접 읽으므로, 두 값이
     # 모두 이번 초기 적재 결과를 반영한 뒤에 실행해야 한다 - set_bronze_ingestion_watermark_*
     # (상한)과 bootstrap_silver_watermark_*(하한) 둘 다에 의존해야 한다.
+    # transform_silver_rental_history.py 한 번 호출은 daily와 동일하게 chunk_days(기본
+    # 31일)까지만 처리한다 - 몇 년치를 한 Spark 세션에서 캐시+윈도우dedup+커밋하다 OOM 나는
+    # 걸 막기 위함(Bronze를 파일 단위로 쪼갠 것과 같은 이유). 대신 이 태스크가 그 잡을
+    # total_days_cap/chunk_days번 순차 반복 호출해서 몇 년치 백로그를 한 태스크 안에서
+    # 다 처리한다. 잡 자체(다른 DAG와 공유)는 손대지 않고, 반복 호출만 이 DAG 쪽에서 한다.
+    # 잡의 로그 문구("처리할 신규 날짜 없음")로 Bronze 워터마크까지 다 따라잡았음을 감지하면
+    # 남은 반복을 조기 종료한다 - 안 잡혀도(로그 문구가 바뀌는 등) 정답이 달라지진 않고
+    # 남은 반복이 전부 no-op으로 끝날 뿐이라 안전하다.
     load_silver_rental_history = BashOperator(
         task_id="load_silver_rental_history",
-        bash_command=bash_staging_job(
-            "transform_silver_rental_history",
-            "MAX_DAYS_PER_RUN='{{ params.rental_history_silver_max_days_per_run }}' ",
-        ),
-        execution_timeout=timedelta(hours=2),  # daily(1시간)보다 넉넉히 - 초기 적재는 몇 년치를 한 번에 처리
+        bash_command=f"""
+set -e
+CHUNK_DAYS="{{{{ params.rental_history_silver_chunk_days }}}}"
+TOTAL_DAYS_CAP="{{{{ params.rental_history_silver_total_days_cap }}}}"
+ITERATIONS=$(( (TOTAL_DAYS_CAP + CHUNK_DAYS - 1) / CHUNK_DAYS ))
+for i in $(seq 1 "$ITERATIONS"); do
+    echo "[load_silver_rental_history] 청크 $i/$ITERATIONS 시작 (MAX_DAYS_PER_RUN=$CHUNK_DAYS)"
+    OUTPUT=$({bash_staging_job("transform_silver_rental_history", "MAX_DAYS_PER_RUN=$CHUNK_DAYS ")} 2>&1) || {{ echo "$OUTPUT"; exit 1; }}
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "처리할 신규 날짜 없음"; then
+        echo "[load_silver_rental_history] Bronze 워터마크까지 모두 처리됨 - 청크 $i에서 조기 종료"
+        break
+    fi
+done
+""",
+        execution_timeout=timedelta(hours=6),  # 순차 반복이라 daily(1시간)보다 훨씬 넉넉히
         pool=SILVER_POOL,
     )
 
