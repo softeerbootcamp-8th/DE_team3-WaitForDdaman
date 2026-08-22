@@ -79,30 +79,29 @@ def resolve_anchors(cfg, as_of_end: str | date | None = None, label_ready_max: d
     }
 
 
-def detect_label_ready_max(spark: SparkSession, cfg) -> dict:
-    """고장신고 최신일 - horizon = 라벨 확정 한계. 대여이력 최신일도 함께 본다."""
-    from pyspark.sql import functions as F
+def detect_label_ready_max(cfg) -> dict:
+    """고장신고 최신일 - horizon = 라벨 확정 한계. 대여이력 최신일도 함께 본다.
 
-    from pipeline.train_risk_model.sql_engine import SqlEngine
+    피처 계산이 아니라 "원천이 어디까지 들어와 있나"만 확인하는 함수라 Spark/DuckDB
+    엔진 패리티가 필요 없다 - ft.read_fault/read_rental(SqlEngine 필수) 대신
+    common.partition_listing(boto3, #140)으로 파티션 디렉터리만 나열해서 구한다.
+    fault/rent 둘 다 날짜 identity 파티션(reg_date_partition/rent_date_partition)
+    이라 파티션 디렉터리 존재 여부가 곧 "그 날짜에 데이터가 있다"와 같다 - 파티션을
+    지우는 잡이 없어 오탐이 없다.
+    """
+    from common.partition_listing import list_partitions
 
     horizon = int(cfg.get_path("run.horizon_days", 14))
-    engine = SqlEngine.for_spark(spark)
-    fault = ft.read_fault(engine, cfg)
-    rent = ft.read_rental(engine, cfg)
-
-    f_max, f_min = fault.select(F.max("reg_date"), F.min("reg_date")).first()
-    r_max, r_min = rent.select(F.max(F.to_date("rent_at")), F.min(F.to_date("rent_at"))).first()
-    if f_max is None or r_max is None:
+    fault_days = list_partitions(cfg.get_path("sources.failure_report"), "reg_date_partition")
+    rent_days = list_partitions(cfg.get_path("sources.rental_history"), "rent_date_partition")
+    if not fault_days or not rent_days:
         raise ValueError("silver 원천이 비어 있습니다.")
 
+    f_min, f_max = date.fromisoformat(fault_days[0]), date.fromisoformat(fault_days[-1])
+    r_min, r_max = date.fromisoformat(rent_days[0]), date.fromisoformat(rent_days[-1])
+
     # 고장신고 공백 월 검사 — 라벨이 없는 구간에 앵커를 잡으면 학습이 망가진다
-    months = (
-        fault.select(F.date_format("reg_date", "yyyy-MM").alias("ym"))
-        .distinct()
-        .toPandas()["ym"]
-        .tolist()
-    )
-    have = set(months)
+    have = {d[:7] for d in fault_days}
     cur, missing = date(f_min.year, f_min.month, 1), []
     while cur <= f_max:
         if cur.strftime("%Y-%m") not in have:
