@@ -67,7 +67,13 @@ ICEBERG_CATALOG_TYPE=hadoop
 ICEBERG_CATALOG_NAME=bike_catalog
 ICEBERG_WAREHOUSE_PATH=s3a://ttareungyi-warehouse/warehouse
 SEOUL_API_KEY=<서울 열린데이터광장 API 키>
+SLACK_WEBHOOK_URL=<Slack 인커밍 웹훅 URL, 선택 - 비워두면 Airflow 태스크 실패 알림을 skip>
 ```
+
+`SLACK_WEBHOOK_URL`은 Airflow 워커/스케줄러 프로세스 자체의 OS 환경변수라 `docker-compose*.yml`의
+`x-airflow-common.environment`를 통해 컨테이너로 전달된다 (`airflow/dags/dag_common.py`의
+`notify_slack_on_failure` 참고) - `infra/terraform`의 `notify_slack` Lambda가 읽는 동명의
+Lambda 환경변수와는 완전히 별개의 값이다.
 
 ### 2. 컨테이너 실행
 
