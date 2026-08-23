@@ -188,6 +188,39 @@ def test_preliminary_current_range_uses_its_own_observed_hour():
     assert rejection.code == policy.REASON_RANGE_MISMATCH
 
 
+def test_manifest_from_microsecond_cutoff_is_not_rejected_as_schema_invalid():
+    """#182 회귀: collect_rental_history_raw.parse_collection_cutoff()가 마이크로초를
+    자르므로, snapshot_keys()가 만든 key와 manifest에 저장된 observed_at이 실제
+    프로덕션 경로 그대로도 일치해야 한다. 이 테스트는 test 전용 _cutoff 헬퍼가 아니라
+    실제 parse_collection_cutoff를 통과시켜 selector까지 이어지는 전체 경로를 검증한다."""
+    from jobs import collect_rental_history_raw as raw_job
+
+    cutoff = raw_job.parse_collection_cutoff("2026-08-22T06:00:00.654321+09:00")
+    payload_key, manifest_key = raw_job.snapshot_keys(date(2026, 8, 22), cutoff, "FINAL")
+
+    manifest = {
+        "dataset": "rental_history",
+        "target_date": "2026-08-22",
+        "observed_at": cutoff.astimezone(KST).isoformat(),
+        "snapshot_type": "FINAL",
+        "status": "COMPLETE",
+        "requested_hours": VALID_HOURS_FULL_DAY,
+        "completed_hours": VALID_HOURS_FULL_DAY,
+        "page_count": 24,
+        "row_count": 1000,
+        "schema_valid": True,
+        "payload_key": payload_key,
+        "error": None,
+    }
+
+    rejection = policy.validate_manifest(
+        manifest=manifest,
+        manifest_key=manifest_key,
+        expected_hours=VALID_HOURS_FULL_DAY,
+    )
+    assert rejection is None
+
+
 # ------------------------------------------------------- manifest rejection
 
 

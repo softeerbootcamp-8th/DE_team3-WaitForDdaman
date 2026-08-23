@@ -1,6 +1,6 @@
 import threading
 import time
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -33,6 +33,28 @@ def _recording_writer():
 def test_parse_collection_cutoff_rejects_naive_datetime():
     with pytest.raises(ValueError, match="timezone"):
         raw_job.parse_collection_cutoff("2026-08-22T05:00:00")
+
+
+def test_parse_collection_cutoff_truncates_microseconds():
+    """#182: 수동 트리거의 dag_run.conf나 data_interval_end는 마이크로초를 포함할 수 있는데,
+    snapshot_keys()가 만드는 key(초 단위 strftime)와 manifest에 저장하는 observed_at
+    (isoformat)이 같은 값을 가리켜야 selector의 완전 일치 비교가 깨지지 않는다."""
+    cutoff = raw_job.parse_collection_cutoff("2026-08-22T06:00:00.123456+09:00")
+
+    assert cutoff.microsecond == 0
+    assert cutoff.isoformat() == "2026-08-22T06:00:00+09:00"
+
+
+def test_snapshot_keys_round_trip_with_microsecond_cutoff():
+    """마이크로초가 있던 cutoff로 만든 key의 observed_at 문자열을 다시 파싱해서
+    isoformat()으로 저장한 manifest 값과 비교해도 일치해야 한다 (#182 회귀)."""
+    cutoff = raw_job.parse_collection_cutoff("2026-08-22T06:00:00.999999+09:00")
+
+    payload_key, _ = raw_job.snapshot_keys(date(2026, 8, 22), cutoff, "FINAL")
+    stored_observed_at = cutoff.astimezone(raw_job.KST).isoformat()
+
+    assert "observed_at=20260822T060000+0900" in payload_key
+    assert stored_observed_at == "2026-08-22T06:00:00+09:00"
 
 
 def test_collection_windows_include_previous_full_day_and_closed_current_hours():
@@ -72,6 +94,30 @@ def test_snapshot_keys_reject_unknown_snapshot_type():
 
     with pytest.raises(ValueError, match="snapshot_type"):
         raw_job.snapshot_keys(date(2026, 8, 22), cutoff, "BACKUP")
+
+
+def test_collect_snapshot_normalizes_microsecond_observed_at_by_itself():
+    """#182 후속: collect_snapshot()이 parse_collection_cutoff를 거치지 않은 마이크로초
+    datetime을 직접 받아도, key와 manifest에 저장하는 observed_at이 스스로 일치해야
+    한다 - 호출자가 정규화를 책임지는 게 아니라 이 함수 자체가 불변식을 지켜야 한다."""
+    dirty_observed_at = datetime(2026, 8, 22, 5, 0, 0, 654321, tzinfo=raw_job.KST)
+    writes, write_json = _recording_writer()
+
+    def fetch_pages(target_date, hour):
+        yield [dict(VALID_ROW, REQUEST_HOUR=hour)]
+
+    manifest = raw_job.collect_snapshot(
+        target_date=date(2026, 8, 22),
+        hours=[0],
+        observed_at=dirty_observed_at,
+        snapshot_type="PRELIMINARY",
+        fetch_pages=fetch_pages,
+        write_json=write_json,
+    )
+
+    manifest_key = next(key for key, _ in writes if key.endswith("manifest.json"))
+    assert "observed_at=20260822T050000+0900" in manifest_key
+    assert manifest["observed_at"] == "2026-08-22T05:00:00+09:00"
 
 
 def test_collect_snapshot_writes_unmodified_payload_before_complete_manifest():

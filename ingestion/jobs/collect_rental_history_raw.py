@@ -42,11 +42,21 @@ class RawCollectionError(Exception):
 
 
 def parse_collection_cutoff(value: str) -> datetime:
-    """Airflow가 전달한 논리적 cutoff를 timezone-aware KST 시각으로 정규화한다."""
+    """Airflow가 전달한 논리적 cutoff를 timezone-aware KST 시각으로 정규화한다.
+
+    마이크로초는 버린다 - 이 값에서 파생되는 observed_at 키(snapshot_keys()의
+    strftime("%Y%m%dT%H%M%S%z"), 초 단위)와 manifest에 저장하는 isoformat() 값이
+    같은 인스턴트를 가리켜야 한다. 안 자르면 마이크로초가 있는 cutoff에서
+    key와 manifest 값이 어긋나 selector의 완전 일치 비교(rental_history_
+    snapshot_policy.py)가 항상 실패한다. 수동 트리거의 dag_run.conf나 실행
+    환경의 data_interval_end는 마이크로초를 포함할 수 있다. 이 함수가
+    select_rental_history_snapshot/promote_rental_history_raw/update_rental_
+    history_confirmed_watermark의 공통 진입점이라 여기서 한 번만 자르면 된다.
+    """
     cutoff = datetime.fromisoformat(value)
     if cutoff.tzinfo is None or cutoff.utcoffset() is None:
         raise ValueError("collection_cutoff_at must include timezone")
-    return cutoff.astimezone(KST)
+    return cutoff.astimezone(KST).replace(microsecond=0)
 
 
 def build_collection_windows(cutoff: datetime) -> list[tuple[date, list[int]]]:
@@ -144,6 +154,12 @@ def collect_snapshot(
     read_json: Callable[[str], Any | None] | None = None,
 ) -> dict:
     """한 날짜의 API 관측본을 수집하고 payload 다음 manifest 순서로 기록한다."""
+    # 마이크로초를 여기서 자른다 - 호출자가 이미 정규화된 값을 넘긴다고 가정하지 않는다.
+    # key(snapshot_keys()의 초 단위 strftime)와 아래 observed_iso(isoformat())가 같은
+    # 인스턴트를 가리켜야 selector의 완전 일치 비교가 깨지지 않는데, 그 보장을 호출자
+    # (parse_collection_cutoff)에만 맡기면 이 함수를 직접 부르는 새 호출자가 생길 때마다
+    # 같은 버그가 재발한다. 이 함수 스스로 불변식을 지킨다 (#182).
+    observed_at = observed_at.replace(microsecond=0)
     started_at = time.monotonic()
     normalized_type = snapshot_type.strip().upper()
     payload_key, manifest_key = snapshot_keys(
