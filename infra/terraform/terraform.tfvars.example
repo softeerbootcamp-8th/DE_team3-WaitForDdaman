@@ -30,10 +30,14 @@ serving_db_secret_arn = "REPLACE_ME"
 iceberg_jdbc_catalog_uri = "REPLACE_ME"
 
 # ---- 선택 (기본값 있음, 필요할 때만 override) ----
+# aws_region/raw_bucket/warehouse_bucket/iceberg_catalog_name/seoul_api_base_url의
+# 기본값은 config/__init__.py의 Settings 기본값과 동일해야 한다.
 
 # aws_region         = "ap-northeast-2"
 # app_env            = "prod"
 # raw_bucket         = "ttareungyi-raw"
+# warehouse_bucket   = "ttareungyi-warehouse"
+# iceberg_catalog_name = "bike_catalog"
 # seoul_api_base_url = "http://openapi.seoul.go.kr:8088"
 
 # Slack 알림 (notify_slack Lambda, Issue #180) - 비워두면(기본값) 관련 리소스가
