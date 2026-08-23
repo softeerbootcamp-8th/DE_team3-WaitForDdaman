@@ -74,11 +74,14 @@ resource "aws_iam_role_policy_attachment" "serving_sync_secrets_attach" {
 # 않고, 이 Lambda 전용 보안그룹에서의 5432 인바운드만 새로 추가한다.
 resource "aws_security_group" "serving_sync_lambda_sg" {
   name        = "serving-sync-lambda-sg"
-  description = "serving_sync Lambda(write/verify) 아웃바운드 전용 보안그룹"
+  # AWS 보안그룹/규칙 description은 ASCII만 허용한다 (Issue #188) - 한글 원문:
+  # "serving_sync Lambda(write/verify) 아웃바운드 전용 보안그룹"
+  description = "Outbound-only security group for serving_sync Lambda (write/verify)"
   vpc_id      = var.vpc_id
 
   egress {
-    description = "전체 아웃바운드 허용 (RDS, Secrets Manager/S3는 VPC 엔드포인트로 나감)"
+    # 한글 원문: "전체 아웃바운드 허용 (RDS, Secrets Manager/S3는 VPC 엔드포인트로 나감)"
+    description = "Allow all outbound (RDS, Secrets Manager/S3 egress via VPC endpoints)"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -93,7 +96,8 @@ resource "aws_security_group_rule" "rds_allow_serving_sync_lambda" {
   protocol                 = "tcp"
   security_group_id        = var.rds_security_group_id
   source_security_group_id = aws_security_group.serving_sync_lambda_sg.id
-  description               = "serving_sync Lambda(#172)의 RDS 접근 허용"
+  # 한글 원문: "serving_sync Lambda(#172)의 RDS 접근 허용"
+  description = "Allow RDS access from serving_sync Lambda (#172)"
 }
 
 # ---- S3 Gateway VPC Endpoint ----
