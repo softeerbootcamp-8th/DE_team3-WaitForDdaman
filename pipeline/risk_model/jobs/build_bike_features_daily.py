@@ -35,6 +35,7 @@ from common.spark_session import build_spark_session
 from common.sql_assert import QualityCheck, QualityCheckError
 from pipeline.train_risk_model.features import apply_trip_filters, build_samples, read_rental
 from pipeline.train_risk_model.settings import load_config
+from pipeline.train_risk_model.sql_engine import SqlEngine
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -126,9 +127,13 @@ def _exclude_suspended_rental_days(rent_df: DataFrame, suspended_df: DataFrame) 
 
 
 def _build_features(spark, cfg, target_date: date):
+    # #149: features.py의 read_rental/apply_trip_filters/build_samples가
+    # SqlEngine을 받도록 바뀌었다 - 이 잡 자체의 Spark->DuckDB 전환은 #171 범위라
+    # 여기서는 SqlEngine.for_spark로 감싸기만 해서 인터페이스만 맞춘다.
+    engine = SqlEngine.for_spark(spark)
     window_days = int(cfg.get_path("run.window_days", 14))
 
-    rent = apply_trip_filters(read_rental(spark, cfg), cfg)
+    rent = apply_trip_filters(engine, read_rental(engine, cfg), cfg)
     suspended = _suspended_bike_days(spark, target_date, window_days)
     filtered_rent = _exclude_suspended_rental_days(rent, suspended)
 
@@ -138,7 +143,7 @@ def _build_features(spark, cfg, target_date: date):
         target_date, excluded_count, suspended.count(),
     )
 
-    df = build_samples(spark, cfg, [target_date], anchor_type="serve", rent=filtered_rent, with_labels=False)
+    df = build_samples(engine, cfg, [target_date], anchor_type="serve", rent=filtered_rent, with_labels=False)
     return df.drop("label").select(*OUTPUT_COLUMNS)
 
 
