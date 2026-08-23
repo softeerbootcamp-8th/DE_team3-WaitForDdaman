@@ -93,6 +93,8 @@ from dag_common import (
     COLLECTION_CUTOFF_AT_TEMPLATE,
     DEFAULT_ARGS,
     bash_job,
+    is_aws_env,
+    run_emr_serverless_spark_job,
 )
 
 # 밀린 날짜가 많아도 한 run이 이만큼만 처리하고 끝낸다. run이 하루를 넘겨
@@ -181,14 +183,32 @@ def bronze_daily_batch_all_sources():
         )
 
         # 유일한 Spark/Iceberg 단계라 이 태스크만 BRONZE_POOL을 점유한다.
-        promote_to_bronze = BashOperator(
-            task_id="promote_to_bronze",
-            bash_command=bash_job("promote_rental_history_raw"),
-            env={"COLLECTION_CUTOFF_AT": COLLECTION_CUTOFF_AT_TEMPLATE},
-            append_env=True,
-            execution_timeout=timedelta(hours=2),
-            pool=BRONZE_POOL,
-        )
+        if is_aws_env():
+            @task(task_id="promote_to_bronze", execution_timeout=timedelta(hours=2), pool=BRONZE_POOL)
+            def promote_to_bronze_emr(collection_cutoff_at: str) -> str:
+                return run_emr_serverless_spark_job(
+                    entry_point="local:///opt/app/ingestion/jobs/promote_rental_history_raw.py",
+                    name="bronze-promote-rental-history",
+                    extra_env={"COLLECTION_CUTOFF_AT": collection_cutoff_at},
+                    log_group_name="/emr-serverless/bronze-daily-batch",
+                    log_stream_name_prefix="promote-rental-history",
+                    tags={
+                        "dag_id": "bronze_daily_batch_all_sources",
+                        "task_id": "promote_to_bronze",
+                        "dataset": "rental_history",
+                    },
+                )
+
+            promote_to_bronze = promote_to_bronze_emr(COLLECTION_CUTOFF_AT_TEMPLATE)
+        else:
+            promote_to_bronze = BashOperator(
+                task_id="promote_to_bronze",
+                bash_command=bash_job("promote_rental_history_raw"),
+                env={"COLLECTION_CUTOFF_AT": COLLECTION_CUTOFF_AT_TEMPLATE},
+                append_env=True,
+                execution_timeout=timedelta(hours=2),
+                pool=BRONZE_POOL,
+            )
 
         update_confirmed_watermark = BashOperator(
             task_id="update_confirmed_watermark",

@@ -1,8 +1,8 @@
 """앵커 산출과 학습 샘플 적재.
 
 이 모듈이 파이프라인에서 유일한 Spark 작업이다.
-EMR 로 옮길 때는 아래 main() 을 spark-submit 엔트리포인트로 그대로 쓰고,
-DAG 의 build_train_samples 태스크만 EmrAddStepsOperator 로 바꾸면 된다.
+APP_ENV=aws 에서는 Airflow DAG가 아래 main() 을 EMR Serverless spark-submit
+엔트리포인트로 실행한다.
 """
 
 from __future__ import annotations
@@ -15,6 +15,17 @@ from pyspark.sql import SparkSession
 
 from pipeline.train_risk_model import features as ft
 from pipeline.train_risk_model.settings import load_config
+
+
+def load_anchor_plan(anchor_plan: str | None = None, anchor_plan_json: str | None = None) -> dict:
+    if bool(anchor_plan) == bool(anchor_plan_json):
+        raise ValueError("--anchor-plan 또는 --anchor-plan-json 중 정확히 하나만 지정하세요.")
+
+    if anchor_plan_json:
+        return json.loads(anchor_plan_json)
+
+    with open(str(anchor_plan), encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 # ── Spark 세션 ────────────────────────────────────────────────────────
@@ -166,12 +177,13 @@ def write_samples(spark: SparkSession, cfg, anchor_plan: dict) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=None)
-    ap.add_argument("--anchor-plan", required=True, help="resolve_anchors 결과 JSON 파일 경로")
+    plan_group = ap.add_mutually_exclusive_group(required=True)
+    plan_group.add_argument("--anchor-plan", help="resolve_anchors 결과 JSON 파일 경로")
+    plan_group.add_argument("--anchor-plan-json", help="resolve_anchors 결과 JSON 문자열")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    with open(args.anchor_plan, encoding="utf-8") as fh:
-        plan = json.load(fh)
+    plan = load_anchor_plan(args.anchor_plan, args.anchor_plan_json)
 
     spark = get_spark(cfg, "risk-model-build-samples")
     try:

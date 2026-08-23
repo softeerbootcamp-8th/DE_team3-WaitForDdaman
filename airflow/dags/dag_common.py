@@ -6,6 +6,8 @@ dag_assets.py와 같은 방식으로, Airflow가 dags 폴더를 sys.path에 넣�
 `from dag_common import ...`를 별도 패키징 없이 그대로 쓸 수 있다.
 """
 import os
+import shlex
+import time
 from datetime import timedelta
 
 import requests
@@ -13,6 +15,24 @@ import requests
 INGESTION_DIR = "/opt/airflow/ingestion"
 STAGING_DIR = "/opt/airflow/staging"  # staging/jobs/ 잡(Silver 등) 실행 위치
 INGESTION_PYTHON = "python"
+
+
+def load_env_file(env_path: str = "/opt/airflow/.env") -> None:
+    """BashOperator가 source하던 .env 값을 TaskFlow/Python 태스크에서도 볼 수 있게 한다."""
+    if not os.path.exists(env_path):
+        return
+    with open(env_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if not os.environ.get(key):
+                os.environ[key] = value.strip()
+
+
+load_env_file()
 
 # ==============================================================================
 # 워커 자원 가드 (Worker Resource Guard) - Issue #144
@@ -65,6 +85,133 @@ def notify_slack_on_failure(context: dict) -> None:
         requests.post(webhook_url, json={"text": message}, timeout=10)
     except requests.RequestException:
         pass
+
+
+def is_aws_env() -> bool:
+    return os.getenv("APP_ENV", "local") == "aws"
+
+
+def _required_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"{name} 환경변수가 필요합니다.")
+    return value
+
+
+def _emr_spark_submit_parameters(extra_env: dict[str, str] | None = None) -> str:
+    env = {
+        "APP_ENV": "aws",
+        "AWS_DEFAULT_REGION": os.getenv("AWS_DEFAULT_REGION") or os.getenv("AWS_REGION", ""),
+        "RISK_MODEL_CONFIG": os.getenv("EMR_RISK_MODEL_CONFIG", "/opt/app/config/risk_model.yaml"),
+    }
+    for key in (
+        "ICEBERG_CATALOG_TYPE",
+        "ICEBERG_CATALOG_NAME",
+        "ICEBERG_WAREHOUSE_PATH",
+        "ICEBERG_JDBC_CATALOG_URI",
+        "ICEBERG_CATALOG_SECRET_ARN",
+        "RAW_BUCKET",
+        "WAREHOUSE_BUCKET",
+    ):
+        value = os.getenv(key)
+        if value:
+            env[key] = value
+
+    # Secrets Manager ARN이 아직 배포 환경에 없으면 기존 .env 값을 쓰는 과도기
+    # 경로를 허용한다. ARN이 있으면 비밀번호는 job 파라미터에 싣지 않는다.
+    if not env.get("ICEBERG_CATALOG_SECRET_ARN"):
+        for key in ("ICEBERG_JDBC_CATALOG_USER", "ICEBERG_JDBC_CATALOG_PASSWORD"):
+            value = os.getenv(key)
+            if value:
+                env[key] = value
+
+    for key, value in (extra_env or {}).items():
+        if value is not None:
+            env[key] = str(value)
+
+    params = []
+    for key, value in env.items():
+        if value == "":
+            continue
+        params.extend(
+            [
+                "--conf",
+                f"spark.emr-serverless.driverEnv.{key}={value}",
+                "--conf",
+                f"spark.executorEnv.{key}={value}",
+            ]
+        )
+    return " ".join(shlex.quote(p) for p in params)
+
+
+def run_emr_serverless_spark_job(
+    *,
+    entry_point: str,
+    name: str,
+    entry_point_arguments: list[str] | None = None,
+    extra_env: dict[str, str] | None = None,
+    log_group_name: str = "/emr-serverless/airflow-spark",
+    log_stream_name_prefix: str | None = None,
+    tags: dict[str, str] | None = None,
+) -> str:
+    """EMR Serverless Spark job을 제출하고 terminal 상태까지 polling한다."""
+    import boto3
+
+    application_id = _required_env("EMR_SPARK_APPLICATION_ID")
+    execution_role_arn = _required_env("EMR_SPARK_EXECUTION_ROLE_ARN")
+    region = os.getenv("AWS_DEFAULT_REGION") or os.getenv("AWS_REGION")
+    client = boto3.client("emr-serverless", region_name=region)
+
+    response = client.start_job_run(
+        applicationId=application_id,
+        executionRoleArn=execution_role_arn,
+        name=name,
+        jobDriver={
+            "sparkSubmit": {
+                "entryPoint": entry_point,
+                "entryPointArguments": entry_point_arguments or [],
+                "sparkSubmitParameters": _emr_spark_submit_parameters(extra_env),
+            }
+        },
+        configurationOverrides={
+            "monitoringConfiguration": {
+                "cloudWatchLoggingConfiguration": {
+                    "enabled": True,
+                    "logGroupName": log_group_name,
+                    "logStreamNamePrefix": log_stream_name_prefix or name,
+                }
+            }
+        },
+        tags=tags or {},
+    )
+    job_run_id = response["jobRunId"]
+    print(f"EMR Serverless job submitted: application={application_id} job_run_id={job_run_id}")
+
+    terminal = {"SUCCESS", "FAILED", "CANCELLED"}
+    poll_seconds = int(os.getenv("EMR_SPARK_POLL_INTERVAL_SECONDS", "30"))
+    max_seconds = int(os.getenv("EMR_SPARK_POLL_MAX_SECONDS", str(6 * 60 * 60)))
+    deadline = time.monotonic() + max_seconds
+    last_state = None
+
+    while True:
+        job = client.get_job_run(applicationId=application_id, jobRunId=job_run_id)["jobRun"]
+        state = job["state"]
+        if state != last_state:
+            print(f"EMR Serverless job {job_run_id} state={state}: {job.get('stateDetails', '')}")
+            last_state = state
+        if state == "SUCCESS":
+            return job_run_id
+        if state in terminal:
+            raise RuntimeError(
+                f"EMR Serverless job {job_run_id} failed with state={state}: "
+                f"{job.get('stateDetails', '')}"
+            )
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"EMR Serverless job {job_run_id} did not finish within {max_seconds} seconds "
+                f"(last_state={state})"
+            )
+        time.sleep(poll_seconds)
 
 
 # 일반 잡 기본 재시도 설정

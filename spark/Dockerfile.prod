@@ -29,11 +29,13 @@ RUN curl -fsSL -o "$SPARK_HOME/jars/postgresql-42.7.3.jar" \
 # from ingestion.common.xxx / from pipeline.train_risk_model.xxx (qualified) 가
 # 코드 수정 없이 그대로 동작하려면 디렉터리 이름과 깊이가 로컬과 같아야 한다.
 # 대상 잡: ingestion/jobs/initial_load_{rental_history,failure_report}.py,
-# pipeline/train_risk_model/samples.py, airflow/scripts/check_*.py.
+# pipeline/train_risk_model/samples.py,
+# pipeline/collection_priority/jobs/compact_gold_tables.py, airflow/scripts/check_*.py.
 COPY config/ /opt/app/config/
 COPY ingestion/common/ /opt/app/ingestion/common/
 COPY ingestion/jobs/ /opt/app/ingestion/jobs/
 COPY ingestion/schema/ /opt/app/ingestion/schema/
+COPY pipeline/collection_priority/jobs/ /opt/app/pipeline/collection_priority/jobs/
 COPY pipeline/train_risk_model/ /opt/app/pipeline/train_risk_model/
 COPY airflow/scripts/ /opt/app/airflow/scripts/
 

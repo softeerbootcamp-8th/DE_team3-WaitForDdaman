@@ -227,6 +227,13 @@ resource "aws_iam_role" "emr_spark_execution_role" {
 # 이 리포에 Glue 사용 흔적이 없음(기존 조사로 확인됨).
 data "aws_iam_policy_document" "emr_spark_execution_policy_doc" {
   statement {
+    sid       = "S3BucketExistenceCheck"
+    effect    = "Allow"
+    actions   = ["s3:ListAllMyBuckets"]
+    resources = ["*"]
+  }
+
+  statement {
     sid    = "S3RawWarehouseAccess"
     effect = "Allow"
     # AbortMultipartUpload/ListBucketMultipartUploads/GetBucketLocation 추가 -

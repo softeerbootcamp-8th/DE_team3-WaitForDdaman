@@ -74,7 +74,9 @@ from dag_common import (
     SILVER_POOL,
     bash_job,
     bash_staging_job,
+    is_aws_env,
     notify_slack_on_failure,
+    run_emr_serverless_spark_job,
 )
 
 # 일 배치의 DEFAULT_ARGS를 그대로 쓰지 않는다. 초기 적재는 수동 1회성이라 사람이 붙어서
@@ -139,18 +141,40 @@ def bronze_initial_load_all_sources():
 
     rental_history_files = parse_rental_history_files(list_rental_history_files.output)
 
+    @task(
+        task_id="initial_load_rental_history_file",
+        execution_timeout=timedelta(minutes=30),
+        pool=BRONZE_POOL,
+    )
+    def initial_load_rental_history_file_emr(input_file: str) -> str:
+        return run_emr_serverless_spark_job(
+            entry_point="local:///opt/app/ingestion/jobs/initial_load_rental_history.py",
+            name="bronze-initial-load-rental-history",
+            extra_env={"INPUT_FILE": input_file},
+            log_group_name="/emr-serverless/bronze-initial-load",
+            log_stream_name_prefix="rental-history",
+            tags={
+                "dag_id": "bronze_initial_load_all_sources",
+                "task_id": "initial_load_rental_history_file",
+                "dataset": "rental_history",
+            },
+        )
+
     # 파일 개수만큼 태스크 인스턴스가 동적으로 생성된다(Dynamic Task Mapping) - 파일
     # 하나 = spark-submit 프로세스 하나 = 새 JVM. 하나가 OOM으로 죽어도 그 인스턴스만
     # 재시도되고 나머지 파일에는 영향이 없다.
-    rental_history = BashOperator.partial(
-        task_id="initial_load_rental_history_file",
-        execution_timeout=timedelta(minutes=30),  # 폴더 전체 기준(3시간) -> 파일 1개 기준으로 축소
-        pool=BRONZE_POOL,
-    ).expand(
-        bash_command=rental_history_files.map(
-            lambda f: bash_job("initial_load_rental_history", f"INPUT_FILE='{f}' ")
+    if is_aws_env():
+        rental_history = initial_load_rental_history_file_emr.expand(input_file=rental_history_files)
+    else:
+        rental_history = BashOperator.partial(
+            task_id="initial_load_rental_history_file",
+            execution_timeout=timedelta(minutes=30),  # 폴더 전체 기준(3시간) -> 파일 1개 기준으로 축소
+            pool=BRONZE_POOL,
+        ).expand(
+            bash_command=rental_history_files.map(
+                lambda f: bash_job("initial_load_rental_history", f"INPUT_FILE='{f}' ")
+            )
         )
-    )
 
     # 고장신고: zip/csv/xlsx 혼합 입력, 볼륨은 작지만 동일한 이유로 파일 단위로 나눈다.
     list_failure_report_files = BashOperator(
@@ -171,15 +195,37 @@ def bronze_initial_load_all_sources():
 
     failure_report_files = parse_failure_report_files(list_failure_report_files.output)
 
-    failure_report = BashOperator.partial(
+    @task(
         task_id="initial_load_failure_report_file",
-        execution_timeout=timedelta(minutes=20),  # 폴더 전체 기준(1시간) -> 파일 1개 기준으로 축소
+        execution_timeout=timedelta(minutes=20),
         pool=BRONZE_POOL,
-    ).expand(
-        bash_command=failure_report_files.map(
-            lambda f: bash_job("initial_load_failure_report", f"INPUT_FILE='{f}' ")
-        )
     )
+    def initial_load_failure_report_file_emr(input_file: str) -> str:
+        return run_emr_serverless_spark_job(
+            entry_point="local:///opt/app/ingestion/jobs/initial_load_failure_report.py",
+            name="bronze-initial-load-failure-report",
+            extra_env={"INPUT_FILE": input_file},
+            log_group_name="/emr-serverless/bronze-initial-load",
+            log_stream_name_prefix="failure-report",
+            tags={
+                "dag_id": "bronze_initial_load_all_sources",
+                "task_id": "initial_load_failure_report_file",
+                "dataset": "failure_report",
+            },
+        )
+
+    if is_aws_env():
+        failure_report = initial_load_failure_report_file_emr.expand(input_file=failure_report_files)
+    else:
+        failure_report = BashOperator.partial(
+            task_id="initial_load_failure_report_file",
+            execution_timeout=timedelta(minutes=20),  # 폴더 전체 기준(1시간) -> 파일 1개 기준으로 축소
+            pool=BRONZE_POOL,
+        ).expand(
+            bash_command=failure_report_files.map(
+                lambda f: bash_job("initial_load_failure_report", f"INPUT_FILE='{f}' ")
+            )
+        )
 
     # *_watermark_date는 사람이 직접 입력하는 값이라 *_pattern으로 적재 범위를 좁히고
     # 이 값을 안 맞추면(#41-42 경고 참고) 실제로 적재 안 한 기간이 daily_batch/Silver에

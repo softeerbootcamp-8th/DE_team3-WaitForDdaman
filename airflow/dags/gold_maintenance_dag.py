@@ -22,9 +22,9 @@ from datetime import timedelta
 
 import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.sdk import dag
+from airflow.sdk import dag, task
 
-from dag_common import notify_slack_on_failure
+from dag_common import is_aws_env, notify_slack_on_failure, run_emr_serverless_spark_job
 
 COLLECTION_PRIORITY_DIR = "/opt/airflow/pipeline/collection_priority"
 INGESTION_DIR = "/opt/airflow/ingestion"
@@ -58,11 +58,27 @@ def _compact_bash() -> str:
     doc_md=__doc__,
 )
 def gold_maintenance():
-    BashOperator(
-        task_id="compact_gold_tables",
-        bash_command=_compact_bash(),
-        execution_timeout=timedelta(hours=1),
-    )
+    if is_aws_env():
+        @task(task_id="compact_gold_tables", execution_timeout=timedelta(hours=1))
+        def compact_gold_tables_emr() -> str:
+            return run_emr_serverless_spark_job(
+                entry_point="local:///opt/app/pipeline/collection_priority/jobs/compact_gold_tables.py",
+                name="gold-compact-tables",
+                log_group_name="/emr-serverless/gold-maintenance",
+                log_stream_name_prefix="compact-gold-tables",
+                tags={
+                    "dag_id": "gold_maintenance",
+                    "task_id": "compact_gold_tables",
+                },
+            )
+
+        compact_gold_tables_emr()
+    else:
+        BashOperator(
+            task_id="compact_gold_tables",
+            bash_command=_compact_bash(),
+            execution_timeout=timedelta(hours=1),
+        )
 
 
 gold_maintenance()

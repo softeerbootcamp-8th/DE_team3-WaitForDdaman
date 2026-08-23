@@ -5,14 +5,43 @@
 환경변수만 바꿔서 동작하게 한다.
 
     APP_ENV=local  -> LocalStack S3 + Hadoop Iceberg Catalog
-    APP_ENV=aws    -> 실제 S3 + Glue Data Catalog
+    APP_ENV=aws    -> 실제 S3 + Iceberg Catalog(jdbc 권장)
 
 ingestion/staging/pipeline 세 서비스가 전부 이 값을 참조해야 해서
 (ingestion/common 안에 두면 다른 서비스가 PYTHONPATH 트릭으로만 접근 가능했음)
 최상위 config/ 패키지로 뺐다.
 """
+import json
 import os
 from dataclasses import dataclass
+
+
+_ICEBERG_CATALOG_SECRET_ENV_KEYS = (
+    "ICEBERG_JDBC_CATALOG_USER",
+    "ICEBERG_JDBC_CATALOG_PASSWORD",
+)
+_iceberg_catalog_secret_loaded = False
+
+
+def _ensure_iceberg_catalog_secret_env() -> None:
+    """Secrets Manager 값을 실제 JDBC credential이 필요할 때만 os.environ에 채운다."""
+    global _iceberg_catalog_secret_loaded
+    if _iceberg_catalog_secret_loaded:
+        return
+
+    secret_arn = os.getenv("ICEBERG_CATALOG_SECRET_ARN")
+    if not secret_arn:
+        _iceberg_catalog_secret_loaded = True
+        return
+
+    import boto3
+
+    client = boto3.client("secretsmanager")
+    secret = json.loads(client.get_secret_value(SecretId=secret_arn)["SecretString"])
+    for key in _ICEBERG_CATALOG_SECRET_ENV_KEYS:
+        if key in secret:
+            os.environ[key] = str(secret[key])
+    _iceberg_catalog_secret_loaded = True
 
 
 @dataclass(frozen=True)
@@ -70,14 +99,17 @@ class Settings:
     iceberg_jdbc_catalog_uri: str = os.getenv(
         "ICEBERG_JDBC_CATALOG_URI", "jdbc:postgresql://postgres:5432/iceberg_catalog"
     )
-    # 같은 postgres 컨테이너의 계정을 그대로 재사용 (DB만 분리) - 루트 .env의
-    # POSTGRES_USER/PASSWORD와 항상 같아야 하므로 별도 하드코딩 기본값을 두지 않는다.
-    iceberg_jdbc_catalog_user: str = os.getenv(
-        "ICEBERG_JDBC_CATALOG_USER", os.getenv("POSTGRES_USER", "airflow")
-    )
-    iceberg_jdbc_catalog_password: str = os.getenv(
-        "ICEBERG_JDBC_CATALOG_PASSWORD", os.getenv("POSTGRES_PASSWORD", "airflow")
-    )
+    @property
+    def iceberg_jdbc_catalog_user(self) -> str:
+        # 같은 postgres 컨테이너의 계정을 그대로 재사용 (DB만 분리) - 루트 .env의
+        # POSTGRES_USER/PASSWORD와 항상 같아야 하므로 별도 하드코딩 기본값을 두지 않는다.
+        _ensure_iceberg_catalog_secret_env()
+        return os.getenv("ICEBERG_JDBC_CATALOG_USER", os.getenv("POSTGRES_USER", "airflow"))
+
+    @property
+    def iceberg_jdbc_catalog_password(self) -> str:
+        _ensure_iceberg_catalog_secret_env()
+        return os.getenv("ICEBERG_JDBC_CATALOG_PASSWORD", os.getenv("POSTGRES_PASSWORD", "airflow"))
 
     # ---- 서울 열린데이터광장 Open API (실제 스펙 확인됨, 2026-08-11) ----
     # 서비스명(tbCycleRentData 등)은 데이터셋마다 고정값이라 env로 안 빼고
