@@ -24,6 +24,7 @@ x-airflow-common:
     S3_ENDPOINT: ${S3_ENDPOINT:-http://localstack:4566}
     AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-}
     APP_ENV: ${APP_ENV:-local}
+    SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
     ICEBERG_CATALOG_TYPE: ${ICEBERG_CATALOG_TYPE:-jdbc}
     # jdbc 카탈로그 인증 - config.py의 fallback(ICEBERG_JDBC_CATALOG_USER 없으면
     # POSTGRES_USER, 그것도 없으면 하드코딩 "airflow")이 여기 컨테이너 환경에
