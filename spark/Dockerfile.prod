@@ -1,0 +1,47 @@
+# EMR Serverless(Spark) 커스텀 이미지.
+# AWS 규칙: USER root로 수정 후 마지막엔 반드시 USER hadoop:hadoop로 복귀해야
+# EMR Serverless가 이 이미지를 워커로 실행할 수 있다. JAVA_HOME/SPARK_HOME 등
+# 베이스 이미지의 환경변수는 건드리지 않는다.
+FROM public.ecr.aws/emr-serverless/spark/emr-7.2.0:latest
+
+USER root
+
+# Iceberg / Hadoop-AWS / JDBC 카탈로그 드라이버 jar.
+# EMR Serverless 워커는 런타임에 인터넷이 없어 spark.jars.packages(Maven 런타임
+# 다운로드, ingestion/common/spark_session.py의 로컬/EC2 실행 방식)를 그대로 못
+# 쓴다. 빌드 시점(이 이미지를 만드는 CI/로컬 머신)엔 인터넷이 있으므로 여기서
+# 미리 받아 $SPARK_HOME/jars/에 넣는다. 버전은 spark_session.py와 동일하게 고정.
+RUN curl -fsSL -o "$SPARK_HOME/jars/iceberg-spark-runtime-3.5_2.12-1.5.2.jar" \
+      "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.5.2/iceberg-spark-runtime-3.5_2.12-1.5.2.jar" \
+ && curl -fsSL -o "$SPARK_HOME/jars/iceberg-aws-bundle-1.5.2.jar" \
+      "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-aws-bundle/1.5.2/iceberg-aws-bundle-1.5.2.jar" \
+ && curl -fsSL -o "$SPARK_HOME/jars/hadoop-aws-3.3.4.jar" \
+      "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar" \
+ && curl -fsSL -o "$SPARK_HOME/jars/postgresql-42.7.3.jar" \
+      "https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.3/postgresql-42.7.3.jar"
+
+# 앱 코드. 로컬/Airflow 실행(airflow/dags/gold_risk_decision_dag.py의 _bash())과
+# 동일한 상대 구조를 /opt/app 아래 그대로 재현한다 - import config / from
+# common.xxx / from jobs.xxx / from pipeline.train_risk_model.xxx가 코드 수정
+# 없이 그대로 동작하려면 디렉터리 이름과 깊이가 로컬과 같아야 한다.
+COPY config/ /opt/app/config/
+COPY ingestion/common/ /opt/app/ingestion/common/
+COPY pipeline/train_risk_model/ /opt/app/pipeline/train_risk_model/
+COPY pipeline/risk_model/jobs/ /opt/app/pipeline/risk_model/jobs/
+
+# Python 의존성. pyspark는 베이스 이미지가 이미 제공하므로 재설치하지 않는다.
+COPY spark/requirements-emr.txt /opt/app/requirements-emr.txt
+RUN pip3 install --no-cache-dir -r /opt/app/requirements-emr.txt
+
+# 로컬 bash 실행과 동일한 PYTHONPATH 3분할 규칙:
+#   /opt/app                     -> config, pipeline.train_risk_model.* (namespace package)
+#   /opt/app/ingestion            -> common.*
+#   /opt/app/pipeline/risk_model  -> jobs.*
+ENV PYTHONPATH="/opt/app:/opt/app/ingestion:/opt/app/pipeline/risk_model"
+
+# jar를 위에서 이미 $SPARK_HOME/jars에 baked-in했으므로, spark_session.py가
+# spark.jars.packages(Ivy 런타임 다운로드)를 설정하지 않도록 끈다.
+ENV SPARK_JARS_ALREADY_BAKED="true"
+
+# EMR Serverless는 이 이미지를 hadoop 유저로 실행한다.
+USER hadoop:hadoop
