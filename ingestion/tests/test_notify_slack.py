@@ -81,3 +81,30 @@ def test_empty_records_returns_zero_notified(monkeypatch):
     monkeypatch.setenv("SLACK_WEBHOOK_URL", WEBHOOK_URL)
     result = lambda_handler({"Records": []}, None)
     assert result == {"statusCode": 200, "notified": 0}
+
+
+def test_one_failing_record_does_not_block_other_records(monkeypatch):
+    """한 레코드가 실패해도 나머지 레코드는 계속 전송돼야 한다 (재시도 시 중복 발송 방지)."""
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", WEBHOOK_URL)
+
+    ok_resp = MagicMock()
+    ok_resp.getcode.return_value = 200
+    ok_cm = MagicMock()
+    ok_cm.__enter__.return_value = ok_resp
+
+    mock_urlopen = MagicMock(
+        side_effect=[ok_cm, urllib.error.URLError("connection refused")]
+    )
+
+    event = {
+        "Records": [
+            {"Sns": {"Message": ALARM_MESSAGE, "Subject": "ok-alarm"}},
+            {"Sns": {"Message": ALARM_MESSAGE, "Subject": "bad-alarm"}},
+        ]
+    }
+
+    with patch("infra.lambdas.notify_slack.lambda_function.urllib.request.urlopen", mock_urlopen):
+        with pytest.raises(RuntimeError):
+            lambda_handler(event, None)
+
+    assert mock_urlopen.call_count == 2
