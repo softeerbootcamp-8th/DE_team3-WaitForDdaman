@@ -7,6 +7,8 @@ Bronze 일 배치 잡 - 서울시 공공자전거 대여이력 (OA-15182)
 - 하루 처리가 "완전히" 성공했을 때만 그 날짜로 워터마크를 갱신한다
   -> 중간에 실패하면 워터마크가 마지막 성공일에 머물러 있어, 재실행 시 누락 없이 이어서 처리됨
 - 재실행 시 동일 날짜 파티션을 덮어써서 멱등성 보장 (같은 날 두 번 돌려도 중복 적재 안 됨)
+- tbCycleRentData 24시간 API 호출을 ThreadPoolExecutor로 병렬화하여 수행 시간 최적화 (Issue #142)
+- Spark를 완전히 제거하고 PyArrow + PyIceberg(SqlCatalog)로 경량화/고속화 (Issue #142)
 
 사용법:
     python -m jobs.daily_batch_rental_history
@@ -15,23 +17,25 @@ Bronze 일 배치 잡 - 서울시 공공자전거 대여이력 (OA-15182)
 import logging
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, List
 
-from pyspark.sql import functions as F
+import pyarrow as pa
 
 import config
 from common.api_client import (
     SeoulApiError,
     SeoulApiTransientError,
-    fetch_rent_history_by_date,
+    fetch_rent_history_by_date_parallel,
     strip_pagination_meta,
 )
+from common.iceberg_io import overwrite_partition
 from common.s3_utils import ensure_bucket, put_json
-from common.spark_session import build_spark_session
 from common.watermark import read_watermark, write_watermark
 from schema.rental_history_schema import (
+    COLUMN_ALIAS_MAP,
+    REQUIRED_STANDARD_COLUMNS,
     SchemaValidationError,
-    build_select_exprs,
     validate_and_report,
 )
 
@@ -39,56 +43,61 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 
-def _table_name() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.bronze.rental_history"
+def bronze_table_name() -> str:
+    return "bronze.rental_history"
 
 
-def _ensure_bronze_table(spark) -> None:
-    """
-    initial_load_rental_history.py와 동일한 DDL - 초기 적재 없이 daily_batch만 단독으로
-    먼저 돌리는 경우(신규 환경, 최근 N일치만 받고 싶은 경우 등)에도 테이블이 없어서
-    writeTo().overwritePartitions()가 TABLE_OR_VIEW_NOT_FOUND로 실패하지 않게 한다.
-    이미 초기 적재로 테이블이 있어도 CREATE TABLE IF NOT EXISTS라 안전하다(no-op).
-    """
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {config.SETTINGS.iceberg_catalog_name}.bronze")
-    spark.sql(
-        f"""
-        CREATE TABLE IF NOT EXISTS {_table_name()} (
-            bike_id STRING,
-            rent_dt STRING,
-            rent_station_no STRING,
-            rent_station_name STRING,
-            rent_hold STRING,
-            return_dt STRING,
-            return_station_no STRING,
-            return_station_name STRING,
-            return_hold STRING,
-            use_min STRING,
-            use_distance_m STRING,
-            user_class_cd STRING,
-            sex_cd STRING,
-            birth_year STRING,
-            rent_station_id STRING,
-            return_station_id STRING,
-            bike_se_cd STRING,
-            rent_date_partition STRING,
-            source_file STRING,
-            ingested_at TIMESTAMP
-        )
-        USING iceberg
-        PARTITIONED BY (rent_date_partition)
-        """
-    )
-    spark.sql(
-        f"ALTER TABLE {_table_name()} SET TBLPROPERTIES ('write.distribution-mode'='hash')"
-    )
+def _build_arrow_table(rows: List[Dict[str, Any]], date_str: str, source_file: str) -> pa.Table:
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    # 모든 표준 컬럼 리스트 초기화
+    cols: Dict[str, list] = {
+        "bike_id": [],
+        "rent_dt": [],
+        "rent_station_no": [],
+        "rent_station_name": [],
+        "rent_hold": [],
+        "return_dt": [],
+        "return_station_no": [],
+        "return_station_name": [],
+        "return_hold": [],
+        "use_min": [],
+        "use_distance_m": [],
+        "user_class_cd": [],
+        "sex_cd": [],
+        "birth_year": [],
+        "rent_station_id": [],
+        "return_station_id": [],
+        "bike_se_cd": [],
+        "rent_date_partition": [],
+        "source_file": [],
+        "ingested_at": [],
+    }
+
+    # 역방향 매핑 준비: 표준 컬럼 -> 소스 컬럼 후보들
+    standard_to_sources: Dict[str, List[str]] = {}
+    for src, dst in COLUMN_ALIAS_MAP.items():
+        standard_to_sources.setdefault(dst, []).append(src)
+
+    for r in rows:
+        for dst, sources in standard_to_sources.items():
+            val = None
+            for src in sources:
+                if src in r and r[src] is not None:
+                    val = str(r[src])
+                    break
+            cols[dst].append(val)
+
+        cols["rent_date_partition"].append(date_str)
+        cols["source_file"].append(source_file)
+        cols["ingested_at"].append(now_iso)
+
+    return pa.table(cols)
 
 
-def _process_one_day(spark, target_date: date) -> int:
-    # tbCycleRentData는 하루를 한 번에 못 주고 시간(0~23) 단위로 나눠서 응답하므로,
-    # fetch_rent_history_by_date 내부에서 24번 호출해 하루치를 모아온다.
-    raw_rows = list(fetch_rent_history_by_date(target_date))
+def _process_one_day(target_date: date) -> int:
     date_str = target_date.strftime("%Y-%m-%d")
+    raw_rows = fetch_rent_history_by_date_parallel(target_date)
 
     # API 원본 응답을 raw zone에 그대로 보존 (감사/재처리 대비)
     put_json(
@@ -101,38 +110,21 @@ def _process_one_day(spark, target_date: date) -> int:
         logger.info("%s: 신규 데이터 없음", date_str)
         return 0
 
-    # START_INDEX/END_INDEX/RNUM은 페이징 메타데이터일 뿐 실제 데이터 컬럼이 아니므로
-    # 스키마 검증 전에 제거한다 (안 지우면 매 호출마다 "알 수 없는 컬럼" 경고가 계속 발생함)
     rows = [strip_pagination_meta(r) for r in raw_rows]
+    actual_columns = list({k for r in rows for k in r.keys()})
+    validate_and_report(actual_columns)
 
-    actual_columns = list(rows[0].keys())
-    validate_and_report(actual_columns)  # 필수 컬럼 없으면 SchemaValidationError -> 상위에서 배치 중단
+    arrow_table = _build_arrow_table(rows, date_str, f"api:{date_str}")
+    row_count = len(arrow_table)
 
-    raw_df = spark.createDataFrame(rows)
-    select_exprs = build_select_exprs(actual_columns)
-    mapped_df = raw_df.select(*select_exprs)
-
-    bronze_df = (
-        mapped_df.withColumn("rent_date_partition", F.lit(date_str))
-        .withColumn("source_file", F.lit(f"api:{date_str}"))
-        .withColumn("ingested_at", F.current_timestamp())
-        .cache()
-    )
-    row_count = bronze_df.count()
-    bronze_df.writeTo(_table_name()).overwritePartitions()
-    bronze_df.unpersist()
-
-    logger.info("%s: %d행 적재 완료", date_str, row_count)
+    overwrite_partition(bronze_table_name(), arrow_table, "rent_date_partition", date_str)
+    logger.info("%s: %d행 PyIceberg 적재 완료", date_str, row_count)
     return row_count
 
 
 def run() -> None:
-    # 백필을 안 거치고 daily_batch만 단독 실행하는 경우에도 안전하도록 버킷을 보장한다.
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
-
-    spark = build_spark_session("bronze-daily-batch-rental-history")
-    _ensure_bronze_table(spark)
 
     last_processed = read_watermark()
     start_date = last_processed + timedelta(days=1)
@@ -155,10 +147,9 @@ def run() -> None:
     current = start_date
     while current <= end_date:
         try:
-            _process_one_day(spark, current)
-            write_watermark(current)  # 이 날짜까지는 안전하게 커밋됨 - 성공한 날짜만 워터마크 갱신
+            _process_one_day(current)
+            write_watermark(current)  # 성공한 날짜만 워터마크 갱신
         except (SchemaValidationError, SeoulApiError, SeoulApiTransientError) as e:
-            # 안전하게 실패: 이후 날짜는 처리하지 않고 배치를 중단한다 (워터마크는 마지막 성공일 유지)
             logger.error("%s 처리 실패, 배치 중단: %s", current, e)
             sys.exit(1)
         current += timedelta(days=1)

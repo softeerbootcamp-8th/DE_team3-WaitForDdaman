@@ -20,7 +20,7 @@ ENV/
 
 # 환경변수 / 시크릿 (절대 커밋 금지)
 .env
-.env.prod
+.env.*
 *.pem
 *.key
 secrets.yaml
@@ -46,6 +46,22 @@ _SUCCESS
 docker-compose.override.yml
 localstack/volume/
 
+# Terraform (.terraform.lock.hcl은 커밋 대상 - provider 버전 고정용)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+*.tfvars
+*.tfvars.json
+*.auto.tfvars
+*.auto.tfvars.json
+
 # 로컬 데이터 (원본/중간 산출물은 커밋하지 않음, 경로는 폴더 구조 확정 후 조정)
 data/
 *.parquet
@@ -66,3 +82,6 @@ Thumbs.db
 *.ini
 
 node_modules/
+
+# Claude superpowers 작업물 (스펙/리뷰/진행상황 등, 커밋 금지)
+.superpowers/

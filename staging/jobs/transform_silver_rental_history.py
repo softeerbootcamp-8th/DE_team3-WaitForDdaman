@@ -1,21 +1,62 @@
+"""
+Silver - 대여이력 (bronze.rental_history -> silver.rental_history)
+
+### Spark 제거 (#143)
+이 잡은 이 파이프라인에서 DuckDB가 볼륨 때문에 실제로 필요한 두 곳 중 하나다
+(다른 하나는 초기 적재의 700MB CSV). 중복 제거가 윈도우 함수
+`row_number() over (partition by bike_id, rent_dt)`인데 pyarrow에는 윈도우 함수가
+없어서 pyarrow만으로는 옮길 수 없다. 읽기/쓰기는 pyiceberg, 변환/중복 제거는 DuckDB,
+품질 검증은 common/sql_assert.py(PyDeequ 대체)로 옮긴다.
+
+PyDeequ를 걷어내면서 콜백 서버 종료 처리(stop_spark_session_with_deequ)도 같이
+사라졌다 - 그게 있어야 했던 이유(sys.exit 후에도 프로세스가 안 끝남) 자체가 없어진다.
+
+### 청크 안전성: 중복 제거 윈도우는 하루 안에서 닫힌다
+`MAX_DAYS_PER_RUN`으로 구간을 잘라 여러 번 돌려도, 하루씩 파티션을 나눠 써도
+결과가 달라지지 않는다. 근거는 두 가지다.
+
+  1. 윈도우 파티션 키가 `(bike_id, rent_dt)`다. rent_dt는 타임스탬프 값 자체이므로
+     같은 그룹에 들어가는 두 행은 rent_dt가 완전히 동일하다 - 날짜가 다를 수 없다.
+  2. 청크를 자르는 축인 `rent_date_partition`은 rent_dt에서 결정론적으로 파생된
+     값이다 (ingestion/jobs/initial_load_rental_history.py:_derive_date_partition -
+     rent_dt에서 숫자만 뽑아 YYYY-MM-DD로 조립, daily_batch_rental_history.py는
+     아예 그 날짜 상수를 그대로 넣는다). 즉 rent_dt가 같으면
+     rent_date_partition도 반드시 같다.
+
+두 조건이 겹치므로 한 중복 그룹의 모든 행은 항상 같은 rent_date_partition 안에
+들어 있고, 어떤 청크 분해도 그룹을 반으로 가르지 못한다. 날짜 청크 분해와
+`MAX_DAYS_PER_RUN` 재실행이 안전한 이유가 이것이고, 이후 재구축 때 이 판단을
+다시 할 필요가 없다.
+
+여기에 더해 중복 제거 정렬키를 전순서로 만들어(_DEDUP_SQL 주석 참고) 재실행 결과가
+값까지 같아지게 했다 - Spark 시절 정렬키(2개)로는 완전 동률인 그룹에서 어느 행이
+남는지가 실행마다 달라졌다.
+
+사용법:
+    python -m jobs.transform_silver_rental_history
+    MAX_DAYS_PER_RUN=30 python -m jobs.transform_silver_rental_history
+"""
 import logging
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
-# pydeequ는 import되는 순간 SPARK_VERSION 환경변수를 읽어 어떤 Scala Deequ jar를 사용할지 결정함
-# 그래서 import pydeequ 계열보다 반드시 먼저 환경변수를 설정해야 함
-os.environ.setdefault("SPARK_VERSION", "3.5")
-
-from pydeequ.checks import Check, CheckLevel
-from pydeequ.verification import VerificationResult, VerificationSuite
-from pyspark.sql import functions as F
-from pyspark.sql.window import Window
+import duckdb
+import pyarrow as pa
+from pyiceberg.exceptions import NoSuchTableError
+from pyiceberg.expressions import And, GreaterThanOrEqual, LessThanOrEqual
+from pyiceberg.partitioning import PartitionField, PartitionSpec
+from pyiceberg.schema import Schema
+from pyiceberg.transforms import IdentityTransform
+from pyiceberg.types import DoubleType, NestedField, StringType, TimestamptzType
 
 import config
-from common.s3_utils import ensure_bucket  # 워커/로컬 실행 시 대상 버킷이 없으면 만들어주는 안전장치
-from common.spark_session import build_spark_session_with_deequ, stop_spark_session_with_deequ
-from common.watermark import read_watermark, write_watermark # Bronze용으로 설계된 워터마크 모듈을 그대로 재사용하되 키만 다르게 줘서 Silver 전용 워터마크로 사용
+from common.duckdb_io import query_arrow
+from common.iceberg_catalog import build_iceberg_catalog
+from common.iceberg_io import overwrite_partition
+from common.s3_utils import ensure_bucket, get_json, put_json  # 워커/로컬 실행 시 대상 버킷이 없으면 만들어주는 안전장치
+from common.sql_assert import QualityCheck, QualityCheckError
+from common.watermark import read_watermark, write_watermark  # Bronze용 모듈을 키만 바꿔 Silver 전용으로 재사용
 from config.watermark_keys import SILVER_RENTAL_HISTORY  # build_dim_bike/set_watermark와 같은 값을 공유
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -27,254 +68,514 @@ SILVER_WATERMARK_KEY = SILVER_RENTAL_HISTORY
 # MAX_DAYS_PER_RUN 미지정 시 쓰는 기본 상한 - 평소 daily 운영(구간이 보통 하루)엔 영향 없음.
 DEFAULT_MAX_DAYS_PER_RUN = 31
 
-# --- table 이름 helper ---
-def _bronze_table() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.bronze.rental_history"
-# config.SETTINGS.iceberg_catalog_name : 로컬(Hadoop catalog)/AWS(Glue) 환경에 따라 다른 카탈로그 이름을 가리킴
-# -> 환경별 분기가 필요 없어짐
+BRONZE_TABLE = "bronze.rental_history"
+SILVER_TABLE = "silver.rental_history"
+PARTITION_COLUMN = "rent_date_partition"
 
-def _silver_table() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.silver.rental_history"
+SILVER_COLUMNS = [
+    "bike_id",
+    "rent_dt",
+    "return_dt",
+    "use_distance_m",
+    "rent_station_id",
+    "return_station_id",
+    "rent_date_partition",
+    "source_file",
+    "ingested_at",
+]
 
+# 브론즈 20컬럼 중 실버가 실제로 쓰는 것만 스캔한다 - 31일치(최대 300만 행)를
+# 통째로 메모리에 올리므로 안 쓰는 컬럼을 읽지 않는 게 그대로 메모리 절약이 된다.
+BRONZE_FIELDS = tuple(SILVER_COLUMNS)
 
-# --- 예외 정의 ---
-class SilverValidationError(Exception):
-    """PyDeequ 품질 검증 실패 - 이 예외는 배치를 즉시 중단시켜야 한다."""
+# pyiceberg로 테이블을 새로 만들 때만 쓰는 정의. 기존 테이블의 스키마/파티션 스펙과
+# 정확히 같아야 한다(rent_date_partition identity 파티션은 변경 금지 - #143).
+SILVER_SCHEMA = Schema(
+    NestedField(1, "bike_id", StringType(), required=False),
+    NestedField(2, "rent_dt", TimestamptzType(), required=False),
+    NestedField(3, "return_dt", TimestamptzType(), required=False),
+    NestedField(4, "use_distance_m", DoubleType(), required=False),
+    NestedField(5, "rent_station_id", StringType(), required=False),
+    NestedField(6, "return_station_id", StringType(), required=False),
+    NestedField(7, "rent_date_partition", StringType(), required=False),
+    NestedField(8, "source_file", StringType(), required=False),
+    NestedField(9, "ingested_at", TimestamptzType(), required=False),
+)
+SILVER_PARTITION_SPEC = PartitionSpec(
+    PartitionField(source_id=7, field_id=1000, transform=IdentityTransform(), name=PARTITION_COLUMN)
+)
+SILVER_PROPERTIES = {"write.distribution-mode": "hash"}
 
-
-# --- Silver 테이블 DDL ---
-def _ensure_silver_table(spark) -> None:
-    catalog = config.SETTINGS.iceberg_catalog_name
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {catalog}.silver")
-    spark.sql(
-        f"""
-        CREATE TABLE IF NOT EXISTS {_silver_table()} (
-            bike_id STRING,
-            rent_dt TIMESTAMP,
-            return_dt TIMESTAMP,
-            use_distance_m DOUBLE,
-            rent_station_id STRING,
-            return_station_id STRING,
-            rent_date_partition STRING,
-            source_file STRING,
-            ingested_at TIMESTAMP
-        )
-        USING iceberg
-        PARTITIONED BY (rent_date_partition)
-        """
-    )
-    # 여러 rent_date_partition에 걸친 구간을 한 번의 overwritePartitions()로 쓸 때,
-    # 이 속성 없이는 Iceberg가 FanoutWriter를 써서 파티션마다 파일을 동시에 열어두다
-    # OOM 나는 걸 initial_load_rental_history.py에서 실측으로 확인함 -> 여기도 동일 적용
-    spark.sql(
-        f"ALTER TABLE {_silver_table()} SET TBLPROPERTIES ('write.distribution-mode'='hash')"
-    )
-# rent_date_partition는 Bronze와 동일한 파티션 컬럼을 사용 => overwritePartitions()가 날짜별로 정확히 매칭되기 위함
-
-
-# --- 데이터 정제 ---
-# 결측치 필터
-def _drop_missing_keys(silver_df):
-    return silver_df.filter(F.col("bike_id").isNotNull() & F.col("rent_dt").isNotNull())
-# Column 객체끼리의 연산은 비트 연산자를 사용
-
-
-# 중복 제거
-def _dedup_bike_rent_dt(silver_df):
-    # 같은 자전거가 같은 시각에 대여를 시작한 행들끼리 그룹핑
-    window = Window.partitionBy("bike_id", "rent_dt").orderBy(
-        F.col("return_dt").asc_nulls_last(), F.col("rent_station_id").asc()
-    )
-    return (
-        silver_df.withColumn("_rn", F.row_number().over(window)) #그룹마다 1부터 순번 매김
-        .filter(F.col("_rn") == 1) # 그룹당 첫 번째 행만 남김
-        .drop("_rn")
-    )
-
-
-# --- rent_dt/return_dt 날짜 파싱 ---
 # Bronze는 원본 문자열을 그대로 보존하므로 소스(API/CSV 초기 적재)마다 포맷이 다를 수 있음
-# (rent_date_partition을 만들 때도 같은 이유로 포맷 편차에 대응함 - initial_load_rental_history.py 참고)
+# (rent_date_partition을 만들 때도 같은 이유로 포맷 편차에 대응함 - initial_load_rental_history.py 참고).
+# Spark to_timestamp 패턴 -> DuckDB strptime 포맷으로 1:1 번역. 순서가 곧 우선순위다.
 _KNOWN_DATETIME_FORMATS = [
-    "yyyy-MM-dd HH:mm:ss",
-    "yyyyMMddHHmmss",
-    "yyyy-MM-dd",
-    "yyyyMMdd",
+    "%Y-%m-%d %H:%M:%S",   # yyyy-MM-dd HH:mm:ss
+    "%Y%m%d%H%M%S",        # yyyyMMddHHmmss
+    "%Y-%m-%d",            # yyyy-MM-dd
+    "%Y%m%d",              # yyyyMMdd
 ]
 
 
-def _parse_datetime(col_name: str):
-    # 알려진 포맷을 순서대로 시도해서 처음 매칭되는 값을 채택 (coalesce가 첫 not-null을 고름)
-    parsed = F.lit(None).cast("timestamp")
-    for fmt in _KNOWN_DATETIME_FORMATS:
-        parsed = F.coalesce(parsed, F.to_timestamp(F.col(col_name), fmt))
-    return parsed
+class SilverValidationError(Exception):
+    """품질 검증 실패 - 이 예외는 배치를 즉시 중단시켜야 한다."""
 
 
-# --- Bronze => Silver 변환 ---
-def _cast_bronze_to_silver(bronze_df):
-    return bronze_df.select(
-        "bike_id",
-        F.col("rent_dt").alias("_raw_rent_dt"),
-        F.col("return_dt").alias("_raw_return_dt"),
-        _parse_datetime("rent_dt").alias("rent_dt"),
-        _parse_datetime("return_dt").alias("return_dt"),
-        F.col("use_distance_m").cast("double").alias("use_distance_m"),
-        "rent_station_id",
-        "return_station_id",
-        "rent_date_partition",
-        "source_file",
-        "ingested_at", # Bronze lineage 컬럼 그대로 승계
-    )
+def _parse_datetime_sql(column: str) -> str:
+    """알려진 포맷을 순서대로 시도해서 처음 매칭되는 값을 채택 (coalesce가 첫 not-null을 고름)."""
+    attempts = ", ".join(f"try_strptime({column}, '{fmt}')" for fmt in _KNOWN_DATETIME_FORMATS)
+    # Iceberg 컬럼 타입이 timestamptz라 TIMESTAMPTZ로 맞춰준다. 세션 타임존을 UTC로
+    # 고정해두므로(_connect) naive -> UTC 해석이 Spark(세션 TZ=UTC)와 동일하다.
+    return f"CAST(COALESCE({attempts}) AS TIMESTAMPTZ)"
 
 
-# --- Silver 품질 검증 ---
-def _validate_silver(spark, silver_df, range_label: str) -> None:
-    check = Check(spark, CheckLevel.Error, f"silver_rental_history_{range_label}")
-    
-    result = (
-        VerificationSuite(spark)
-        .onData(silver_df)
-        .addCheck(
-            # _drop_missing_keys가 이미 걸렀어야 할 조건 재확인
-            check.isComplete("bike_id") 
-            .isComplete("rent_dt")
-            
-            # _dedup_bike_rent_dt가 이미 제거했어야 할 중복의 재확인
-            .hasUniqueness(["bike_id", "rent_dt"], lambda fraction: fraction > 0.98)
-            
-            # 이동거리가 음수인 데이터 확인
-            .isNonNegative("use_distance_m")
-            
-            # 대여일시 이후에 반납일시가 있어야 함
-            .satisfies(
-                "return_dt IS NULL OR return_dt >= rent_dt",
-                "return_dt는 rent_dt 이후여야 함",
-            )
-        )
-        .run()
-    )
-    result_df = VerificationResult.checkResultsAsDataFrame(spark, result) # 결과를 사람이 읽을 DataFrame으로 변환
-    result_df.show(truncate=False) # Airflow task 로그에 검증 결과 테이블 출력
+def _cast_sql(source: str) -> str:
+    """Bronze(전부 STRING) -> Silver 타입 캐스팅. 파싱 실패 감지용 원본 컬럼을 함께 남긴다."""
+    return f"""
+        SELECT
+            bike_id,
+            rent_dt                                   AS _raw_rent_dt,
+            return_dt                                 AS _raw_return_dt,
+            {_parse_datetime_sql("rent_dt")}          AS rent_dt,
+            {_parse_datetime_sql("return_dt")}        AS return_dt,
+            TRY_CAST(use_distance_m AS DOUBLE)        AS use_distance_m,
+            rent_station_id,
+            return_station_id,
+            rent_date_partition,
+            source_file,
+            ingested_at
+        FROM {source}
+    """
 
-    # 실패한 제약 이름만 추려서 에러 메시지에 포함
-    if result.status != "Success":
-        failed_constraints = [r["constraint"] for r in result_df.collect() if r["constraint_status"] != "Success"]
+
+# 결측 제거 -> 중복 제거를 한 번에.
+#   - 결측: bike_id / rent_dt가 null인 행 드롭
+#   - 중복: 같은 자전거가 같은 시각에 대여를 시작한 행들끼리 그룹핑해 첫 행만 남김
+#
+# ORDER BY 앞의 두 키(return_dt, rent_station_id)는 기존 Spark 잡의
+# `orderBy(col("return_dt").asc_nulls_last(), col("rent_station_id").asc())`를
+# 그대로 옮긴 것이다. null 위치를 일일이 적는 이유: Spark의 `asc()`는 NULLS FIRST가
+# 기본인데 DuckDB의 `ASC`는 NULLS LAST가 기본이라, 안 적으면 rent_station_id가 null인
+# 행에서 기존 잡과 다른 행이 선택된다. `asc_nulls_last()`는 그대로 NULLS LAST.
+#
+# 나머지 3개 키는 Spark 잡에 없던 것을 이번에 추가했다(#143). 앞의 두 키만으로는
+# 순서가 전순서(total order)가 아니라서, 완전히 동률인 중복 그룹에서 row_number()가
+# 어느 행을 1번으로 고르는지가 실행마다 달라진다 - 같은 입력으로 같은 잡을 두 번
+# 돌렸을 때 실제로 결과가 갈리는 걸 실측했다(2026-08-22, 109,866행 중 4행). 이건
+# Spark 시절에도 있던 성질이고(그쪽도 셔플 순서에 달려 있다), 이대로 두면 재실행
+# /백필이 "같은 답"을 준다고 말할 수 없다. 남은 컬럼을 뒤에 붙여 순서를 전순서로
+# 만들어 재실행 결과를 고정한다. 동률이 아닌 그룹의 선택 결과는 앞 두 키가 그대로
+# 결정하므로 기존 동작과 달라지지 않는다.
+_DEDUP_SQL = """
+    SELECT bike_id, rent_dt, return_dt, use_distance_m, rent_station_id,
+           return_station_id, rent_date_partition, source_file, ingested_at
+    FROM {source}
+    WHERE bike_id IS NOT NULL AND rent_dt IS NOT NULL
+    QUALIFY row_number() OVER (
+        PARTITION BY bike_id, rent_dt
+        ORDER BY return_dt ASC NULLS LAST, rent_station_id ASC NULLS FIRST,
+                 return_station_id ASC NULLS FIRST, use_distance_m ASC NULLS FIRST,
+                 source_file ASC NULLS FIRST, ingested_at ASC NULLS FIRST
+    ) = 1
+"""
+
+# 원본 문자열은 있는데 알려진 포맷으로 하나도 안 파싱된 행 = 알려지지 않은 날짜 포맷.
+_PARSE_FAILED_SQL = """
+    SELECT count(*) FROM {source}
+    WHERE (_raw_rent_dt IS NOT NULL AND trim(_raw_rent_dt) <> '' AND rent_dt IS NULL)
+       OR (_raw_return_dt IS NOT NULL AND trim(_raw_return_dt) <> '' AND return_dt IS NULL)
+"""
+
+# #137: 06시 일 배치의 publish_bronze_asset이 Asset event에 실어 보낸 정확한 promotion만
+# 신뢰한다. S3의 "최신 COMPLETE promotion"을 추측하면 Catchup(metadata 없이 같은 Asset을
+# 발행) 실행이 이전 일 배치 promotion을 잘못 집어 당일 파티션을 처리할 수 있다.
+SNAPSHOT_FINAL = "FINAL"
+SNAPSHOT_PRELIMINARY = "PRELIMINARY"
+MODE_NORMAL = "NORMAL"
+MODE_DEGRADED = "DEGRADED"
+
+# ingestion/jobs/rental_history_snapshot_policy.py의 PROMOTION_PREFIX와 짝을 이루는
+# Silver 쪽 marker 경로. staging 잡은 `-m jobs.X`로 실행되면 cwd(staging/jobs)가
+# 먼저 잡혀 `jobs` 패키지가 staging/jobs에 고정되므로, ingestion/jobs 안의 정책 모듈을
+# `from jobs...`로 가져올 수 없다 (docs/architecture.md §3 - 디렉터리가 레이어와 1:1이
+# 아님). 그래서 key 포맷을 여기서 다시 정의한다.
+SILVER_PROMOTION_PREFIX = "_meta/promotion/silver_rental_history/"
+
+
+def _connect() -> duckdb.DuckDBPyConnection:
+    con = duckdb.connect(":memory:")
+    # TIMESTAMP -> TIMESTAMPTZ 캐스팅이 세션 타임존을 따르므로 UTC로 못박는다.
+    # 컨테이너 TZ에 결과가 흔들리면 Spark 잡과 값이 어긋난다.
+    con.execute("SET TimeZone='UTC'")
+    return con
+
+
+def transform(bronze_table: pa.Table, con: duckdb.DuckDBPyConnection | None = None) -> pa.Table:
+    """
+    브론즈 PyArrow Table을 실버 9컬럼으로 변환한다. 읽기/쓰기를 하지 않는다.
+
+    알려지지 않은 날짜 포맷이 하나라도 있으면 SilverValidationError를 던진다 -
+    조용히 드롭하면 그만큼 실버가 소리 없이 비어버린다.
+    """
+    conn = con or _connect()
+    conn.register("bronze_rental_history", bronze_table)
+    conn.execute(f"CREATE OR REPLACE TEMP VIEW cast_rental AS {_cast_sql('bronze_rental_history')}")
+
+    parse_failed = conn.execute(_PARSE_FAILED_SQL.format(source="cast_rental")).fetchone()[0]
+    if parse_failed:
         raise SilverValidationError(
-            f"{range_label} Silver 품질 검증 실패: {failed_constraints}"
+            f"rent_dt/return_dt 파싱 실패 {parse_failed}행 - 알려지지 않은 날짜 포맷일 가능성"
+        )
+
+    return query_arrow(conn, _DEDUP_SQL.format(source="cast_rental")).select(SILVER_COLUMNS)
+
+
+def validate(silver_table: pa.Table, range_label: str) -> None:
+    """
+    PyDeequ Check를 sql_assert QualityCheck로 1:1 옮긴 것. 실패 시 SilverValidationError.
+
+    hasUniqueness만 표현이 조금 다르다 - PyDeequ는 `fraction > 0.98`(초과),
+    sql_assert는 `ratio >= threshold`(이상)로 판정한다. 정확히 0.98인 경계에서만
+    갈리는 차이라 실질 판정은 같다.
+    """
+    result = (
+        QualityCheck(f"silver_rental_history_{range_label}")
+        # transform()의 결측 제거가 이미 걸렀어야 할 조건 재확인
+        .is_complete("bike_id")
+        .is_complete("rent_dt")
+        # transform()의 중복 제거가 이미 제거했어야 할 중복의 재확인
+        .has_uniqueness(["bike_id", "rent_dt"], threshold=0.98)
+        # 이동거리가 음수인 데이터 확인
+        .is_non_negative("use_distance_m")
+        # 대여일시 이후에 반납일시가 있어야 함
+        .satisfies("return_dt IS NULL OR return_dt >= rent_dt", "return_dt는 rent_dt 이후여야 함")
+        .run(silver_table)
+    )
+
+    for constraint in result.results:
+        logger.info(
+            "  [%s] %s (위반 %d / 전체 %d)",
+            constraint.status, constraint.name, constraint.violation_count, constraint.total_count,
+        )
+
+    try:
+        result.raise_if_failed()
+    except QualityCheckError as e:
+        raise SilverValidationError(f"{range_label} Silver 품질 검증 실패: {e}") from e
+
+
+def _ensure_silver_table(catalog):
+    """실버 테이블이 없으면 만든다. 이미 있으면 스키마/스펙을 건드리지 않고 그대로 쓴다."""
+    catalog.create_namespace_if_not_exists("silver")
+    try:
+        return catalog.load_table(SILVER_TABLE)
+    except NoSuchTableError:
+        logger.info("%s 테이블 신규 생성", SILVER_TABLE)
+        return catalog.create_table(
+            SILVER_TABLE,
+            schema=SILVER_SCHEMA,
+            partition_spec=SILVER_PARTITION_SPEC,
+            properties=SILVER_PROPERTIES,
         )
 
 
-# --- 날짜 범위 단위 처리 ---
-def _process_range(spark, start_date: date, end_date: date) -> int:
+def _read_bronze(catalog, start_str: str, end_str: str) -> pa.Table:
+    """rent_date_partition은 identity 파티션이라 이 범위 비교가 그대로 파티션 프루닝이 된다."""
+    table = catalog.load_table(BRONZE_TABLE)
+    return table.scan(
+        row_filter=And(
+            GreaterThanOrEqual(PARTITION_COLUMN, start_str),
+            LessThanOrEqual(PARTITION_COLUMN, end_str),
+        ),
+        selected_fields=BRONZE_FIELDS,
+    ).to_arrow()
+
+
+def _process_range(catalog, silver_table, start_date: date, end_date: date) -> int:
     start_str = start_date.strftime("%Y-%m-%d")
     end_str = end_date.strftime("%Y-%m-%d")
     range_label = start_str if start_date == end_date else f"{start_str}~{end_str}"
 
-    bronze_df = spark.read.table(_bronze_table()).filter(
-        F.col("rent_date_partition").between(start_str, end_str)
-    )
-
-    # 캐스팅까지 마친 뒤 캐시 -> 아래 통계 집계와 이후 결측/중복 제거 단계가
-    # Bronze를 두 번 다시 읽지 않고 이 캐시 하나를 같이 재사용함
-    cast_df = _cast_bronze_to_silver(bronze_df).cache()
-
-    # count 액션 한 번으로 전체 행수 + 파싱 실패 행수(원본 문자열은 있는데 알려진 포맷으로 하나도 안 파싱된 경우)를 같이 집계
-    stats = cast_df.agg(
-        F.count(F.lit(1)).alias("total"),
-        F.sum(
-            F.when(
-                (F.col("_raw_rent_dt").isNotNull() & (F.trim(F.col("_raw_rent_dt")) != "") & F.col("rent_dt").isNull())
-                | (F.col("_raw_return_dt").isNotNull() & (F.trim(F.col("_raw_return_dt")) != "") & F.col("return_dt").isNull()),
-                1,
-            ).otherwise(0)
-        ).alias("parse_failed"),
-    ).first()
-    row_count = stats["total"]
-    parse_failed = stats["parse_failed"] or 0
+    bronze_table = _read_bronze(catalog, start_str, end_str)
+    row_count = len(bronze_table)
 
     # 0행이면 Silver로 승격할 데이터가 없으므로 바로 종료
     if row_count == 0:
-        cast_df.unpersist()
         logger.info("%s: Bronze에 처리할 데이터 없음", range_label)
         return 0
 
-    if parse_failed > 0:
-        cast_df.unpersist()
-        raise SilverValidationError(
-            f"{range_label}: rent_dt/return_dt 파싱 실패 {parse_failed}행 - 알려지지 않은 날짜 포맷일 가능성"
-        )
-
-    # 파싱 실패 감지용으로만 쓴 원본 컬럼은 여기서 드롭 (Silver 스키마엔 없음)
-    trimmed_df = cast_df.drop("_raw_rent_dt", "_raw_return_dt")
-
-    # 결측 제거 → 중복 제거를 순차 적용
-    kept_df = _drop_missing_keys(trimmed_df)
-    silver_df = _dedup_bike_rent_dt(kept_df).cache()
-    silver_count = silver_df.count()
+    silver_arrow = transform(bronze_table)
+    silver_count = len(silver_arrow)
     if silver_count < row_count:
         logger.info(
             "%s: bike_id/rent_dt 결측 또는 중복으로 %d행 제외 (Bronze %d행 -> Silver %d행)",
             range_label, row_count - silver_count, row_count, silver_count,
         )
-    _validate_silver(spark, silver_df, range_label)  # 실패 시 SilverValidationError -> 배치 중단
 
-    # Iceberg의 dynamic partition overwrite API
-    # silver_df에 실제로 존재하는 파티션만 덮어쓰므로, Bronze에 없는 날짜는 그대로 유지됨
-    silver_df.writeTo(_silver_table()).overwritePartitions()
-    silver_df.unpersist() # 캐시 해제
-    cast_df.unpersist() # Bronze 캐스팅 결과 캐시도 해제
+    validate(silver_arrow, range_label)  # 실패 시 SilverValidationError -> 배치 중단
 
-    logger.info("%s: %d행 Silver 승격 완료", range_label, silver_count)
-    return silver_count # 로깅용 반환값
+    # Spark의 dynamic partition overwrite를 파티션 값별 overwrite로 옮긴 것.
+    # 위 docstring의 "중복 제거 윈도우는 하루 안에서 닫힌다"가 이 분해의 근거다 -
+    # 한 중복 그룹이 두 파티션에 걸치는 일이 없으므로 파티션별로 따로 써도
+    # 한 번에 쓴 것과 결과가 같다. Bronze에 없는 날짜는 손대지 않는 것도 동일.
+    con = _connect()
+    con.register("silver_rental_history", silver_arrow)
+    partition_values = [
+        row[0]
+        for row in con.execute(
+            f"SELECT DISTINCT {PARTITION_COLUMN} FROM silver_rental_history "
+            f"ORDER BY {PARTITION_COLUMN}"
+        ).fetchall()
+    ]
+    for value in partition_values:
+        chunk = query_arrow(
+            con,
+            f"SELECT * FROM silver_rental_history WHERE {PARTITION_COLUMN} = ?",
+            [value],
+        ).select(SILVER_COLUMNS)
+        overwrite_partition(silver_table, chunk, PARTITION_COLUMN, value)
+
+    logger.info("%s: %d행 Silver 승격 완료 (파티션 %d개)", range_label, silver_count, len(partition_values))
+    return silver_count
 
 
-# --- main ---
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    """`true`/`false`만 허용한다 (rental_history_snapshot_policy.parse_bool과 동일 규칙)."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if not normalized:
+        return default
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise SilverValidationError(f"{name} must be 'true' or 'false': {value!r}")
+
+
+def _load_bronze_promotion_metadata() -> dict | None:
+    """
+    silver_rental_history_dag.py가 triggering_asset_events에서 뽑아 넘긴 값을 읽는다.
+
+    Catchup(bronze_catchup_all_sources_dag.py)이나 수동 트리거처럼 Asset event에
+    metadata가 없으면 세 값이 모두 빈 문자열로 넘어온다 - 이 경우 None을 돌려줘
+    기존 확정 워터마크 구간만 처리하게 한다 (Catchup 코드는 이 이슈에서 건드리지 않는다).
+    """
+    run_date = (os.getenv("RENTAL_HISTORY_BRONZE_RUN_DATE") or "").strip()
+    promotion_id = (os.getenv("RENTAL_HISTORY_BRONZE_PROMOTION_ID") or "").strip()
+    promotion_key = (os.getenv("RENTAL_HISTORY_BRONZE_PROMOTION_KEY") or "").strip()
+    if not (run_date and promotion_id and promotion_key):
+        return None
+    return {"run_date": run_date, "promotion_id": promotion_id, "promotion_key": promotion_key}
+
+
+def _validate_bronze_marker(
+    marker, expected_run_date: str, expected_promotion_id: str, promotion_key: str
+) -> dict:
+    """Asset metadata와 실제 Bronze marker가 어긋나면 안전하게 실패시킨다."""
+    if not isinstance(marker, dict):
+        raise SilverValidationError(f"Bronze promotion marker 없음: {promotion_key}")
+    if marker.get("dataset") != "rental_history":
+        raise SilverValidationError(f"dataset 불일치: {marker.get('dataset')!r} ({promotion_key})")
+    if marker.get("run_date") != expected_run_date:
+        raise SilverValidationError(
+            f"run_date 불일치: {marker.get('run_date')!r} != {expected_run_date!r} ({promotion_key})"
+        )
+    if marker.get("promotion_id") != expected_promotion_id:
+        raise SilverValidationError(
+            f"promotion_id 불일치: {marker.get('promotion_id')!r} != {expected_promotion_id!r} "
+            f"({promotion_key})"
+        )
+    if marker.get("status") != "COMPLETE":
+        raise SilverValidationError(f"status가 COMPLETE가 아님: {marker.get('status')!r} ({promotion_key})")
+    return marker
+
+
+def _find_current_day_entry(marker: dict, run_date_str: str) -> dict | None:
+    """Bronze marker의 selected_snapshots 중 당일(run_date) 파티션 항목을 찾는다."""
+    for entry in marker.get("selected_snapshots") or []:
+        if entry.get("target_date") == run_date_str:
+            return entry
+    return None
+
+
+def _derive_mode(bronze_mode: str | None, snapshot_type: str) -> str:
+    """당일 파티션의 원천이 PRELIMINARY거나 Bronze marker 자체가 DEGRADED면 계승한다.
+
+    Bronze marker의 mode는 같은 promotion에 포함된 확정 backlog 날짜까지 반영하므로,
+    당일 entry만으로는 못 잡는 혼합(backlog PRELIMINARY + 당일 FINAL) 케이스를 놓치지
+    않기 위해 marker.mode도 함께 본다.
+    """
+    if bronze_mode == MODE_DEGRADED or snapshot_type == SNAPSHOT_PRELIMINARY:
+        return MODE_DEGRADED
+    return MODE_NORMAL
+
+
+def _silver_promotion_key(run_date_str: str, promotion_id: str) -> str:
+    return f"{SILVER_PROMOTION_PREFIX}run_date={run_date_str}/promotion_id={promotion_id}/promotion.json"
+
+
+def _build_silver_promotion_document(
+    *,
+    run_date_str: str,
+    promotion_id: str,
+    source_bronze_promotion_key: str,
+    entry: dict,
+    bronze_mode: str | None,
+    silver_row_count: int,
+    confirmed_through: date,
+    processed_at: str,
+) -> dict:
+    snapshot_type = entry["snapshot_type"]
+    return {
+        "dataset": "rental_history",
+        "run_date": run_date_str,
+        "promotion_id": promotion_id,
+        "source_bronze_promotion_key": source_bronze_promotion_key,
+        "mode": _derive_mode(bronze_mode, snapshot_type),
+        "source_snapshot_type": snapshot_type,
+        "source_observed_at": entry["observed_at"],
+        "processed_partition": run_date_str,
+        "silver_row_count": silver_row_count,
+        "confirmed_through": confirmed_through.strftime("%Y-%m-%d"),
+        "status": "COMPLETE",
+        "processed_at": processed_at,
+    }
+
+
+def _prepare_current_day_promotion(
+    catalog, silver_table, promotion_meta: dict, confirmed_through: date
+) -> dict | None:
+    """
+    Asset이 지정한 정확한 promotion만 검증 후 당일 파티션을 처리하고 Silver COMPLETE
+    marker 문서를 구성한다. marker 저장(put_json)은 하지 않는다 - #137이 확정
+    워터마크와 당일 promotion 처리를 둘 다 성공해야 확정 워터마크를 전진시키도록
+    요구하므로, 워터마크를 쓴 다음에야 marker를 최종적으로 남겨야 한다
+    (run()의 `_persist_current_day_promotion_marker` 호출 참고 - marker-last 보장 유지).
+
+    확정 워터마크는 이 함수에서 건드리지 않는다 - 이 파티션은 아직 확정 후보가
+    아니라서 다음 실행에서 확정 backlog로 다시 덮어써질 수 있다.
+
+    marker.t0_enabled=false로 처리를 건너뛰면 None을 돌려준다.
+    """
+    bucket = config.SETTINGS.raw_bucket
+    marker = get_json(bucket, promotion_meta["promotion_key"])
+    marker = _validate_bronze_marker(
+        marker,
+        promotion_meta["run_date"],
+        promotion_meta["promotion_id"],
+        promotion_meta["promotion_key"],
+    )
+
+    if marker.get("t0_enabled") is not True:
+        logger.info("Bronze marker t0_enabled=false - 당일 파티션 처리 건너뜀")
+        return None
+
+    run_date_str = promotion_meta["run_date"]
+    entry = _find_current_day_entry(marker, run_date_str)
+    if entry is None:
+        raise SilverValidationError(
+            f"Bronze marker에 당일({run_date_str}) 파티션 항목이 없음: "
+            f"{promotion_meta['promotion_key']}"
+        )
+
+    run_date_value = date.fromisoformat(run_date_str)
+    silver_row_count = _process_range(catalog, silver_table, run_date_value, run_date_value)
+
+    document = _build_silver_promotion_document(
+        run_date_str=run_date_str,
+        promotion_id=promotion_meta["promotion_id"],
+        source_bronze_promotion_key=promotion_meta["promotion_key"],
+        entry=entry,
+        bronze_mode=marker.get("mode"),
+        silver_row_count=silver_row_count,
+        confirmed_through=confirmed_through,
+        processed_at=datetime.now(timezone.utc).isoformat(),
+    )
+    return {
+        "bucket": bucket,
+        "key": _silver_promotion_key(run_date_str, promotion_meta["promotion_id"]),
+        "document": document,
+    }
+
+
+def _persist_current_day_promotion_marker(prepared: dict) -> None:
+    """_prepare_current_day_promotion이 구성한 문서를 실제로 S3에 남긴다 (marker-last)."""
+    put_json(prepared["bucket"], prepared["key"], prepared["document"])
+    document = prepared["document"]
+    logger.info(
+        "Silver promotion marker 기록 완료: run_date=%s promotion_id=%s mode=%s row_count=%d",
+        document["run_date"], document["promotion_id"], document["mode"], document["silver_row_count"],
+    )
+
+
 def run() -> None:
     # 백필/daily_batch를 안 거치고 이 잡만 단독 실행하는 경우에도 안전하도록 버킷을 보장
-    # (raw_bucket에는 워터마크 JSON이 있음 - Bronze는 두 버킷 다 보장하는데 여기선 빠져있었음)
+    # (raw_bucket에는 워터마크 JSON이 있음)
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
-    spark = build_spark_session_with_deequ("silver-transform-rental-history")
+    catalog = build_iceberg_catalog()
+    silver_table = _ensure_silver_table(catalog)
+
+    # 상한선: Bronze가 확정 커밋한 날짜 (rental_history 기본 워터마크 키)
+    bronze_watermark = read_watermark()
+    # 하한선: Silver 전용 워터마크
+    silver_watermark = read_watermark(watermark_key=SILVER_WATERMARK_KEY)
+
+    start_date = silver_watermark + timedelta(days=1)
+    confirmed_end_date = bronze_watermark
+
+    # 미지정이면 DEFAULT_MAX_DAYS_PER_RUN을 대신 써서 항상 상한을 건다
+    max_days = os.getenv("MAX_DAYS_PER_RUN") or str(DEFAULT_MAX_DAYS_PER_RUN)
+    capped_end = start_date + timedelta(days=int(max_days) - 1)
+    if capped_end < confirmed_end_date:
+        logger.info(
+            "MAX_DAYS_PER_RUN=%s 적용 - 이번 실행은 %s ~ %s까지만 처리 (원래 끝: %s)",
+            max_days, start_date, capped_end, confirmed_end_date,
+        )
+        confirmed_end_date = capped_end
+
+    has_confirmed_range = start_date <= confirmed_end_date
+
+    # #137: T0_ENABLED가 꺼져 있으면 metadata가 있어도 기존 T-1 처리만 유지하고
+    # Silver promotion marker를 만들지 않는다.
+    t0_enabled = _parse_bool_env("RENTAL_HISTORY_T0_ENABLED")
+    promotion_meta = _load_bronze_promotion_metadata() if t0_enabled else None
+
+    # 확정 신규 날짜가 없어도 당일 promotion이 있으면 조기 반환하지 않는다.
+    if not has_confirmed_range and promotion_meta is None:
+        logger.info(
+            "처리할 신규 날짜 없음 (Silver 워터마크=%s, Bronze 워터마크=%s)",
+            silver_watermark, bronze_watermark,
+        )
+        return
+
     try:
-        _ensure_silver_table(spark)
+        confirmed_through = silver_watermark
+        if has_confirmed_range:
+            _process_range(catalog, silver_table, start_date, confirmed_end_date)
+            confirmed_through = confirmed_end_date
 
-        # 상한선: Bronze가 확정 커밋한 날짜 (rental_history 기본 워터마크 키)
-        bronze_watermark = read_watermark()
-        # 하한선: Silver 전용 워터마크
-        silver_watermark = read_watermark(watermark_key=SILVER_WATERMARK_KEY)
-
-        start_date = silver_watermark + timedelta(days=1)
-        end_date = bronze_watermark
-
-        # 미지정이면 DEFAULT_MAX_DAYS_PER_RUN을 대신 써서 항상 상한을 건다
-        max_days = os.getenv("MAX_DAYS_PER_RUN") or str(DEFAULT_MAX_DAYS_PER_RUN)
-        capped_end = start_date + timedelta(days=int(max_days) - 1)
-        if capped_end < end_date:
-            logger.info(
-                "MAX_DAYS_PER_RUN=%s 적용 - 이번 실행은 %s ~ %s까지만 처리 (원래 끝: %s)",
-                max_days, start_date, capped_end, end_date,
+        # #137: 확정 구간과 당일 promotion 처리가 둘 다 성공해야 확정 워터마크를
+        # 전진시킨다 - 당일 처리 실패로 예외가 나면 아래 write_watermark 호출 전에
+        # SilverValidationError로 빠져나가 워터마크가 조기 전진하지 않는다.
+        prepared_promotion = None
+        if promotion_meta is not None:
+            prepared_promotion = _prepare_current_day_promotion(
+                catalog, silver_table, promotion_meta, confirmed_through
             )
-            end_date = capped_end
 
-        if start_date > end_date:
-            logger.info(
-                "처리할 신규 날짜 없음 (Silver 워터마크=%s, Bronze 워터마크=%s)",
-                silver_watermark, bronze_watermark,
-            )
-            return
+        if has_confirmed_range:
+            write_watermark(confirmed_end_date, watermark_key=SILVER_WATERMARK_KEY)
 
-        try:
-            # _process_range 성공 시에만 다음 줄 write_watermark 실행
-            _process_range(spark, start_date, end_date)
-            write_watermark(end_date, watermark_key=SILVER_WATERMARK_KEY)
-        except SilverValidationError as e:
-            logger.error("%s~%s 처리 실패, 배치 중단: %s", start_date, end_date, e)
-            sys.exit(1)
-    finally:
-        # PyDeequ 콜백 서버를 안 내리면 sys.exit()/정상 종료 후에도 프로세스가 안 끝나는 문제를 해결하기 위함
-        stop_spark_session_with_deequ(spark)
+        # marker는 워터마크를 쓴 다음에도 항상 마지막에 남긴다 (marker-last 보장).
+        if prepared_promotion is not None:
+            _persist_current_day_promotion_marker(prepared_promotion)
+    except SilverValidationError as e:
+        logger.error("%s~%s 처리 실패, 배치 중단: %s", start_date, confirmed_end_date, e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ Bronze 일 배치 잡 - 서울시 공공자전거 고장신고 내역 (OA-15644)
 - tbCycleFailureReport는 대여이력과 달리 시간 단위 분할이 필요 없다 (날짜 단위로 충분).
 - 워터마크 다음날부터 어제까지 날짜별로 순차 처리, 성공한 날짜만 커밋.
 - 재실행 시 동일 날짜 파티션을 덮어써서 멱등성 보장.
+- Spark를 완전히 제거하고 PyArrow + PyIceberg(SqlCatalog)로 경량화/고속화 (Issue #142).
 
 사용법:
     python -m jobs.daily_batch_failure_report
@@ -13,9 +14,10 @@ Bronze 일 배치 잡 - 서울시 공공자전거 고장신고 내역 (OA-15644)
 import logging
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, List
 
-from pyspark.sql import functions as F
+import pyarrow as pa
 
 import config
 from common.api_client import (
@@ -24,54 +26,60 @@ from common.api_client import (
     fetch_failure_reports_by_date,
     strip_pagination_meta,
 )
+from common.iceberg_io import overwrite_partition
 from common.s3_utils import ensure_bucket, put_json
-from common.spark_session import build_spark_session
 from common.watermark import read_watermark, write_watermark
+from config.watermark_keys import BRONZE_FAILURE_REPORT
 from schema.failure_report_schema import (
+    COLUMN_ALIAS_MAP,
     SchemaValidationError,
-    build_select_exprs,
     validate_and_report,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# 대여이력과 워터마크 키가 겹치면 안 되므로 데이터셋별로 분리
-WATERMARK_KEY = "_meta/watermark/failure_report.json"
+WATERMARK_KEY = BRONZE_FAILURE_REPORT
 
 
 def _table_name() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.bronze.failure_report"
+    return "bronze.failure_report"
 
 
-def _ensure_bronze_table(spark) -> None:
-    """
-    initial_load_failure_report.py와 동일한 DDL - 초기 적재 없이 daily_batch만 단독으로
-    먼저 돌리는 경우에도 테이블이 없어서 writeTo().overwritePartitions()가
-    TABLE_OR_VIEW_NOT_FOUND로 실패하지 않게 한다. 이미 초기 적재로 테이블이 있어도
-    CREATE TABLE IF NOT EXISTS라 안전하다(no-op).
-    """
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {config.SETTINGS.iceberg_catalog_name}.bronze")
-    spark.sql(
-        f"""
-        CREATE TABLE IF NOT EXISTS {_table_name()} (
-            bike_no STRING,
-            reg_dttm STRING,
-            failure_type STRING,
-            reg_date_partition STRING,
-            source_file STRING,
-            ingested_at TIMESTAMP
-        )
-        USING iceberg
-        PARTITIONED BY (reg_date_partition)
-        """
-    )
-    spark.sql(
-        f"ALTER TABLE {_table_name()} SET TBLPROPERTIES ('write.distribution-mode'='hash')"
-    )
+def _build_arrow_table(rows: List[Dict[str, Any]], date_str: str) -> pa.Table:
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    source_file_val = f"api:{date_str}"
+
+    cols: Dict[str, list] = {
+        "bike_no": [],
+        "reg_dttm": [],
+        "failure_type": [],
+        "reg_date_partition": [],
+        "source_file": [],
+        "ingested_at": [],
+    }
+
+    standard_to_sources: Dict[str, List[str]] = {}
+    for src, dst in COLUMN_ALIAS_MAP.items():
+        standard_to_sources.setdefault(dst, []).append(src)
+
+    for r in rows:
+        for dst, sources in standard_to_sources.items():
+            val = None
+            for src in sources:
+                if src in r and r[src] is not None:
+                    val = str(r[src])
+                    break
+            cols[dst].append(val)
+
+        cols["reg_date_partition"].append(date_str)
+        cols["source_file"].append(source_file_val)
+        cols["ingested_at"].append(now_iso)
+
+    return pa.table(cols)
 
 
-def _process_one_day(spark, target_date: date) -> int:
+def _process_one_day(target_date: date) -> int:
     raw_rows = list(fetch_failure_reports_by_date(target_date))
     date_str = target_date.strftime("%Y-%m-%d")
 
@@ -87,24 +95,14 @@ def _process_one_day(spark, target_date: date) -> int:
         return 0
 
     rows = [strip_pagination_meta(r) for r in raw_rows]
-    actual_columns = list(rows[0].keys())
+    actual_columns = list({k for r in rows for k in r.keys()})
     validate_and_report(actual_columns)
 
-    raw_df = spark.createDataFrame(rows)
-    select_exprs = build_select_exprs(actual_columns)
-    mapped_df = raw_df.select(*select_exprs)
+    arrow_table = _build_arrow_table(rows, date_str)
+    row_count = len(arrow_table)
 
-    bronze_df = (
-        mapped_df.withColumn("reg_date_partition", F.lit(date_str))
-        .withColumn("source_file", F.lit(f"api:{date_str}"))
-        .withColumn("ingested_at", F.current_timestamp())
-        .cache()
-    )
-    row_count = bronze_df.count()
-    bronze_df.writeTo(_table_name()).overwritePartitions()
-    bronze_df.unpersist()
-
-    logger.info("%s: %d행 적재 완료", date_str, row_count)
+    overwrite_partition(_table_name(), arrow_table, "reg_date_partition", date_str)
+    logger.info("%s: %d행 PyIceberg 적재 완료", date_str, row_count)
     return row_count
 
 
@@ -117,9 +115,6 @@ def run() -> None:
 
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
-
-    spark = build_spark_session("bronze-daily-batch-failure-report")
-    _ensure_bronze_table(spark)
 
     last_processed = read_watermark(watermark_key=WATERMARK_KEY)
     start_date = last_processed + timedelta(days=1)
@@ -142,7 +137,7 @@ def run() -> None:
     current = start_date
     while current <= end_date:
         try:
-            _process_one_day(spark, current)
+            _process_one_day(current)
             write_watermark(current, watermark_key=WATERMARK_KEY)
         except (SchemaValidationError, SeoulApiError, SeoulApiTransientError) as e:
             logger.error("%s 처리 실패, 배치 중단: %s", current, e)

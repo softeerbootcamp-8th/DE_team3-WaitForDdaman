@@ -9,8 +9,9 @@ received_at 역전), 서비스 시작일 이전 발생 여부는 검증하지 �
 방어선을 하나 더 둔다 (defense-in-depth: Bronze 스키마가 나중에 느슨해져도
 Silver가 최종 방어선 역할).
 
-최종 Silver 컬럼은 bike_id/event_type/occurred_at/station_id/ingested_at 5개로
-결정했으므로(worker_id/received_at/event_id 의도적 제외), received_at은
+최종 Silver 비즈니스 컬럼은 bike_id/event_type/occurred_at/station_id/ingested_at
+5개로 유지하고, PyIceberg 쓰기를 위한 occurred_date_partition만 뒤에 추가한다.
+worker_id/received_at/event_id는 의도적으로 제외하며 received_at은
 이 모듈의 이상치 판정에만 쓰고 최종 select에는 포함하지 않는다.
 
 station_id는 Gold의 gold.fact_station_inventory가 DEPLOY 이벤트로 자전거의
@@ -27,7 +28,7 @@ ALLOWED_EVENT_TYPES = {"COLLECT", "DEPLOY"}
 # bikeman 서비스 시작일 - 이보다 이전 occurred_at은 물리적으로 존재할 수 없음
 SERVICE_START_DATE = date(2026, 6, 30)
 
-# 최종 Silver 테이블 컬럼 (worker_id/received_at/event_id 의도적 제외)
+# 최종 Silver 비즈니스 컬럼 (identity 파티션 컬럼은 적재 잡에서 뒤에 추가)
 FINAL_COLUMNS = ["bike_id", "event_type", "occurred_at", "station_id", "ingested_at"]
 
 

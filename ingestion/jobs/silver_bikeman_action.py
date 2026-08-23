@@ -1,224 +1,419 @@
+"""Silver 따맨 행동 이력 변환 (DuckDB + PyArrow + PyIceberg).
+
+Bronze와 동일한 ``occurred_date_partition`` 문자열 identity 파티션을 사용한다.
+기존 ``days(occurred_at)`` 테이블은 임시 테이블에 전체 이력을 재구축한 뒤 백업을
+남기고 교체한다. 3일 lookback, watermark, quarantine 및 DQ 기록은 유지한다.
 """
-Silver 변환 잡 - 따맨/bikeman 행동 이력 (bronze.bikeman_event -> silver.bikeman_action)
+from __future__ import annotations
 
-### 파티션 설계
-bike_id를 파티션 키로 쓰지 않는다 - bike_id는 카디널리티가 높고(계속 증가) 계속
-늘어나는 값이라 파티션으로 쓰면 파일이 지나치게 잘게 쪼개진다(small file problem).
-다운스트림(위험도 스코어링 배치)도 "최근 N일 이벤트" 조회가 압도적으로 많아 날짜
-기준이 맞다. Iceberg의 hidden partitioning(days(occurred_at))을 사용해서 별도
-파티션 컬럼 없이 occurred_at 하나만으로 파티션 프루닝이 되게 한다.
-
-### 3일 lookback을 Silver에서도 유지하는 이유
-Bronze(daily_batch_bikeman_event.py)가 자체적으로 3일 lookback을 돌며 늦게
-도착한 이벤트를 반영해서 해당 occurred_date_partition을 다시 덮어쓴다. Silver가
-"어제"만 보면 Bronze가 나중에 갱신한 정정분을 놓친다. 그래서 Silver도 동일한
-lookback 윈도우로 재계산한다 (Bronze의 정정이 Silver까지 전파되도록).
-
-### 이상치 처리 (schema/bikeman_action_schema.py)
-1차: null/enum/시간 정합성(occurred_at vs received_at, 서비스 시작일, 미래 시각)
-     검사로 valid/quarantine 분리 + (bike_id, event_type, occurred_at) 중복 제거.
-2차: PyDeequ로 valid 데이터셋 전체의 완전성/enum 준수율을 측정해 dq_check_result에
-     기록. 이건 "행을 거르는" 게 아니라 "이 배치를 신뢰해도 되는가"를 판단하는
-     최종 게이트 - 실패하면 Silver에 쓰지 않고 배치를 중단한다(안전하게 실패).
-
-사용법:
-    python -m jobs.silver_bikeman_action
-    MAX_DAYS_PER_RUN=1 python -m jobs.silver_bikeman_action
-"""
 import logging
 import os
 import sys
 from datetime import date, datetime, timedelta, timezone
 
-from pyspark.sql import functions as F
+import duckdb
+import pyarrow as pa
+from pyiceberg.exceptions import NoSuchTableError
+from pyiceberg.expressions import EqualTo
+from pyiceberg.partitioning import PartitionField, PartitionSpec
+from pyiceberg.schema import Schema
+from pyiceberg.transforms import IdentityTransform
+from pyiceberg.types import NestedField, StringType, TimestamptzType
 
 import config
-from common.dq_utils import DEEQU_EXCLUDE, DEEQU_MAVEN_PACKAGE, ensure_dq_result_table, verify_bikeman_action
+from common.duckdb_io import query_arrow
+from common.iceberg_catalog import build_iceberg_catalog
+from common.iceberg_io import append, overwrite_partition
 from common.s3_utils import ensure_bucket
-from common.spark_session import build_spark_session, stop_spark_session_with_deequ
+from common.sql_assert import QualityCheck, QualityCheckResult
 from common.watermark import read_watermark, write_watermark
 from config.watermark_keys import SILVER_BIKEMAN_ACTION
-from schema.bikeman_action_schema import FINAL_COLUMNS, SERVICE_START_DATE, classify_rows, dedup_rows
+from schema.bikeman_action_schema import ALLOWED_EVENT_TYPES, SERVICE_START_DATE, classify_rows, dedup_rows
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# Bronze와 워터마크 키가 겹치면 안 되므로 Silver 전용 키를 쓴다
 WATERMARK_KEY = SILVER_BIKEMAN_ACTION
-
-# Bronze의 3일 lookback을 그대로 따라간다 (Bronze의 정정이 Silver까지 전파되도록)
 LOOKBACK_DAYS = 3
+BRONZE_TABLE = "bronze.bikeman_event"
+SILVER_TABLE = "silver.bikeman_action"
+QUARANTINE_TABLE = "silver.bikeman_action_quarantine"
+DQ_RESULT_TABLE = "silver.dq_check_result"
+REBUILD_TABLE = "silver.bikeman_action_identity_rebuild"
+BACKUP_TABLE = "silver.bikeman_action_hidden_partition_backup"
+PARTITION_COLUMN = "occurred_date_partition"
+BRONZE_FIELDS = ("bike_id", "event_type", "occurred_at", "station_id", "received_at")
+SILVER_COLUMNS = [
+    "bike_id", "event_type", "occurred_at", "station_id", "ingested_at", PARTITION_COLUMN,
+]
+
+SILVER_SCHEMA = Schema(
+    NestedField(1, "bike_id", StringType(), required=False),
+    NestedField(2, "event_type", StringType(), required=False),
+    NestedField(3, "occurred_at", TimestamptzType(), required=False),
+    NestedField(4, "station_id", StringType(), required=False),
+    NestedField(5, "ingested_at", TimestamptzType(), required=False),
+    NestedField(6, PARTITION_COLUMN, StringType(), required=False),
+)
+SILVER_PARTITION_SPEC = PartitionSpec(
+    PartitionField(source_id=6, field_id=1000, transform=IdentityTransform(), name=PARTITION_COLUMN)
+)
+SILVER_PROPERTIES = {"write.distribution-mode": "hash"}
+
+QUARANTINE_SCHEMA = Schema(
+    NestedField(1, "bike_id", StringType(), required=False),
+    NestedField(2, "event_type", StringType(), required=False),
+    NestedField(3, "occurred_at", TimestamptzType(), required=False),
+    NestedField(4, "received_at", TimestamptzType(), required=False),
+    NestedField(5, "quarantine_reason", StringType(), required=False),
+    NestedField(6, "quarantined_at", TimestamptzType(), required=False),
+)
+DQ_RESULT_SCHEMA = Schema(
+    NestedField(1, "dataset", StringType(), required=False),
+    NestedField(2, "occurred_date", StringType(), required=False),
+    NestedField(3, "check_name", StringType(), required=False),
+    NestedField(4, "check_level", StringType(), required=False),
+    NestedField(5, "check_status", StringType(), required=False),
+    NestedField(6, "constraint_desc", StringType(), required=False),
+    NestedField(7, "constraint_status", StringType(), required=False),
+    NestedField(8, "constraint_message", StringType(), required=False),
+    NestedField(9, "run_at", TimestamptzType(), required=False),
+)
+
+SILVER_ARROW_SCHEMA = pa.schema([
+    pa.field("bike_id", pa.string()),
+    pa.field("event_type", pa.string()),
+    pa.field("occurred_at", pa.timestamp("us", tz="UTC")),
+    pa.field("station_id", pa.string()),
+    pa.field("ingested_at", pa.timestamp("us", tz="UTC")),
+    pa.field(PARTITION_COLUMN, pa.string()),
+])
+QUARANTINE_ARROW_SCHEMA = pa.schema([
+    pa.field("bike_id", pa.string()),
+    pa.field("event_type", pa.string()),
+    pa.field("occurred_at", pa.timestamp("us", tz="UTC")),
+    pa.field("received_at", pa.timestamp("us", tz="UTC")),
+    pa.field("quarantine_reason", pa.string()),
+    pa.field("quarantined_at", pa.timestamp("us", tz="UTC")),
+])
+DQ_ARROW_SCHEMA = pa.schema([
+    pa.field("dataset", pa.string()),
+    pa.field("occurred_date", pa.string()),
+    pa.field("check_name", pa.string()),
+    pa.field("check_level", pa.string()),
+    pa.field("check_status", pa.string()),
+    pa.field("constraint_desc", pa.string()),
+    pa.field("constraint_status", pa.string()),
+    pa.field("constraint_message", pa.string()),
+    pa.field("run_at", pa.timestamp("us", tz="UTC")),
+])
+
+_CAST_SQL = """
+SELECT
+    CAST(bike_id AS VARCHAR) AS bike_id,
+    CAST(event_type AS VARCHAR) AS event_type,
+    TRY_CAST(occurred_at AS TIMESTAMPTZ) AS occurred_at,
+    CAST(station_id AS VARCHAR) AS station_id,
+    TRY_CAST(received_at AS TIMESTAMPTZ) AS received_at
+FROM bronze_bikeman_action
+"""
 
 
-def _bronze_table_name() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.bronze.bikeman_event"
+def _connect() -> duckdb.DuckDBPyConnection:
+    con = duckdb.connect(":memory:")
+    con.execute("SET TimeZone='UTC'")
+    return con
 
 
-def _silver_table_name() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.silver.bikeman_action"
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
-def _quarantine_table_name() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.silver.bikeman_action_quarantine"
+def transform(
+    bronze_table: pa.Table,
+    target_date: date,
+    run_at: datetime | None = None,
+) -> tuple[pa.Table, pa.Table]:
+    """Bronze 한 날짜를 Silver와 quarantine Arrow 테이블로 변환한다."""
+    now = _as_utc(run_at or datetime.now(timezone.utc))
+    con = _connect()
+    con.register("bronze_bikeman_action", bronze_table)
+    typed_rows = query_arrow(con, _CAST_SQL).to_pylist()
+    for row in typed_rows:
+        row["occurred_at"] = _as_utc(row.get("occurred_at"))
+        row["received_at"] = _as_utc(row.get("received_at"))
+
+    valid_rows, quarantine_rows = classify_rows(typed_rows, now)
+    valid_rows = dedup_rows(valid_rows)
+    date_str = target_date.isoformat()
+    silver_rows = [{
+        "bike_id": row.get("bike_id"),
+        "event_type": row.get("event_type"),
+        "occurred_at": row.get("occurred_at"),
+        "station_id": row.get("station_id"),
+        "ingested_at": now,
+        PARTITION_COLUMN: date_str,
+    } for row in valid_rows]
+    quarantined_rows = [{
+        "bike_id": row.get("bike_id"),
+        "event_type": row.get("event_type"),
+        "occurred_at": row.get("occurred_at"),
+        "received_at": row.get("received_at"),
+        "quarantine_reason": row.get("quarantine_reason"),
+        "quarantined_at": now,
+    } for row in quarantine_rows]
+    return (
+        pa.Table.from_pylist(silver_rows, schema=SILVER_ARROW_SCHEMA),
+        pa.Table.from_pylist(quarantined_rows, schema=QUARANTINE_ARROW_SCHEMA),
+    )
 
 
-def _ensure_silver_tables(spark) -> None:
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {config.SETTINGS.iceberg_catalog_name}.silver")
+def validate(silver_table: pa.Table) -> QualityCheckResult:
+    """기존 PyDeequ의 완전성 3개와 event_type enum 제약을 그대로 수행한다."""
+    return (
+        QualityCheck("bikeman_action_silver_checks")
+        .is_complete("bike_id")
+        .is_complete("event_type")
+        .is_complete("occurred_at")
+        .is_contained_in("event_type", sorted(ALLOWED_EVENT_TYPES))
+        .run(silver_table)
+    )
 
-    # hidden partitioning - occurred_at 자체는 그냥 TIMESTAMP 컬럼이고,
-    # 파티션 값(날짜)은 Iceberg가 days(occurred_at)로 자동 계산한다.
-    # 별도의 STRING 파티션 컬럼을 DataFrame에 만들 필요가 없다.
-    spark.sql(
-        f"""
-        CREATE TABLE IF NOT EXISTS {_silver_table_name()} (
-            bike_id     STRING,
-            event_type  STRING,
-            occurred_at TIMESTAMP,
-            station_id  STRING,
-            ingested_at TIMESTAMP
+
+def _ensure_auxiliary_tables(catalog) -> None:
+    catalog.create_namespace_if_not_exists("silver")
+    try:
+        catalog.load_table(QUARANTINE_TABLE)
+    except NoSuchTableError:
+        catalog.create_table(QUARANTINE_TABLE, schema=QUARANTINE_SCHEMA)
+    try:
+        catalog.load_table(DQ_RESULT_TABLE)
+    except NoSuchTableError:
+        catalog.create_table(DQ_RESULT_TABLE, schema=DQ_RESULT_SCHEMA)
+
+
+def _create_silver_table(catalog, identifier: str):
+    return catalog.create_table(
+        identifier,
+        schema=SILVER_SCHEMA,
+        partition_spec=SILVER_PARTITION_SPEC,
+        properties=SILVER_PROPERTIES,
+    )
+
+
+def _uses_identity_partition(table) -> bool:
+    fields = table.spec().fields
+    return (
+        len(fields) == 1
+        and fields[0].name == PARTITION_COLUMN
+        and fields[0].transform.__class__.__name__ == "IdentityTransform"
+        and table.schema().find_field(fields[0].source_id).name == PARTITION_COLUMN
+    )
+
+
+def _read_bronze_day(catalog, target_date: date) -> pa.Table:
+    return catalog.load_table(BRONZE_TABLE).scan(
+        row_filter=EqualTo(PARTITION_COLUMN, target_date.isoformat()),
+        selected_fields=BRONZE_FIELDS,
+    ).to_arrow()
+
+
+def _dq_arrow(result: QualityCheckResult, date_str: str, run_at: datetime) -> pa.Table:
+    rows = [{
+        "dataset": "bikeman_action",
+        "occurred_date": date_str,
+        "check_name": result.check_name,
+        "check_level": "Error",
+        "check_status": result.status,
+        "constraint_desc": constraint.description,
+        "constraint_status": constraint.status,
+        "constraint_message": constraint.message,
+        "run_at": run_at,
+    } for constraint in result.results]
+    return pa.Table.from_pylist(rows, schema=DQ_ARROW_SCHEMA)
+
+
+def _write_dq_result(catalog, result: QualityCheckResult, date_str: str, run_at: datetime) -> None:
+    try:
+        append(DQ_RESULT_TABLE, _dq_arrow(result, date_str, run_at), catalog=catalog)
+    except Exception:
+        logger.exception(
+            "dq_check_result 적재 실패 (bikeman_action, %s) - 검증 결과 자체는 %s",
+            date_str,
+            "PASS" if result.is_success else "FAIL",
         )
-        USING iceberg
-        PARTITIONED BY (days(occurred_at))
-        """
-    )
-    spark.sql(
-        f"ALTER TABLE {_silver_table_name()} SET TBLPROPERTIES ('write.distribution-mode'='hash')"
-    )
-
-    # bike_id로 자주 필터링할 걸 대비해 파티션 대신 정렬 순서로 지원
-    # (파티션은 카디널리티 낮은 occurred_at, 조회는 sort order로 보완)
-    spark.sql(f"ALTER TABLE {_silver_table_name()} WRITE ORDERED BY bike_id")
-
-    spark.sql(
-        f"""
-        CREATE TABLE IF NOT EXISTS {_quarantine_table_name()} (
-            bike_id           STRING,
-            event_type        STRING,
-            occurred_at       TIMESTAMP,
-            received_at       TIMESTAMP,
-            quarantine_reason STRING,
-            quarantined_at    TIMESTAMP
-        )
-        USING iceberg
-        """
-    )
 
 
-def _read_bronze_day(spark, target_date: date) -> list[dict]:
-    date_str = target_date.strftime("%Y-%m-%d")
-    rows = (
-        spark.table(_bronze_table_name())
-        .filter(F.col("occurred_date_partition") == date_str)  # 파티션 프루닝
-        .select("bike_id", "event_type", "occurred_at", "station_id", "received_at")
-        .collect()
-    )
-    return [r.asDict() for r in rows]
-
-
-def _write_quarantine(spark, quarantine_rows: list[dict]) -> None:
-    if not quarantine_rows:
-        return
-    now = datetime.now(timezone.utc)
-    rows = [{**r, "quarantined_at": now} for r in quarantine_rows]
-    df = spark.createDataFrame(rows)
-    df.writeTo(_quarantine_table_name()).append()
-    logger.warning("Silver quarantine 적재: %d건", len(quarantine_rows))
-
-
-def _process_one_day(spark, target_date: date) -> tuple[int, bool]:
-    """반환: (Silver에 적재된 행 수, PyDeequ 검증 통과 여부)"""
-    date_str = target_date.strftime("%Y-%m-%d")
-    bronze_rows = _read_bronze_day(spark, target_date)
-
-    if not bronze_rows:
+def _process_one_day(
+    catalog,
+    silver_table,
+    target_date: date,
+    *,
+    write_observability: bool = True,
+) -> tuple[int, bool]:
+    date_str = target_date.isoformat()
+    bronze_arrow = _read_bronze_day(catalog, target_date)
+    if len(bronze_arrow) == 0:
         logger.info("%s: Bronze에 신규 데이터 없음", date_str)
         return 0, True
 
-    # bronze의 occurred_at은 Spark TIMESTAMP -> naive datetime으로 넘어오므로,
-    # classify_rows의 미래시각 비교(occurred_at > now)가 tz-aware/naive 비교 TypeError를
-    # 내지 않도록 now도 naive UTC로 맞춘다.
-    now = datetime.utcnow()
-    valid_rows, quarantine_rows = classify_rows(bronze_rows, now)
-    valid_rows = dedup_rows(valid_rows)
+    run_at = datetime.now(timezone.utc)
+    silver_arrow, quarantine_arrow = transform(bronze_arrow, target_date, run_at)
+    if write_observability and len(quarantine_arrow):
+        append(QUARANTINE_TABLE, quarantine_arrow, catalog=catalog)
+        logger.warning("Silver quarantine 적재: %d건", len(quarantine_arrow))
 
-    _write_quarantine(spark, quarantine_rows)
-
-    if not valid_rows:
-        logger.warning("%s: 전체가 quarantine 처리됨 (%d건)", date_str, len(quarantine_rows))
+    if len(silver_arrow) == 0:
+        logger.warning("%s: 전체가 quarantine 처리됨 (%d건)", date_str, len(quarantine_arrow))
         return 0, True
 
-    # PyDeequ 검증용으로는 received_at까지 포함한 상태로 먼저 DataFrame을 만들고,
-    # 최종 Silver select에서 FINAL_COLUMNS로 좁힌다.
-    valid_df = spark.createDataFrame(valid_rows).withColumn("ingested_at", F.current_timestamp())
-
-    passed = verify_bikeman_action(spark, valid_df, dataset="bikeman_action", occurred_date=date_str)
-    if not passed:
-        # 안전하게 실패: 이 배치는 Silver에 쓰지 않는다. Bronze는 이미 안전하게
-        # 보존돼 있으므로 데이터 손실은 없고, 원인 파악 후 재실행하면 된다.
-        logger.error("%s: PyDeequ 검증 실패로 Silver 적재 중단", date_str)
+    result = validate(silver_arrow)
+    if write_observability:
+        _write_dq_result(catalog, result, date_str, run_at)
+    if not result.is_success:
+        logger.error("%s: 품질 검증 실패로 Silver 적재 중단", date_str)
         return 0, False
 
-    silver_df = valid_df.select(*FINAL_COLUMNS)
-    row_count = silver_df.count()
-    silver_df.writeTo(_silver_table_name()).overwritePartitions()
-
-    logger.info(
-        "%s: Silver %d행 적재 완료 (quarantine %d건)", date_str, row_count, len(quarantine_rows)
+    overwrite_partition(
+        silver_table, silver_arrow, PARTITION_COLUMN, date_str, catalog=catalog,
     )
-    return row_count, True
+    logger.info(
+        "%s: Silver %d행 적재 완료 (quarantine %d건)",
+        date_str, len(silver_arrow), len(quarantine_arrow),
+    )
+    return len(silver_arrow), True
+
+
+def _table_exists(catalog, identifier: str) -> bool:
+    try:
+        catalog.load_table(identifier)
+        return True
+    except NoSuchTableError:
+        return False
+
+
+def _rebuild_identity_table(catalog, end_date: date):
+    """임시 테이블 전체 적재가 끝난 뒤에만 기존 hidden-partition 테이블을 교체한다."""
+    if _table_exists(catalog, BACKUP_TABLE):
+        raise RuntimeError(
+            f"이전 백업 테이블 {BACKUP_TABLE}이 남아 있어 자동 재구축을 중단한다. "
+            "백업 확인 후 이름 변경 또는 삭제가 필요하다."
+        )
+    if _table_exists(catalog, REBUILD_TABLE):
+        logger.warning("중단된 이전 재구축 임시 테이블 %s를 다시 만든다", REBUILD_TABLE)
+        catalog.drop_table(REBUILD_TABLE)
+
+    rebuild_table = _create_silver_table(catalog, REBUILD_TABLE)
+    current = SERVICE_START_DATE
+    try:
+        while current <= end_date:
+            _, passed = _process_one_day(
+                catalog, rebuild_table, current, write_observability=False,
+            )
+            if not passed:
+                raise RuntimeError(f"{current} 품질 검증 실패로 identity 파티션 재구축 중단")
+            current += timedelta(days=1)
+    except Exception:
+        logger.exception("%s 전체 재구축 실패 - 기존 %s는 변경하지 않음", REBUILD_TABLE, SILVER_TABLE)
+        raise
+
+    catalog.rename_table(SILVER_TABLE, BACKUP_TABLE)
+    try:
+        catalog.rename_table(REBUILD_TABLE, SILVER_TABLE)
+    except Exception:
+        logger.exception("임시 테이블 교체 실패 - 기존 테이블 이름 복구 시도")
+        catalog.rename_table(BACKUP_TABLE, SILVER_TABLE)
+        raise
+
+    logger.warning(
+        "%s를 identity 파티션으로 재구축 완료. 기존 테이블은 %s에 보존됨",
+        SILVER_TABLE, BACKUP_TABLE,
+    )
+    return catalog.load_table(SILVER_TABLE)
+
+
+def _ensure_silver_table(catalog, rebuild_end_date: date):
+    catalog.create_namespace_if_not_exists("silver")
+    try:
+        table = catalog.load_table(SILVER_TABLE)
+    except NoSuchTableError:
+        backup_exists = _table_exists(catalog, BACKUP_TABLE)
+        rebuild_exists = _table_exists(catalog, REBUILD_TABLE)
+        if backup_exists and rebuild_exists:
+            # 기존 -> backup rename 직후 프로세스가 강제 종료된 경우다. 임시 테이블은
+            # 이미 전체 적재가 끝난 상태이므로 두 번째 rename부터 이어서 완료한다.
+            logger.warning("중단된 identity 파티션 교체를 %s -> %s부터 재개", REBUILD_TABLE, SILVER_TABLE)
+            catalog.rename_table(REBUILD_TABLE, SILVER_TABLE)
+            return catalog.load_table(SILVER_TABLE)
+        if backup_exists:
+            # 첫 rename 뒤 임시 테이블이 사라진 비정상 상태에서는 빈 본 테이블을 만들지
+            # 않고 기존 hidden-partition 테이블부터 원래 이름으로 복구한다.
+            logger.warning("중단된 identity 파티션 교체에서 기존 테이블 이름을 복구")
+            catalog.rename_table(BACKUP_TABLE, SILVER_TABLE)
+            table = catalog.load_table(SILVER_TABLE)
+        else:
+            return _create_silver_table(catalog, SILVER_TABLE)
+    if _uses_identity_partition(table):
+        return table
+    return _rebuild_identity_table(catalog, rebuild_end_date)
+
+
+def _processing_window(last_processed: date, end_date: date) -> tuple[date, date] | None:
+    """(실제 재처리 시작일, 신규 워터마크 시작일)을 반환한다.
+
+    Bronze Asset은 같은 날짜의 늦게 도착한 이벤트 때문에 다시 발행될 수 있다. Silver
+    워터마크가 이미 end_date여도 최근 LOOKBACK_DAYS는 다시 읽어야 그 정정분이 전파된다.
+    워터마크가 end_date보다 미래인 비정상 상태에서만 처리하지 않는다.
+    """
+    if last_processed > end_date:
+        return None
+    watermark_start = last_processed + timedelta(days=1)
+    reprocess_start = max(
+        watermark_start - timedelta(days=LOOKBACK_DAYS),
+        SERVICE_START_DATE,
+    )
+    return reprocess_start, watermark_start
 
 
 def run() -> None:
-    # 다른 잡들과 동일한 이유 - LocalStack은 버킷을 자동으로 만들어주지 않아서,
-    # 이 호출이 없으면 warehouse_bucket 자체가 없어서 CREATE DATABASE 단계에서
-    # NoSuchBucket으로 실패한다 (실측으로 확인됨).
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
+    catalog = build_iceberg_catalog()
+    _ensure_auxiliary_tables(catalog)
 
-    spark = build_spark_session(
-        "silver-bike-man-action",
-        extra_packages=[DEEQU_MAVEN_PACKAGE],
-        extra_excludes=[DEEQU_EXCLUDE],
-    )
-    try:
-        _ensure_silver_tables(spark)
-        ensure_dq_result_table(spark)
+    last_processed = read_watermark(watermark_key=WATERMARK_KEY)
+    start_date = last_processed + timedelta(days=1)
+    end_date = date.today() - timedelta(days=1)
+    max_days = os.getenv("MAX_DAYS_PER_RUN")
+    if max_days:
+        end_date = min(end_date, start_date + timedelta(days=int(max_days) - 1))
 
-        last_processed = read_watermark(watermark_key=WATERMARK_KEY)
-        start_date = last_processed + timedelta(days=1)
-        end_date = date.today() - timedelta(days=1)
+    # 신규 날짜가 없어도 최초 #143 배포에서는 기존 hidden partition을 전환한다.
+    rebuild_end_date = max(last_processed, SERVICE_START_DATE - timedelta(days=1))
+    silver_table = _ensure_silver_table(catalog, rebuild_end_date)
+    processing_window = _processing_window(last_processed, end_date)
+    if processing_window is None:
+        logger.info("처리할 날짜 없음 (워터마크=%s, 처리 상한=%s)", last_processed, end_date)
+        return
 
-        max_days = os.getenv("MAX_DAYS_PER_RUN")
-        if max_days:
-            capped_end = start_date + timedelta(days=int(max_days) - 1)
-            if capped_end < end_date:
-                end_date = capped_end
-
-        if start_date > end_date:
-            logger.info("처리할 신규 날짜 없음 (워터마크=%s)", last_processed)
-            return
-
-        reprocess_start = max(start_date - timedelta(days=LOOKBACK_DAYS), SERVICE_START_DATE)
-
-        current = reprocess_start
-        while current <= end_date:
-            try:
-                _, passed = _process_one_day(spark, current)
-                if not passed:
-                    logger.error("%s 처리 실패(PyDeequ), 배치 중단: 워터마크 유지", current)
-                    sys.exit(1)
-                if current >= start_date:
-                    write_watermark(current, watermark_key=WATERMARK_KEY)
-            except Exception as e:
-                logger.error("%s 처리 중 예외, 배치 중단: %s", current, e)
+    reprocess_start, start_date = processing_window
+    current = reprocess_start
+    while current <= end_date:
+        try:
+            _, passed = _process_one_day(catalog, silver_table, current)
+            if not passed:
+                logger.error("%s 처리 실패(DQ), 배치 중단: 워터마크 유지", current)
                 sys.exit(1)
-            current += timedelta(days=1)
-    finally:
-        # verify_bikeman_action()가 PyDeequ VerificationSuite를 돌리면서 연 py4j
-        # 콜백 서버(non-daemon 스레드)를 안 내리면 run()이 정상 반환돼도 프로세스가
-        # 안 끝난다 - transform_silver_rental_history.py에서 실측된 것과 동일한 문제
-        # (common/spark_session.py의 stop_spark_session_with_deequ 참고).
-        stop_spark_session_with_deequ(spark)
+            if current >= start_date:
+                write_watermark(current, watermark_key=WATERMARK_KEY)
+        except Exception as exc:
+            logger.error("%s 처리 중 예외, 배치 중단: %s", current, exc)
+            sys.exit(1)
+        current += timedelta(days=1)
 
 
 if __name__ == "__main__":

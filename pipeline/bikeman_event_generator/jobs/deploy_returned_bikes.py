@@ -4,13 +4,19 @@
 정의된다 - 이미 DEPLOY됐다면 가장 최근 이벤트는 DEPLOY이므로 자동으로 제외된다
 (bikeman_db.fetch_deploy_targets의 WITH latest ... 쿼리 참고).
 
-사용법 (Airflow PythonOperator에서 호출됨, 단독 실행 시):
-    python -c "import deploy_returned_bikes; deploy_returned_bikes.run('2026-07-01')"
+### Lambda 전환 (#186)
+generate_collect_events.py와 동일한 이유 - PostgresHook 대신 psycopg2 + 환경변수
+(BIKEMAN_WRITER_DB_*)로 연결한다.
+
+사용법 (Lambda에서 호출됨, 단독 실행 시):
+    BIKEMAN_WRITER_DB_HOST=... BIKEMAN_WRITER_DB_NAME=... BIKEMAN_WRITER_DB_USER=... \
+    BIKEMAN_WRITER_DB_PASSWORD=... python -c "import deploy_returned_bikes; deploy_returned_bikes.run('2026-07-01')"
 """
 import logging
+import os
 import random
 
-from airflow.providers.postgres.hooks.postgres import PostgresHook
+import psycopg2
 
 import bikeman_db
 import event_builder
@@ -18,11 +24,20 @@ import event_builder
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-CONN_ID = "bikeman_postgres"
+
+def _connect():
+    return psycopg2.connect(
+        host=os.environ["BIKEMAN_WRITER_DB_HOST"],
+        port=os.environ.get("BIKEMAN_WRITER_DB_PORT", "5432"),
+        dbname=os.environ["BIKEMAN_WRITER_DB_NAME"],
+        user=os.environ["BIKEMAN_WRITER_DB_USER"],
+        password=os.environ["BIKEMAN_WRITER_DB_PASSWORD"],
+        connect_timeout=10,
+    )
 
 
 def run(target_date: str) -> int:
-    conn = PostgresHook(postgres_conn_id=CONN_ID).get_conn()
+    conn = _connect()
     try:
         targets = bikeman_db.fetch_deploy_targets(conn, target_date)
         events = [

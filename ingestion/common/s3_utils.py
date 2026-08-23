@@ -8,7 +8,7 @@ boto3는 endpoint_url만 다르면 LocalStack과 실제 AWS S3를 동일한 코�
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import boto3
 from botocore.config import Config
@@ -78,7 +78,24 @@ def upload_file(local_path: Path, bucket: str, key: str) -> None:
     logger.info("업로드 완료: %s -> s3://%s/%s", local_path, bucket, key)
 
 
-def put_json(bucket: str, key: str, payload: dict) -> None:
+def download_file(bucket: str, key: str, local_path: Path) -> None:
+    s3 = get_s3_client()
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    s3.download_file(bucket, key, str(local_path))
+    logger.info("다운로드 완료: s3://%s/%s -> %s", bucket, key, local_path)
+
+
+def split_s3_uri(uri: str) -> tuple[str, str]:
+    if not uri.startswith("s3://"):
+        raise ValueError(f"S3 URI가 아닙니다: {uri}")
+    rest = uri[len("s3://"):]
+    bucket, _, key = rest.partition("/")
+    if not bucket or not key:
+        raise ValueError(f"S3 URI 형식이 올바르지 않습니다: {uri}")
+    return bucket, key
+
+
+def put_json(bucket: str, key: str, payload: Any) -> None:
     s3 = get_s3_client()
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     s3.put_object(Bucket=bucket, Key=key, Body=body)
@@ -90,7 +107,7 @@ def put_text(bucket: str, key: str, text: str) -> None:
     s3.put_object(Bucket=bucket, Key=key, Body=text.encode("utf-8"))
 
 
-def get_json(bucket: str, key: str) -> Optional[dict]:
+def get_json(bucket: str, key: str) -> Optional[Any]:
     s3 = get_s3_client()
     try:
         resp = s3.get_object(Bucket=bucket, Key=key)
@@ -100,3 +117,15 @@ def get_json(bucket: str, key: str) -> Optional[dict]:
         if error_code in ("NoSuchKey", "404"):
             return None
         raise
+
+
+def list_keys(bucket: str, prefix: str) -> list[str]:
+    """prefix 아래의 모든 객체 key를 페이지 누락 없이 정렬해 반환한다."""
+    s3 = get_s3_client()
+    paginator = s3.get_paginator("list_objects_v2")
+    keys = [
+        item["Key"]
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix)
+        for item in page.get("Contents", [])
+    ]
+    return sorted(keys)

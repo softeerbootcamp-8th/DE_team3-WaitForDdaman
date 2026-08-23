@@ -78,3 +78,17 @@ def test_ensure_bucket_survives_concurrent_creation(s3_env, monkeypatch):
     monkeypatch.setattr(s3_utils, "get_s3_client", lambda: _StaleListClient(real_client))
 
     s3_utils.ensure_bucket(BUCKET)  # 여기서 BucketAlreadyOwnedByYou가 터지면 안 된다
+
+
+def test_list_keys_returns_only_matching_prefix_in_sorted_order(s3_env):
+    from common import s3_utils
+
+    s3_utils.ensure_bucket(BUCKET)
+    s3_utils.put_json(BUCKET, "raw/rental/observed_at=0600/manifest.json", {"n": 2})
+    s3_utils.put_json(BUCKET, "raw/rental/observed_at=0500/manifest.json", {"n": 1})
+    s3_utils.put_json(BUCKET, "raw/failure/observed_at=0500/manifest.json", {"n": 3})
+
+    assert s3_utils.list_keys(BUCKET, "raw/rental/") == [
+        "raw/rental/observed_at=0500/manifest.json",
+        "raw/rental/observed_at=0600/manifest.json",
+    ]

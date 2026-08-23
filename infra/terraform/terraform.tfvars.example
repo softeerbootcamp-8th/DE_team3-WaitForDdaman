@@ -1,0 +1,67 @@
+# infra/terraform/terraform.tfvars 로 복사해서 실제 값을 채우세요.
+# terraform.tfvars(및 *.auto.tfvars)는 .gitignore에 있어 커밋되지 않습니다 -
+# 여기 이 .example 파일에는 절대 실제 키/URL을 채우지 마세요.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+
+# ---- 필수 (기본값 없음) ----
+
+# 서울 열린데이터광장 API 인증키. data.seoul.go.kr에서 발급.
+seoul_api_key = "REPLACE_ME"
+
+# ---- serving_sync Lambda (#172) 필수 - VPC/RDS는 신규 생성이 아니라 기존 자원을 참조한다 ----
+
+# serving_sync Lambda가 붙을 기존 VPC ID (RDS와 같은 VPC)
+vpc_id = "REPLACE_ME"
+
+# serving_sync Lambda를 배치할 서브넷 ID 목록 (RDS가 접근 가능한 서브넷)
+subnet_ids = ["REPLACE_ME"]
+
+# S3 Gateway VPC Endpoint를 연결할 라우트 테이블 ID 목록
+route_table_ids = ["REPLACE_ME"]
+
+# 기존 RDS(serving DB) 보안그룹 ID
+rds_security_group_id = "REPLACE_ME"
+
+# SERVING_DB_HOST/PORT/NAME/USER/PASSWORD 등을 담은 기존 Secrets Manager 시크릿 ARN
+serving_db_secret_arn = "REPLACE_ME"
+
+# Iceberg jdbc 카탈로그 URI (예: jdbc:postgresql://<rds-endpoint>:5432/iceberg_catalog)
+iceberg_jdbc_catalog_uri = "REPLACE_ME"
+
+# ---- bikeman_event_generator Lambda (#186) 필수 ----
+
+# BIKEMAN_WRITER_DB_HOST/PORT/NAME/USER/PASSWORD 키를 담은 기존 Secrets Manager
+# 시크릿 ARN (infra/lambdas/bikeman_event_generator/app/_secrets.py가 읽음)
+bikeman_db_secret_arn = "REPLACE_ME"
+
+# 기존 EC2/Airflow 워커의 IAM 롤 이름 (Terraform 밖에서 수동 생성됨, Issue #109) -
+# 이 롤에 Lambda invoke 정책을 붙인다 (infra/terraform/lambda_shared.tf)
+airflow_worker_role_name = "REPLACE_ME"
+
+# ---- 선택 (기본값 있음, 필요할 때만 override) ----
+# aws_region/raw_bucket/warehouse_bucket/iceberg_catalog_name/seoul_api_base_url의
+# 기본값은 config/__init__.py의 Settings 기본값과 동일해야 한다.
+
+# aws_region         = "ap-northeast-2"
+# app_env            = "prod"
+# raw_bucket         = "ttareungyi-raw"
+# warehouse_bucket   = "ttareungyi-warehouse"
+# iceberg_catalog_name = "bike_catalog"
+# seoul_api_base_url = "http://openapi.seoul.go.kr:8088"
+
+# Slack 알림 (notify_slack Lambda, Issue #180) - 비워두면(기본값) 관련 리소스가
+# 전부 생성되지 않는다. 값을 채우면 raw_fetch_alerts SNS 알람이 이 채널로 전달된다.
+# slack_webhook_url = "https://hooks.slack.com/services/XXXXXXXXX/XXXXXXXXX/XXXXXXXXXXXXXXXXXXXXXXXX"
+
+# ---- EMR Serverless prod Spark 인프라 (#183) ----
+
+# iceberg-catalog-sg(콘솔에서 이미 생성됨)의 보안그룹 ID
+iceberg_catalog_sg_id = "sg-0ff85e9c8d00a6c6b"
+
+# iceberg_catalog RDS 마스터 비밀번호 - 반드시 실제 값으로 채울 것 (커밋 금지)
+iceberg_catalog_master_password = "REPLACE_ME"
+
+# iceberg_catalog_db_subnet_group_name = "waitforddaman-subnet"
+# iceberg_catalog_master_username      = "iceberg_admin"
+# emr_spark_image_tag                  = "latest"

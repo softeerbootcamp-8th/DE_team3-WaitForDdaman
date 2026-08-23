@@ -6,8 +6,11 @@
   (서울시 공공데이터에서 .csv 확장자인데 실제론 zip인 파일이 실측으로 확인됨)
 - .xlsx(내부적으로도 zip 포맷이지만 csv 추출 대상이 아님)는 pandas로 별도 변환
 """
+import logging
 import zipfile
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class NotThisDatasetError(Exception):
@@ -39,6 +42,11 @@ def unzip_if_needed(path: Path, workdir: Path) -> list[Path]:
     확장자가 아니라 매직바이트로 압축 여부를 판별해 내부 csv를 추출한다.
     xlsx(확장자가 .xlsx든, .csv로 위장했든)는 여기서 추출하지 않고 그대로 반환한다
     (csv가 아니라 xml 구조라 추출 대상이 아님 - convert_xlsx_to_utf8_csv로 별도 처리).
+
+    csv/xlsx/zip(csv 포함) 중 하나도 아니면 빈 리스트를 반환한다 - 호출부가 그 결과로
+    for 루프를 그냥 스킵해버리면 파일 하나가 통째로 조용히 유실될 수 있어서, 그 두
+    경우(알 수 없는 파일 형식 / zip인데 csv가 하나도 없음) 모두 여기서 명시적으로
+    경고를 남긴다.
     """
     if is_xlsx(path):
         return [path]
@@ -48,14 +56,29 @@ def unzip_if_needed(path: Path, workdir: Path) -> list[Path]:
     is_zip = magic[:2] == b"PK"
 
     if not is_zip:
-        return [path] if path.suffix.lower() == ".csv" else []
+        if path.suffix.lower() == ".csv":
+            return [path]
+        logger.warning(
+            "알 수 없는 파일 형식(zip/xlsx/csv 아님) - 이 파일은 처리 대상에서 조용히 "
+            "빠짐: %s (magic=%r)",
+            path, magic,
+        )
+        return []
 
     extracted = []
     with zipfile.ZipFile(path) as zf:
         zf.extractall(workdir)
-        for name in zf.namelist():
+        names = zf.namelist()
+        for name in names:
             if name.lower().endswith(".csv"):
                 extracted.append(workdir / name)
+
+    if not extracted:
+        logger.warning(
+            "zip 안에 csv가 하나도 없음 - 이 파일은 처리 대상에서 조용히 빠짐: %s "
+            "(내부 항목: %s)",
+            path, names,
+        )
     return extracted
 
 
