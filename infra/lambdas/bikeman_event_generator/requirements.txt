@@ -1,0 +1,9 @@
+# generate_collect_events.py/deploy_returned_bikes.py가 실제로 쓰는 것만 담는다 -
+# pyiceberg/pyarrow/pandas는 이 잡들에 없다(#186, RDS만 직접 조회/적재).
+#
+# psycopg2-binary는 상한을 둔다 - 2.9.12는 manylinux aarch64용 prebuilt wheel을
+# 안 내놓고 sdist로만 풀리는데, 이 Lambda 베이스 이미지(Amazon Linux 2)엔
+# pg_config/컴파일러가 없어 소스 빌드가 즉시 실패한다(2026-08-23 실측,
+# `docker build`로 확인 - 2.9.11까지는 manylinux2014_aarch64 wheel이 있음).
+psycopg2-binary>=2.9,<2.9.12
+boto3>=1.34
