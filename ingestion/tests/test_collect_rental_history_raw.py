@@ -1,6 +1,6 @@
 import threading
 import time
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -94,6 +94,30 @@ def test_snapshot_keys_reject_unknown_snapshot_type():
 
     with pytest.raises(ValueError, match="snapshot_type"):
         raw_job.snapshot_keys(date(2026, 8, 22), cutoff, "BACKUP")
+
+
+def test_collect_snapshot_normalizes_microsecond_observed_at_by_itself():
+    """#182 후속: collect_snapshot()이 parse_collection_cutoff를 거치지 않은 마이크로초
+    datetime을 직접 받아도, key와 manifest에 저장하는 observed_at이 스스로 일치해야
+    한다 - 호출자가 정규화를 책임지는 게 아니라 이 함수 자체가 불변식을 지켜야 한다."""
+    dirty_observed_at = datetime(2026, 8, 22, 5, 0, 0, 654321, tzinfo=raw_job.KST)
+    writes, write_json = _recording_writer()
+
+    def fetch_pages(target_date, hour):
+        yield [dict(VALID_ROW, REQUEST_HOUR=hour)]
+
+    manifest = raw_job.collect_snapshot(
+        target_date=date(2026, 8, 22),
+        hours=[0],
+        observed_at=dirty_observed_at,
+        snapshot_type="PRELIMINARY",
+        fetch_pages=fetch_pages,
+        write_json=write_json,
+    )
+
+    manifest_key = next(key for key, _ in writes if key.endswith("manifest.json"))
+    assert "observed_at=20260822T050000+0900" in manifest_key
+    assert manifest["observed_at"] == "2026-08-22T05:00:00+09:00"
 
 
 def test_collect_snapshot_writes_unmodified_payload_before_complete_manifest():

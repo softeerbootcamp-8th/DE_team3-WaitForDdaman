@@ -154,6 +154,12 @@ def collect_snapshot(
     read_json: Callable[[str], Any | None] | None = None,
 ) -> dict:
     """한 날짜의 API 관측본을 수집하고 payload 다음 manifest 순서로 기록한다."""
+    # 마이크로초를 여기서 자른다 - 호출자가 이미 정규화된 값을 넘긴다고 가정하지 않는다.
+    # key(snapshot_keys()의 초 단위 strftime)와 아래 observed_iso(isoformat())가 같은
+    # 인스턴트를 가리켜야 selector의 완전 일치 비교가 깨지지 않는데, 그 보장을 호출자
+    # (parse_collection_cutoff)에만 맡기면 이 함수를 직접 부르는 새 호출자가 생길 때마다
+    # 같은 버그가 재발한다. 이 함수 스스로 불변식을 지킨다 (#182).
+    observed_at = observed_at.replace(microsecond=0)
     started_at = time.monotonic()
     normalized_type = snapshot_type.strip().upper()
     payload_key, manifest_key = snapshot_keys(
