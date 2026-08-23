@@ -20,6 +20,7 @@ Airflow에서는 PythonOperator로 run()을 호출한다 - 정체가 감지되�
 """
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 from common.watermark import read_watermark
@@ -46,18 +47,26 @@ class WatermarkStalenessError(Exception):
 
 
 def stale_datasets(as_of: date, max_stale_days: int) -> list[dict]:
-    """기준일(as_of) 대비 max_stale_days보다 더 정체된 데이터셋 목록을 반환한다."""
-    stale = []
-    for dataset, watermark_key in WATERMARK_DATASETS.items():
-        watermark = read_watermark(watermark_key=watermark_key)
-        days_stale = (as_of - watermark).days
-        if days_stale > max_stale_days:
-            stale.append({
-                "dataset": dataset,
-                "watermark_key": watermark_key,
-                "last_processed_date": watermark.isoformat(),
-                "days_stale": days_stale,
-            })
+    """기준일(as_of) 대비 max_stale_days보다 더 정체된 데이터셋 목록을 반환한다.
+
+    데이터셋마다 독립적인 S3 GetObject라 순차 실행할 이유가 없다 - 동시에 읽는다.
+    """
+    datasets = list(WATERMARK_DATASETS.items())
+    with ThreadPoolExecutor(max_workers=len(datasets) or 1) as executor:
+        watermarks = executor.map(
+            lambda item: read_watermark(watermark_key=item[1]), datasets
+        )
+
+        stale = []
+        for (dataset, watermark_key), watermark in zip(datasets, watermarks):
+            days_stale = (as_of - watermark).days
+            if days_stale > max_stale_days:
+                stale.append({
+                    "dataset": dataset,
+                    "watermark_key": watermark_key,
+                    "last_processed_date": watermark.isoformat(),
+                    "days_stale": days_stale,
+                })
     return stale
 
 
