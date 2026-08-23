@@ -49,7 +49,7 @@ IMAGES=(
   "waitforddaman-airflow:airflow/Dockerfile.prod:.:linux/arm64"
   "waitforddaman-api:services/api/Dockerfile.prod:.:linux/arm64"
   "waitforddaman-web:services/web/Dockerfile.prod:services/web:linux/arm64"
-  "emr-spark-prod:spark/Dockerfile.prod:.:linux/amd64"
+  "waitforddaman-emr-spark-prod:spark/Dockerfile.prod:.:linux/amd64"
 )
 
 for spec in "${IMAGES[@]}"; do

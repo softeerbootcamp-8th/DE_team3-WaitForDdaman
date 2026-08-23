@@ -157,7 +157,7 @@ resource "aws_security_group_rule" "iceberg_catalog_allow_serving_sync" {
 
 # ---- ECR: prod Spark 커스텀 이미지 (spark/Dockerfile.prod push 대상) ----
 resource "aws_ecr_repository" "emr_spark" {
-  name                 = "emr-spark-prod"
+  name                 = "waitforddaman-emr-spark-prod"
   image_tag_mutability = "MUTABLE"
 }
 
@@ -190,6 +190,7 @@ data "aws_iam_policy_document" "emr_spark_ecr_policy_doc" {
       values   = ["arn:aws:emr-serverless:${var.aws_region}:${data.aws_caller_identity.current.account_id}:/applications/*"]
     }
   }
+
 }
 
 resource "aws_ecr_repository_policy" "emr_spark" {
