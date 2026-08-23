@@ -16,20 +16,26 @@ AWS 인프라 및 Lambda / Terraform 배포 설정입니다.
 3. **장애 대응 및 알림**
    - **DLQ**: Lambda 실행 실패 시 `raw-fetch-lambda-dlq` SQS에 실패 이벤트 보존 (14일 보존)
    - **CloudWatch Alarm**: Lambda 실행 오류(Errors >= 1) 및 DLQ 메시지 발생 시 SNS 토픽(`raw-fetch-lambda-alerts`)으로 알림
+   - **Slack 알림** (`notify_slack` Lambda, Issue #180): 위 SNS 토픽을 구독해 알람을 Slack 인커밍 웹훅으로 전달. `slack_webhook_url` 변수가 빈 문자열이면(로컬/dev 기본값) 관련 리소스가 전부 생성되지 않는다 - 운영 환경에서만 값을 채워서 활성화한다.
 
 ## 배포 방법 (Terraform)
+
+`seoul_api_key`, `slack_webhook_url`은 민감값이라 커맨드라인 `-var`로 넘기면 셸 히스토리에 남는다.
+대신 `terraform.tfvars`(git에 커밋되지 않음, `.gitignore` 처리됨)에 채워서 쓴다.
 
 ```bash
 cd infra/terraform
 
+# 최초 1회: 템플릿 복사 후 실제 값 채우기
+cp terraform.tfvars.example terraform.tfvars
+vi terraform.tfvars   # seoul_api_key 채우기, Slack 알림 쓸 거면 slack_webhook_url도 채우기
+
 # 초기화
 terraform init
 
-# 계획 검토
-terraform plan -var="seoul_api_key=YOUR_API_KEY" -var="raw_bucket=ttareungyi-raw"
-
-# 배포
-terraform apply -var="seoul_api_key=YOUR_API_KEY" -var="raw_bucket=ttareungyi-raw"
+# 계획 검토 / 배포 (terraform.tfvars를 자동으로 읽음)
+terraform plan
+terraform apply
 ```
 
 ## serving_sync RDS 적재/검증 Lambda (#172)

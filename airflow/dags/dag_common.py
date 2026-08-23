@@ -5,7 +5,10 @@ Bronze DAG 공통 설정 - 일 배치/백필 DAG가 import해서 쓴다.
 dag_assets.py와 같은 방식으로, Airflow가 dags 폴더를 sys.path에 넣어 파싱하므로
 `from dag_common import ...`를 별도 패키징 없이 그대로 쓸 수 있다.
 """
+import os
 from datetime import timedelta
+
+import requests
 
 INGESTION_DIR = "/opt/airflow/ingestion"
 STAGING_DIR = "/opt/airflow/staging"  # staging/jobs/ 잡(Silver 등) 실행 위치
@@ -40,6 +43,30 @@ COLLECTION_CUTOFF_AT_TEMPLATE = (
     'else data_interval_end.in_timezone("Asia/Seoul").isoformat() }}'
 )
 
+# ==============================================================================
+# 태스크 최종 실패 알림 (Slack) - Issue #180
+# ==============================================================================
+# 원래 bikeman_event_generator_dag.py / gold_to_serving_sync_dag.py 두 곳에
+# 동일한 함수가 각자 복제돼 있었다. 여기 하나로 모아서 다른 DAG들도 재시도가
+# 전부 소진돼 최종 실패로 확정된 태스크에 대해 Slack 알림을 받을 수 있게 한다.
+#
+# SLACK_WEBHOOK_URL은 Airflow 워커 프로세스의 환경변수다 - infra/terraform의
+# notify_slack Lambda가 읽는 SLACK_WEBHOOK_URL(AWS Lambda 환경변수)과 이름은
+# 같지만 완전히 별개의 값이다. 여기서 알림을 받으려면 Airflow 쪽 .env/compose
+# 환경변수로 따로 설정해야 한다.
+def notify_slack_on_failure(context: dict) -> None:
+    webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+    if not webhook_url:
+        return
+
+    ti = context["task_instance"]
+    message = f":x: *{ti.dag_id}.{ti.task_id}* 실패\n실행일: {context['ds']}\n로그: {ti.log_url}"
+    try:
+        requests.post(webhook_url, json={"text": message}, timeout=10)
+    except requests.RequestException:
+        pass
+
+
 # 일반 잡 기본 재시도 설정
 # (단, ML Spark 학습 잡인 build_train_samples는 Spark 자원 낭비 방지를 위해 retries=0 유지)
 DEFAULT_ARGS = {
@@ -47,6 +74,7 @@ DEFAULT_ARGS = {
     "retry_delay": timedelta(minutes=5),
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=30),
+    "on_failure_callback": notify_slack_on_failure,
 }
 
 

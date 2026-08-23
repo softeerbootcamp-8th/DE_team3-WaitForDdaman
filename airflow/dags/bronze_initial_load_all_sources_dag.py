@@ -68,7 +68,14 @@ import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag, task
 
-from dag_common import BRONZE_POOL, INGESTION_DIR, SILVER_POOL, bash_job, bash_staging_job
+from dag_common import (
+    BRONZE_POOL,
+    INGESTION_DIR,
+    SILVER_POOL,
+    bash_job,
+    bash_staging_job,
+    notify_slack_on_failure,
+)
 
 # 일 배치의 DEFAULT_ARGS를 그대로 쓰지 않는다. 초기 적재는 수동 1회성이라 사람이 붙어서
 # 보고 있고, 실패하면 빨리 알고 원인을 봐야 한다. 일 배치처럼 길게 백오프하면
@@ -78,6 +85,7 @@ default_args = {
     "retry_delay": timedelta(minutes=2),
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=20),
+    "on_failure_callback": notify_slack_on_failure,
 }
 
 

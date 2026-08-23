@@ -27,6 +27,8 @@ import pendulum
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import dag
 
+from dag_common import notify_slack_on_failure
+
 INGESTION_DIR = "/opt/airflow/ingestion"
 
 
@@ -51,6 +53,7 @@ def _set_watermark_callable(params, **kwargs):
         "watermark_date": "2026-06-30",
         "dataset": "rental_history",  # rental_history | failure_report | silver_rental_history | gold_dim_bike | bikeman_event | silver_bikeman_action
     },
+    default_args={"on_failure_callback": notify_slack_on_failure},
     doc_md=__doc__,
 )
 def set_watermark():

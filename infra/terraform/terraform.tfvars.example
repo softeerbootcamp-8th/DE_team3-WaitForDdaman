@@ -1,0 +1,21 @@
+# infra/terraform/terraform.tfvars 로 복사해서 실제 값을 채우세요.
+# terraform.tfvars(및 *.auto.tfvars)는 .gitignore에 있어 커밋되지 않습니다 -
+# 여기 이 .example 파일에는 절대 실제 키/URL을 채우지 마세요.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+
+# ---- 필수 (기본값 없음) ----
+
+# 서울 열린데이터광장 API 인증키. data.seoul.go.kr에서 발급.
+seoul_api_key = "REPLACE_ME"
+
+# ---- 선택 (기본값 있음, 필요할 때만 override) ----
+
+# aws_region         = "ap-northeast-2"
+# app_env            = "prod"
+# raw_bucket         = "ttareungyi-raw"
+# seoul_api_base_url = "http://openapi.seoul.go.kr:8088"
+
+# Slack 알림 (notify_slack Lambda, Issue #180) - 비워두면(기본값) 관련 리소스가
+# 전부 생성되지 않는다. 값을 채우면 raw_fetch_alerts SNS 알람이 이 채널로 전달된다.
+# slack_webhook_url = "https://hooks.slack.com/services/XXXXXXXXX/XXXXXXXXX/XXXXXXXXXXXXXXXXXXXXXXXX"
