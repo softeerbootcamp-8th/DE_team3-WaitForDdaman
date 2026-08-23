@@ -79,4 +79,26 @@ assert cfg, 'risk_model.yaml 이 비어 있습니다'
 print('LOAD_CONFIG_OK')
 "
 
+echo "== entryPoint 직접 파일 실행 확인 (local:///opt/app/... 규약) =="
+# EMR Serverless는 entryPoint를 파일로 직접 실행한다(python -m 아님).
+# 상대 import가 남아 있으면 여기서만 ImportError로 잡힌다.
+# --anchor-plan 누락으로 argparse가 SystemExit(2)를 내는 건 정상 - import 단계를
+# 통과했다는 뜻이므로 stderr에 ImportError가 없는지로 판정한다.
+for entry in \
+  /opt/app/pipeline/train_risk_model/samples.py \
+  /opt/app/pipeline/risk_model/jobs/build_bike_features_daily.py \
+  /opt/app/pipeline/risk_model/jobs/build_fact_bike_risk.py \
+  /opt/app/pipeline/risk_model/jobs/build_fact_bike_decision.py
+do
+  out=$(docker run --rm --entrypoint /usr/bin/python3 \
+    -e PYTHONPATH="/usr/lib/spark/python:/usr/lib/spark/python/lib/pyspark.zip:/usr/lib/spark/python/lib/py4j-0.10.9.7-src.zip:/opt/app:/opt/app/ingestion:/opt/app/pipeline/risk_model" \
+    "$IMAGE" "$entry" --help 2>&1) || true
+  if echo "$out" | grep -q "ImportError\|ModuleNotFoundError"; then
+    echo "FAIL: $entry 직접 실행 시 import 실패"
+    echo "$out"
+    exit 1
+  fi
+  echo "ENTRYPOINT_OK: $entry"
+done
+
 echo "모든 검증 통과"

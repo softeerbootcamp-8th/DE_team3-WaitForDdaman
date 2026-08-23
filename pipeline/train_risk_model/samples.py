@@ -13,8 +13,8 @@ from datetime import date, timedelta
 
 from pyspark.sql import SparkSession
 
-from . import features as ft
-from .settings import load_config
+from pipeline.train_risk_model import features as ft
+from pipeline.train_risk_model.settings import load_config
 
 
 # ── Spark 세션 ────────────────────────────────────────────────────────
