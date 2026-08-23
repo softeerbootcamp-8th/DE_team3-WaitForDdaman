@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="${1:-emr-spark-prod:test}"
+IMAGE="${1:-waitforddaman-emr-spark-prod:test}"
 
 # EMR Serverless 워커가 실제로 잡을 띄울 때와 같은 PYTHONPATH.
 # 베이스 이미지의 pyspark 경로 + Dockerfile.prod의 ENV PYTHONPATH 2분할.
