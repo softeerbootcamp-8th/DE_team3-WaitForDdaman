@@ -9,6 +9,26 @@
 # 서울 열린데이터광장 API 인증키. data.seoul.go.kr에서 발급.
 seoul_api_key = "REPLACE_ME"
 
+# ---- serving_sync Lambda (#172) 필수 - VPC/RDS는 신규 생성이 아니라 기존 자원을 참조한다 ----
+
+# serving_sync Lambda가 붙을 기존 VPC ID (RDS와 같은 VPC)
+vpc_id = "REPLACE_ME"
+
+# serving_sync Lambda를 배치할 서브넷 ID 목록 (RDS가 접근 가능한 서브넷)
+subnet_ids = ["REPLACE_ME"]
+
+# S3 Gateway VPC Endpoint를 연결할 라우트 테이블 ID 목록
+route_table_ids = ["REPLACE_ME"]
+
+# 기존 RDS(serving DB) 보안그룹 ID
+rds_security_group_id = "REPLACE_ME"
+
+# SERVING_DB_HOST/PORT/NAME/USER/PASSWORD 등을 담은 기존 Secrets Manager 시크릿 ARN
+serving_db_secret_arn = "REPLACE_ME"
+
+# Iceberg jdbc 카탈로그 URI (예: jdbc:postgresql://<rds-endpoint>:5432/iceberg_catalog)
+iceberg_jdbc_catalog_uri = "REPLACE_ME"
+
 # ---- 선택 (기본값 있음, 필요할 때만 override) ----
 
 # aws_region         = "ap-northeast-2"
