@@ -143,8 +143,11 @@ jobs:
           # train_risk_model만 규칙이 다르다: tests/ 디렉터리가 아니라 모듈 루트에
           # test_risk_model.py가 있고, `from pipeline.train_risk_model...` 절대
           # 임포트를 써서 저장소 루트를 cwd/PYTHONPATH로 둬야 한다.
+          # $ROOT/ingestion도 필요하다 - #148로 resolve_anchors가 common.partition_listing
+          # (bare import, ingestion/common/s3_utils.py를 그 안에서 또 bare import)을
+          # 쓰게 되면서, 다른 pipeline/* 모듈들과 동일하게 ingestion을 경로에 얹어야 한다.
           echo "::group::pipeline/train_risk_model"
-          PYTHONPATH="$ROOT" pytest pipeline/train_risk_model/test_risk_model.py -q
+          PYTHONPATH="$ROOT:$ROOT/ingestion" pytest pipeline/train_risk_model/test_risk_model.py -q
           echo "::endgroup::"
 
   api-tests:

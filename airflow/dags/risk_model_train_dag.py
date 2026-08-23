@@ -25,6 +25,30 @@ PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "/opt/airflow")
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+# resolve_anchors가 Spark 대신 common.partition_listing(boto3)을 쓰므로(#148),
+# gold_dim_fact_dag.py와 동일한 패턴으로 ingestion을 네임스페이스 패키지 루트로
+# sys.path에 얹는다. .env도 같은 이유로 먼저 로드한다 - 안 하면 컨테이너의
+# 루트 .env(배포용, APP_ENV=aws)가 그대로 새어 들어와 LocalStack 대신 실제
+# AWS S3로 나가는 문제가 재현된다(#145/#153에서 Gold 센서가 겪었던 것과 동일).
+INGESTION_DIR = os.environ.get("INGESTION_DIR", "/opt/airflow/ingestion")
+
+
+def _load_ingestion_env(env_path: str) -> None:
+    if not os.path.exists(env_path):
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ[key.strip()] = value.strip()
+
+
+_load_ingestion_env(f"{INGESTION_DIR}/.env")
+if INGESTION_DIR not in sys.path:
+    sys.path.insert(0, INGESTION_DIR)
+
 try:  # Airflow 3.x
     from airflow.sdk import Param, dag, task
 except ImportError:  # 2.x 호환
@@ -81,7 +105,6 @@ def risk_model_train():
         """원천 최신일에서 as_of_end 를 도출하고 학습/홀드아웃 앵커를 확정한다."""
         from pipeline.train_risk_model.samples import (
             detect_label_ready_max,
-            get_spark,
             resolve_anchors as _resolve,
         )
         from pipeline.train_risk_model.settings import load_config
@@ -91,11 +114,7 @@ def risk_model_train():
         if params and params.get("rolling_months"):
             cfg["run"]["rolling_months"] = int(params["rolling_months"])
 
-        spark = get_spark(cfg, "risk-model-resolve-anchors")
-        try:
-            probe = detect_label_ready_max(spark, cfg)
-        finally:
-            spark.stop()
+        probe = detect_label_ready_max(cfg)
 
         from datetime import date
 
