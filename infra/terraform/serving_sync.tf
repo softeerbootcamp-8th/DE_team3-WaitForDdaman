@@ -56,11 +56,17 @@ data "aws_iam_policy_document" "serving_sync_secrets_policy_doc" {
     actions   = ["secretsmanager:GetSecretValue"]
     resources = [var.serving_db_secret_arn]
   }
+
+  statement {
+    effect    = "Allow"
+    actions   = ["sqs:SendMessage"]
+    resources = [aws_sqs_queue.serving_sync_dlq.arn]
+  }
 }
 
 resource "aws_iam_policy" "serving_sync_secrets_policy" {
   name        = "serving-sync-lambda-secrets-policy"
-  description = "Allows reading the serving DB / iceberg catalog credentials secret"
+  description = "Allows reading the serving DB / iceberg catalog credentials secret and sending failed events to DLQ"
   policy      = data.aws_iam_policy_document.serving_sync_secrets_policy_doc.json
 }
 
@@ -118,7 +124,6 @@ resource "aws_vpc_endpoint" "serving_sync_s3_gateway" {
 locals {
   serving_sync_common_env = {
     APP_ENV                  = "aws"
-    AWS_DEFAULT_REGION       = var.aws_region
     RAW_BUCKET               = var.raw_bucket
     WAREHOUSE_BUCKET         = var.warehouse_bucket
     ICEBERG_CATALOG_TYPE     = "jdbc"

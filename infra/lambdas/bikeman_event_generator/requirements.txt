@@ -1,0 +1,11 @@
+# generate_collect_events.py/deploy_returned_bikes.py가 실제로 쓰는 것만 담는다 -
+# pyiceberg/pyarrow/pandas는 이 잡들에 없다(#186, RDS만 직접 조회/적재).
+#
+# psycopg2-binary는 상한을 둔다 - 2.9.12는 aarch64 wheel 자체는 내놓지만
+# manylinux_2_27/manylinux_2_28(더 신버전 glibc) 태그로만 풀린다. 이 Lambda 베이스
+# 이미지(Amazon Linux 2, glibc 2.17=manylinux2014)는 그 태그를 만족 못 해 pip가
+# wheel을 거부하고 sdist 소스 빌드로 떨어지는데, 이 이미지엔 pg_config/컴파일러가
+# 없어 그 소스 빌드가 즉시 실패한다(2026-08-23 실측, `docker build`로 확인 -
+# 2.9.11까지는 manylinux2014_aarch64 wheel이 있음).
+psycopg2-binary>=2.9,<2.9.12
+boto3>=1.34
