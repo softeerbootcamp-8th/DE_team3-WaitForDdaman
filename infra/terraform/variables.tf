@@ -92,3 +92,36 @@ variable "serving_sync_reserved_concurrency" {
   type        = number
   default     = 2
 }
+
+# ------------------------------------------------------------------------------
+# EMR Serverless prod Spark 인프라 (#183) - iceberg_catalog RDS는 신규 생성이지만
+# VPC/서브넷그룹/iceberg-catalog-sg는 기존 자원을 참조한다(신규 생성 아님).
+# ------------------------------------------------------------------------------
+variable "iceberg_catalog_sg_id" {
+  description = "기존 iceberg-catalog-sg 보안그룹 ID (콘솔에서 이미 생성됨, sg-0ff85e9c8d00a6c6b)"
+  type        = string
+}
+
+variable "iceberg_catalog_db_subnet_group_name" {
+  description = "iceberg_catalog RDS가 속할 기존 DB 서브넷 그룹 이름"
+  type        = string
+  default     = "waitforddaman-subnet"
+}
+
+variable "iceberg_catalog_master_username" {
+  description = "iceberg_catalog RDS 마스터 유저명"
+  type        = string
+  default     = "iceberg_admin"
+}
+
+variable "iceberg_catalog_master_password" {
+  description = "iceberg_catalog RDS 마스터 비밀번호 - tfvars로만 채움, 커밋 금지"
+  type        = string
+  sensitive   = true
+}
+
+variable "emr_spark_image_tag" {
+  description = "emr-spark-prod ECR 리포의 이미지 태그"
+  type        = string
+  default     = "latest"
+}
