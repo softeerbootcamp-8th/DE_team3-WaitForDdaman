@@ -57,11 +57,17 @@ data "aws_iam_policy_document" "bikeman_event_generator_secrets_policy_doc" {
     actions   = ["secretsmanager:GetSecretValue"]
     resources = [var.bikeman_db_secret_arn]
   }
+
+  statement {
+    effect    = "Allow"
+    actions   = ["sqs:SendMessage"]
+    resources = [aws_sqs_queue.bikeman_event_generator_dlq.arn]
+  }
 }
 
 resource "aws_iam_policy" "bikeman_event_generator_secrets_policy" {
   name        = "bikeman-event-generator-lambda-secrets-policy"
-  description = "Allows reading the bikeman_writer DB credentials secret"
+  description = "Allows reading the bikeman_writer DB credentials secret and sending failed events to DLQ"
   policy      = data.aws_iam_policy_document.bikeman_event_generator_secrets_policy_doc.json
 }
 
@@ -92,13 +98,12 @@ resource "aws_security_group_rule" "rds_allow_bikeman_event_generator_lambda" {
   protocol                 = "tcp"
   security_group_id        = var.rds_security_group_id
   source_security_group_id = aws_security_group.bikeman_event_generator_lambda_sg.id
-  description               = "Allow RDS access from bikeman_event_generator Lambda (#186)"
+  description              = "Allow RDS access from bikeman_event_generator Lambda (#186)"
 }
 
 # ---- Lambda 함수 2개 (이미지 1개 공유, image_config.command만 다름) ----
 locals {
   bikeman_event_generator_common_env = {
-    AWS_DEFAULT_REGION    = var.aws_region
     BIKEMAN_DB_SECRET_ARN = var.bikeman_db_secret_arn
   }
 }

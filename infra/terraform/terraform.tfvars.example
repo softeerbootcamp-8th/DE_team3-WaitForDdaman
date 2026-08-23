@@ -29,6 +29,16 @@ serving_db_secret_arn = "REPLACE_ME"
 # Iceberg jdbc 카탈로그 URI (예: jdbc:postgresql://<rds-endpoint>:5432/iceberg_catalog)
 iceberg_jdbc_catalog_uri = "REPLACE_ME"
 
+# ---- bikeman_event_generator Lambda (#186) 필수 ----
+
+# BIKEMAN_WRITER_DB_HOST/PORT/NAME/USER/PASSWORD 키를 담은 기존 Secrets Manager
+# 시크릿 ARN (infra/lambdas/bikeman_event_generator/app/_secrets.py가 읽음)
+bikeman_db_secret_arn = "REPLACE_ME"
+
+# 기존 EC2/Airflow 워커의 IAM 롤 이름 (Terraform 밖에서 수동 생성됨, Issue #109) -
+# 이 롤에 Lambda invoke 정책을 붙인다 (infra/terraform/lambda_shared.tf)
+airflow_worker_role_name = "REPLACE_ME"
+
 # ---- 선택 (기본값 있음, 필요할 때만 override) ----
 # aws_region/raw_bucket/warehouse_bucket/iceberg_catalog_name/seoul_api_base_url의
 # 기본값은 config/__init__.py의 Settings 기본값과 동일해야 한다.
