@@ -11,17 +11,29 @@ silver.rental_history 변환/중복 제거 로직 테스트 (#143)
      Spark와 같은가 - DuckDB의 기본 NULL 정렬이 Spark와 반대라 여기서 어긋나기 쉽다
   4. 중복 제거 윈도우가 하루 안에서 닫히는가 (날짜 청크 분해 안전성의 근거)
 """
-from datetime import datetime, timezone
+import os
+from datetime import date, datetime, timezone
+from unittest import mock
 
 import pyarrow as pa
 import pytest
 
+import jobs.transform_silver_rental_history as tsr
 from jobs.transform_silver_rental_history import (
     PARTITION_COLUMN,
     SILVER_COLUMNS,
     SILVER_PARTITION_SPEC,
+    SILVER_PROMOTION_PREFIX,
     SILVER_SCHEMA,
     SilverValidationError,
+    _build_silver_promotion_document,
+    _derive_mode,
+    _find_current_day_entry,
+    _load_bronze_promotion_metadata,
+    _parse_bool_env,
+    _silver_promotion_key,
+    _validate_bronze_marker,
+    run,
     transform,
     validate,
 )
@@ -246,3 +258,286 @@ def test_validate_rejects_return_before_rent():
             transform(bronze_table({"rent_dt": "2026-08-21 12:00:00", "return_dt": "2026-08-21 11:00:00"})),
             "2026-08-21",
         )
+
+
+# ---------------------------------------------------------------- #137 당일 promotion 처리
+#
+# 06시 일 배치의 publish_bronze_asset이 Asset event에 실어 보낸 정확한 run_date/
+# promotion_id/promotion_key만 신뢰해야 한다 (S3의 "최신 COMPLETE promotion"을
+# 추측하면 Catchup이 이전 일 배치 promotion을 잘못 집어 처리할 수 있다 - #137 배경).
+
+
+def _env(**overrides):
+    base = {
+        "RENTAL_HISTORY_BRONZE_RUN_DATE": "",
+        "RENTAL_HISTORY_BRONZE_PROMOTION_ID": "",
+        "RENTAL_HISTORY_BRONZE_PROMOTION_KEY": "",
+    }
+    base.update(overrides)
+    return mock.patch.dict(os.environ, base, clear=False)
+
+
+def test_parse_bool_env_accepts_true_false_only():
+    with mock.patch.dict(os.environ, {"FLAG": "true"}):
+        assert _parse_bool_env("FLAG") is True
+    with mock.patch.dict(os.environ, {"FLAG": "false"}):
+        assert _parse_bool_env("FLAG") is False
+    with mock.patch.dict(os.environ, {}, clear=True):
+        assert _parse_bool_env("FLAG") is False
+        assert _parse_bool_env("FLAG", default=True) is True
+
+
+def test_parse_bool_env_rejects_unknown_values():
+    with mock.patch.dict(os.environ, {"FLAG": "yes"}):
+        with pytest.raises(SilverValidationError):
+            _parse_bool_env("FLAG")
+
+
+def test_load_bronze_promotion_metadata_requires_all_three_fields():
+    """Catchup/수동 트리거처럼 Asset event에 metadata가 없으면 셋 다 빈 문자열이고,
+    확정 구간만 처리하도록 None을 돌려줘야 한다."""
+    with _env():
+        assert _load_bronze_promotion_metadata() is None
+
+    with _env(RENTAL_HISTORY_BRONZE_RUN_DATE="2026-08-22"):
+        assert _load_bronze_promotion_metadata() is None  # promotion_id/key 없음
+
+
+def test_load_bronze_promotion_metadata_parses_when_present():
+    with _env(
+        RENTAL_HISTORY_BRONZE_RUN_DATE="2026-08-22",
+        RENTAL_HISTORY_BRONZE_PROMOTION_ID="20260822T060000+0900",
+        RENTAL_HISTORY_BRONZE_PROMOTION_KEY="_meta/promotion/bronze_rental_history/x/promotion.json",
+    ):
+        metadata = _load_bronze_promotion_metadata()
+    assert metadata == {
+        "run_date": "2026-08-22",
+        "promotion_id": "20260822T060000+0900",
+        "promotion_key": "_meta/promotion/bronze_rental_history/x/promotion.json",
+    }
+
+
+VALID_MARKER = {
+    "dataset": "rental_history",
+    "run_date": "2026-08-22",
+    "promotion_id": "20260822T060000+0900",
+    "status": "COMPLETE",
+    "t0_enabled": True,
+    "selected_snapshots": [
+        {"target_date": "2026-08-21", "snapshot_type": "FINAL", "observed_at": "2026-08-22T06:00:00+09:00"},
+        {"target_date": "2026-08-22", "snapshot_type": "FINAL", "observed_at": "2026-08-22T06:00:00+09:00"},
+    ],
+}
+
+
+def test_validate_bronze_marker_passes_on_matching_complete_marker():
+    marker = _validate_bronze_marker(
+        dict(VALID_MARKER), "2026-08-22", "20260822T060000+0900", "some/key.json"
+    )
+    assert marker["status"] == "COMPLETE"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"dataset": "failure_report"},
+        {"run_date": "2026-08-21"},
+        {"promotion_id": "20260822T070000+0900"},
+        {"status": "IN_PROGRESS"},
+    ],
+)
+def test_validate_bronze_marker_rejects_mismatch(overrides):
+    marker = {**VALID_MARKER, **overrides}
+    with pytest.raises(SilverValidationError):
+        _validate_bronze_marker(marker, "2026-08-22", "20260822T060000+0900", "some/key.json")
+
+
+def test_validate_bronze_marker_rejects_missing_marker():
+    with pytest.raises(SilverValidationError):
+        _validate_bronze_marker(None, "2026-08-22", "20260822T060000+0900", "some/key.json")
+
+
+def test_find_current_day_entry_matches_target_date():
+    entry = _find_current_day_entry(VALID_MARKER, "2026-08-22")
+    assert entry["target_date"] == "2026-08-22"
+    assert entry["snapshot_type"] == "FINAL"
+
+
+def test_find_current_day_entry_returns_none_when_absent():
+    marker = {**VALID_MARKER, "selected_snapshots": VALID_MARKER["selected_snapshots"][:1]}
+    assert _find_current_day_entry(marker, "2026-08-22") is None
+
+
+def test_derive_mode_final_is_normal_preliminary_is_degraded():
+    assert _derive_mode(None, "FINAL") == "NORMAL"
+    assert _derive_mode("NORMAL", "PRELIMINARY") == "DEGRADED"
+
+
+def test_derive_mode_inherits_degraded_bronze_mode_even_when_today_is_final():
+    """backlog 날짜가 PRELIMINARY라 Bronze marker.mode가 DEGRADED면, 당일 entry가
+    FINAL이어도 Silver mode는 DEGRADED를 계승해야 한다."""
+    assert _derive_mode("DEGRADED", "FINAL") == "DEGRADED"
+
+
+def test_silver_promotion_key_matches_documented_layout():
+    key = _silver_promotion_key("2026-08-22", "20260822T060000+0900")
+    assert key == (
+        f"{SILVER_PROMOTION_PREFIX}run_date=2026-08-22/"
+        "promotion_id=20260822T060000+0900/promotion.json"
+    )
+
+
+def test_build_silver_promotion_document_final_is_normal_mode():
+    document = _build_silver_promotion_document(
+        run_date_str="2026-08-22",
+        promotion_id="20260822T060000+0900",
+        source_bronze_promotion_key="_meta/promotion/bronze_rental_history/x/promotion.json",
+        entry={"target_date": "2026-08-22", "snapshot_type": "FINAL", "observed_at": "2026-08-22T06:00:00+09:00"},
+        bronze_mode="NORMAL",
+        silver_row_count=12345,
+        confirmed_through=date(2026, 8, 21),
+        processed_at="2026-08-22T06:08:00+00:00",
+    )
+    assert document == {
+        "dataset": "rental_history",
+        "run_date": "2026-08-22",
+        "promotion_id": "20260822T060000+0900",
+        "source_bronze_promotion_key": "_meta/promotion/bronze_rental_history/x/promotion.json",
+        "mode": "NORMAL",
+        "source_snapshot_type": "FINAL",
+        "source_observed_at": "2026-08-22T06:00:00+09:00",
+        "processed_partition": "2026-08-22",
+        "silver_row_count": 12345,
+        "confirmed_through": "2026-08-21",
+        "status": "COMPLETE",
+        "processed_at": "2026-08-22T06:08:00+00:00",
+    }
+
+
+def test_build_silver_promotion_document_preliminary_is_degraded_mode():
+    document = _build_silver_promotion_document(
+        run_date_str="2026-08-22",
+        promotion_id="20260822T060000+0900",
+        source_bronze_promotion_key="_meta/promotion/bronze_rental_history/x/promotion.json",
+        entry={"target_date": "2026-08-22", "snapshot_type": "PRELIMINARY", "observed_at": "2026-08-22T05:00:00+09:00"},
+        bronze_mode="DEGRADED",
+        silver_row_count=10,
+        confirmed_through=date(2026, 8, 21),
+        processed_at="2026-08-22T06:08:00+00:00",
+    )
+    assert document["mode"] == "DEGRADED"
+    assert document["source_snapshot_type"] == "PRELIMINARY"
+
+
+# --------------------------------------------------------- run() 처리 순서 (#137)
+#
+# 확정 구간(_process_range)과 당일 promotion 처리(_prepare_current_day_promotion)가
+# 둘 다 성공해야 확정 워터마크(write_watermark)를 전진시켜야 한다. 당일 처리가
+# 실패했는데 워터마크가 먼저 전진하면, 다음 실행이 실패한 당일 파티션을 확정
+# backlog로 다시 확인할 기회를 잃는다. marker 저장(_persist_current_day_promotion_marker)은
+# 워터마크를 쓴 뒤에도 항상 전체 처리의 마지막 단계여야 한다(marker-last 보장).
+
+
+def _run_with_mocks(monkeypatch, *, current_day_raises=False, promotion_meta=None):
+    """run()을 실제 S3/Iceberg 없이 호출하고 호출 순서를 기록한다."""
+    order = []
+    silver_watermark = date(2026, 8, 19)
+    bronze_watermark = date(2026, 8, 21)
+
+    def fake_read_watermark(default_start=None, watermark_key=None):
+        if watermark_key == tsr.SILVER_WATERMARK_KEY:
+            return silver_watermark
+        return bronze_watermark
+
+    def fake_process_range(catalog, silver_table, start, end):
+        order.append(("process_range", start, end))
+        return 10
+
+    def fake_prepare(catalog, silver_table, meta, confirmed_through):
+        order.append(("prepare_current_day", confirmed_through))
+        if current_day_raises:
+            raise SilverValidationError("당일 파티션 처리 실패")
+        return {"bucket": "b", "key": "k", "document": {
+            "run_date": "2026-08-22", "promotion_id": "p", "mode": "NORMAL", "silver_row_count": 5,
+        }}
+
+    def fake_write_watermark(processed_date, watermark_key=None, extra=None):
+        order.append(("write_watermark", processed_date))
+
+    def fake_persist(prepared):
+        order.append(("persist_marker", prepared["key"]))
+
+    monkeypatch.setattr(tsr, "ensure_bucket", lambda bucket: None)
+    monkeypatch.setattr(tsr, "build_iceberg_catalog", lambda: object())
+    monkeypatch.setattr(tsr, "_ensure_silver_table", lambda catalog: object())
+    monkeypatch.setattr(tsr, "read_watermark", fake_read_watermark)
+    monkeypatch.setattr(tsr, "write_watermark", fake_write_watermark)
+    monkeypatch.setattr(tsr, "_process_range", fake_process_range)
+    monkeypatch.setattr(tsr, "_parse_bool_env", lambda name: promotion_meta is not None)
+    monkeypatch.setattr(tsr, "_load_bronze_promotion_metadata", lambda: promotion_meta)
+    monkeypatch.setattr(tsr, "_prepare_current_day_promotion", fake_prepare)
+    monkeypatch.setattr(tsr, "_persist_current_day_promotion_marker", fake_persist)
+
+    return order
+
+
+def test_run_writes_watermark_only_after_current_day_promotion_succeeds(monkeypatch):
+    """성공 시 순서: 확정 구간 -> 당일 promotion -> 확정 워터마크 -> marker 저장."""
+    order = _run_with_mocks(
+        monkeypatch,
+        promotion_meta={"run_date": "2026-08-22", "promotion_id": "p", "promotion_key": "k"},
+    )
+
+    run()
+
+    assert [step[0] for step in order] == [
+        "process_range", "prepare_current_day", "write_watermark", "persist_marker",
+    ]
+    # 확정 워터마크는 confirmed_end_date(bronze_watermark)로 전진해야 한다
+    assert order[2][1] == date(2026, 8, 21)
+
+
+def test_run_does_not_advance_watermark_when_current_day_promotion_fails(monkeypatch, capsys):
+    """
+    #137 회귀: 당일 promotion 처리가 실패하면, 확정 구간이 이미 성공했더라도
+    확정 워터마크를 전진시키면 안 된다 (marker도 당연히 남기지 않는다).
+    """
+    order = _run_with_mocks(
+        monkeypatch,
+        current_day_raises=True,
+        promotion_meta={"run_date": "2026-08-22", "promotion_id": "p", "promotion_key": "k"},
+    )
+
+    with pytest.raises(SystemExit):
+        run()
+
+    steps = [step[0] for step in order]
+    assert steps == ["process_range", "prepare_current_day"]
+    assert "write_watermark" not in steps
+    assert "persist_marker" not in steps
+
+
+def test_run_skips_current_day_and_still_advances_watermark_without_promotion_meta(monkeypatch):
+    """당일 promotion metadata가 없으면(Catchup/수동 트리거) 확정 워터마크만 전진한다."""
+    order = _run_with_mocks(monkeypatch, promotion_meta=None)
+
+    run()
+
+    assert [step[0] for step in order] == ["process_range", "write_watermark"]
+
+
+def test_build_silver_promotion_document_inherits_degraded_bronze_mode_on_mixed_promotion():
+    """확정 backlog가 PRELIMINARY라 Bronze marker.mode=DEGRADED인 채로 당일 entry가
+    FINAL이면, 당일 entry만 보고 NORMAL로 기록하지 않고 DEGRADED를 계승해야 한다."""
+    document = _build_silver_promotion_document(
+        run_date_str="2026-08-22",
+        promotion_id="20260822T060000+0900",
+        source_bronze_promotion_key="_meta/promotion/bronze_rental_history/x/promotion.json",
+        entry={"target_date": "2026-08-22", "snapshot_type": "FINAL", "observed_at": "2026-08-22T06:00:00+09:00"},
+        bronze_mode="DEGRADED",
+        silver_row_count=5,
+        confirmed_through=date(2026, 8, 21),
+        processed_at="2026-08-22T06:08:00+00:00",
+    )
+    assert document["mode"] == "DEGRADED"
+    assert document["source_snapshot_type"] == "FINAL"

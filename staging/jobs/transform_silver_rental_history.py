@@ -39,7 +39,7 @@ PyDeequ를 걷어내면서 콜백 서버 종료 처리(stop_spark_session_with_d
 import logging
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import duckdb
 import pyarrow as pa
@@ -54,7 +54,7 @@ import config
 from common.duckdb_io import query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import overwrite_partition
-from common.s3_utils import ensure_bucket  # 워커/로컬 실행 시 대상 버킷이 없으면 만들어주는 안전장치
+from common.s3_utils import ensure_bucket, get_json, put_json  # 워커/로컬 실행 시 대상 버킷이 없으면 만들어주는 안전장치
 from common.sql_assert import QualityCheck, QualityCheckError
 from common.watermark import read_watermark, write_watermark  # Bronze용 모듈을 키만 바꿔 Silver 전용으로 재사용
 from config.watermark_keys import SILVER_RENTAL_HISTORY  # build_dim_bike/set_watermark와 같은 값을 공유
@@ -185,6 +185,21 @@ _PARSE_FAILED_SQL = """
     WHERE (_raw_rent_dt IS NOT NULL AND trim(_raw_rent_dt) <> '' AND rent_dt IS NULL)
        OR (_raw_return_dt IS NOT NULL AND trim(_raw_return_dt) <> '' AND return_dt IS NULL)
 """
+
+# #137: 06시 일 배치의 publish_bronze_asset이 Asset event에 실어 보낸 정확한 promotion만
+# 신뢰한다. S3의 "최신 COMPLETE promotion"을 추측하면 Catchup(metadata 없이 같은 Asset을
+# 발행) 실행이 이전 일 배치 promotion을 잘못 집어 당일 파티션을 처리할 수 있다.
+SNAPSHOT_FINAL = "FINAL"
+SNAPSHOT_PRELIMINARY = "PRELIMINARY"
+MODE_NORMAL = "NORMAL"
+MODE_DEGRADED = "DEGRADED"
+
+# ingestion/jobs/rental_history_snapshot_policy.py의 PROMOTION_PREFIX와 짝을 이루는
+# Silver 쪽 marker 경로. staging 잡은 `-m jobs.X`로 실행되면 cwd(staging/jobs)가
+# 먼저 잡혀 `jobs` 패키지가 staging/jobs에 고정되므로, ingestion/jobs 안의 정책 모듈을
+# `from jobs...`로 가져올 수 없다 (docs/architecture.md §3 - 디렉터리가 레이어와 1:1이
+# 아님). 그래서 key 포맷을 여기서 다시 정의한다.
+SILVER_PROMOTION_PREFIX = "_meta/promotion/silver_rental_history/"
 
 
 def _connect() -> duckdb.DuckDBPyConnection:
@@ -324,6 +339,177 @@ def _process_range(catalog, silver_table, start_date: date, end_date: date) -> i
     return silver_count
 
 
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    """`true`/`false`만 허용한다 (rental_history_snapshot_policy.parse_bool과 동일 규칙)."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if not normalized:
+        return default
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise SilverValidationError(f"{name} must be 'true' or 'false': {value!r}")
+
+
+def _load_bronze_promotion_metadata() -> dict | None:
+    """
+    silver_rental_history_dag.py가 triggering_asset_events에서 뽑아 넘긴 값을 읽는다.
+
+    Catchup(bronze_catchup_all_sources_dag.py)이나 수동 트리거처럼 Asset event에
+    metadata가 없으면 세 값이 모두 빈 문자열로 넘어온다 - 이 경우 None을 돌려줘
+    기존 확정 워터마크 구간만 처리하게 한다 (Catchup 코드는 이 이슈에서 건드리지 않는다).
+    """
+    run_date = (os.getenv("RENTAL_HISTORY_BRONZE_RUN_DATE") or "").strip()
+    promotion_id = (os.getenv("RENTAL_HISTORY_BRONZE_PROMOTION_ID") or "").strip()
+    promotion_key = (os.getenv("RENTAL_HISTORY_BRONZE_PROMOTION_KEY") or "").strip()
+    if not (run_date and promotion_id and promotion_key):
+        return None
+    return {"run_date": run_date, "promotion_id": promotion_id, "promotion_key": promotion_key}
+
+
+def _validate_bronze_marker(
+    marker, expected_run_date: str, expected_promotion_id: str, promotion_key: str
+) -> dict:
+    """Asset metadata와 실제 Bronze marker가 어긋나면 안전하게 실패시킨다."""
+    if not isinstance(marker, dict):
+        raise SilverValidationError(f"Bronze promotion marker 없음: {promotion_key}")
+    if marker.get("dataset") != "rental_history":
+        raise SilverValidationError(f"dataset 불일치: {marker.get('dataset')!r} ({promotion_key})")
+    if marker.get("run_date") != expected_run_date:
+        raise SilverValidationError(
+            f"run_date 불일치: {marker.get('run_date')!r} != {expected_run_date!r} ({promotion_key})"
+        )
+    if marker.get("promotion_id") != expected_promotion_id:
+        raise SilverValidationError(
+            f"promotion_id 불일치: {marker.get('promotion_id')!r} != {expected_promotion_id!r} "
+            f"({promotion_key})"
+        )
+    if marker.get("status") != "COMPLETE":
+        raise SilverValidationError(f"status가 COMPLETE가 아님: {marker.get('status')!r} ({promotion_key})")
+    return marker
+
+
+def _find_current_day_entry(marker: dict, run_date_str: str) -> dict | None:
+    """Bronze marker의 selected_snapshots 중 당일(run_date) 파티션 항목을 찾는다."""
+    for entry in marker.get("selected_snapshots") or []:
+        if entry.get("target_date") == run_date_str:
+            return entry
+    return None
+
+
+def _derive_mode(bronze_mode: str | None, snapshot_type: str) -> str:
+    """당일 파티션의 원천이 PRELIMINARY거나 Bronze marker 자체가 DEGRADED면 계승한다.
+
+    Bronze marker의 mode는 같은 promotion에 포함된 확정 backlog 날짜까지 반영하므로,
+    당일 entry만으로는 못 잡는 혼합(backlog PRELIMINARY + 당일 FINAL) 케이스를 놓치지
+    않기 위해 marker.mode도 함께 본다.
+    """
+    if bronze_mode == MODE_DEGRADED or snapshot_type == SNAPSHOT_PRELIMINARY:
+        return MODE_DEGRADED
+    return MODE_NORMAL
+
+
+def _silver_promotion_key(run_date_str: str, promotion_id: str) -> str:
+    return f"{SILVER_PROMOTION_PREFIX}run_date={run_date_str}/promotion_id={promotion_id}/promotion.json"
+
+
+def _build_silver_promotion_document(
+    *,
+    run_date_str: str,
+    promotion_id: str,
+    source_bronze_promotion_key: str,
+    entry: dict,
+    bronze_mode: str | None,
+    silver_row_count: int,
+    confirmed_through: date,
+    processed_at: str,
+) -> dict:
+    snapshot_type = entry["snapshot_type"]
+    return {
+        "dataset": "rental_history",
+        "run_date": run_date_str,
+        "promotion_id": promotion_id,
+        "source_bronze_promotion_key": source_bronze_promotion_key,
+        "mode": _derive_mode(bronze_mode, snapshot_type),
+        "source_snapshot_type": snapshot_type,
+        "source_observed_at": entry["observed_at"],
+        "processed_partition": run_date_str,
+        "silver_row_count": silver_row_count,
+        "confirmed_through": confirmed_through.strftime("%Y-%m-%d"),
+        "status": "COMPLETE",
+        "processed_at": processed_at,
+    }
+
+
+def _prepare_current_day_promotion(
+    catalog, silver_table, promotion_meta: dict, confirmed_through: date
+) -> dict | None:
+    """
+    Asset이 지정한 정확한 promotion만 검증 후 당일 파티션을 처리하고 Silver COMPLETE
+    marker 문서를 구성한다. marker 저장(put_json)은 하지 않는다 - #137이 확정
+    워터마크와 당일 promotion 처리를 둘 다 성공해야 확정 워터마크를 전진시키도록
+    요구하므로, 워터마크를 쓴 다음에야 marker를 최종적으로 남겨야 한다
+    (run()의 `_persist_current_day_promotion_marker` 호출 참고 - marker-last 보장 유지).
+
+    확정 워터마크는 이 함수에서 건드리지 않는다 - 이 파티션은 아직 확정 후보가
+    아니라서 다음 실행에서 확정 backlog로 다시 덮어써질 수 있다.
+
+    marker.t0_enabled=false로 처리를 건너뛰면 None을 돌려준다.
+    """
+    bucket = config.SETTINGS.raw_bucket
+    marker = get_json(bucket, promotion_meta["promotion_key"])
+    marker = _validate_bronze_marker(
+        marker,
+        promotion_meta["run_date"],
+        promotion_meta["promotion_id"],
+        promotion_meta["promotion_key"],
+    )
+
+    if marker.get("t0_enabled") is not True:
+        logger.info("Bronze marker t0_enabled=false - 당일 파티션 처리 건너뜀")
+        return None
+
+    run_date_str = promotion_meta["run_date"]
+    entry = _find_current_day_entry(marker, run_date_str)
+    if entry is None:
+        raise SilverValidationError(
+            f"Bronze marker에 당일({run_date_str}) 파티션 항목이 없음: "
+            f"{promotion_meta['promotion_key']}"
+        )
+
+    run_date_value = date.fromisoformat(run_date_str)
+    silver_row_count = _process_range(catalog, silver_table, run_date_value, run_date_value)
+
+    document = _build_silver_promotion_document(
+        run_date_str=run_date_str,
+        promotion_id=promotion_meta["promotion_id"],
+        source_bronze_promotion_key=promotion_meta["promotion_key"],
+        entry=entry,
+        bronze_mode=marker.get("mode"),
+        silver_row_count=silver_row_count,
+        confirmed_through=confirmed_through,
+        processed_at=datetime.now(timezone.utc).isoformat(),
+    )
+    return {
+        "bucket": bucket,
+        "key": _silver_promotion_key(run_date_str, promotion_meta["promotion_id"]),
+        "document": document,
+    }
+
+
+def _persist_current_day_promotion_marker(prepared: dict) -> None:
+    """_prepare_current_day_promotion이 구성한 문서를 실제로 S3에 남긴다 (marker-last)."""
+    put_json(prepared["bucket"], prepared["key"], prepared["document"])
+    document = prepared["document"]
+    logger.info(
+        "Silver promotion marker 기록 완료: run_date=%s promotion_id=%s mode=%s row_count=%d",
+        document["run_date"], document["promotion_id"], document["mode"], document["silver_row_count"],
+    )
+
+
 def run() -> None:
     # 백필/daily_batch를 안 거치고 이 잡만 단독 실행하는 경우에도 안전하도록 버킷을 보장
     # (raw_bucket에는 워터마크 JSON이 있음)
@@ -339,19 +525,27 @@ def run() -> None:
     silver_watermark = read_watermark(watermark_key=SILVER_WATERMARK_KEY)
 
     start_date = silver_watermark + timedelta(days=1)
-    end_date = bronze_watermark
+    confirmed_end_date = bronze_watermark
 
     # 미지정이면 DEFAULT_MAX_DAYS_PER_RUN을 대신 써서 항상 상한을 건다
     max_days = os.getenv("MAX_DAYS_PER_RUN") or str(DEFAULT_MAX_DAYS_PER_RUN)
     capped_end = start_date + timedelta(days=int(max_days) - 1)
-    if capped_end < end_date:
+    if capped_end < confirmed_end_date:
         logger.info(
             "MAX_DAYS_PER_RUN=%s 적용 - 이번 실행은 %s ~ %s까지만 처리 (원래 끝: %s)",
-            max_days, start_date, capped_end, end_date,
+            max_days, start_date, capped_end, confirmed_end_date,
         )
-        end_date = capped_end
+        confirmed_end_date = capped_end
 
-    if start_date > end_date:
+    has_confirmed_range = start_date <= confirmed_end_date
+
+    # #137: T0_ENABLED가 꺼져 있으면 metadata가 있어도 기존 T-1 처리만 유지하고
+    # Silver promotion marker를 만들지 않는다.
+    t0_enabled = _parse_bool_env("RENTAL_HISTORY_T0_ENABLED")
+    promotion_meta = _load_bronze_promotion_metadata() if t0_enabled else None
+
+    # 확정 신규 날짜가 없어도 당일 promotion이 있으면 조기 반환하지 않는다.
+    if not has_confirmed_range and promotion_meta is None:
         logger.info(
             "처리할 신규 날짜 없음 (Silver 워터마크=%s, Bronze 워터마크=%s)",
             silver_watermark, bronze_watermark,
@@ -359,11 +553,28 @@ def run() -> None:
         return
 
     try:
-        # _process_range 성공 시에만 다음 줄 write_watermark 실행
-        _process_range(catalog, silver_table, start_date, end_date)
-        write_watermark(end_date, watermark_key=SILVER_WATERMARK_KEY)
+        confirmed_through = silver_watermark
+        if has_confirmed_range:
+            _process_range(catalog, silver_table, start_date, confirmed_end_date)
+            confirmed_through = confirmed_end_date
+
+        # #137: 확정 구간과 당일 promotion 처리가 둘 다 성공해야 확정 워터마크를
+        # 전진시킨다 - 당일 처리 실패로 예외가 나면 아래 write_watermark 호출 전에
+        # SilverValidationError로 빠져나가 워터마크가 조기 전진하지 않는다.
+        prepared_promotion = None
+        if promotion_meta is not None:
+            prepared_promotion = _prepare_current_day_promotion(
+                catalog, silver_table, promotion_meta, confirmed_through
+            )
+
+        if has_confirmed_range:
+            write_watermark(confirmed_end_date, watermark_key=SILVER_WATERMARK_KEY)
+
+        # marker는 워터마크를 쓴 다음에도 항상 마지막에 남긴다 (marker-last 보장).
+        if prepared_promotion is not None:
+            _persist_current_day_promotion_marker(prepared_promotion)
     except SilverValidationError as e:
-        logger.error("%s~%s 처리 실패, 배치 중단: %s", start_date, end_date, e)
+        logger.error("%s~%s 처리 실패, 배치 중단: %s", start_date, confirmed_end_date, e)
         sys.exit(1)
 
 

@@ -73,12 +73,12 @@ bikeman만 lookback이 있는 이유: 오프라인 작업 후 몰아서 제출�
 밀린 날짜는 각 잡의 워터마크 로직이 알아서 이어서 처리한다. Airflow의 catchup에
 의존하지 않고 "하루 한 번 트리거"만 Airflow가 책임진다.
 """
-from datetime import timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
-from airflow.providers.standard.operators.empty import EmptyOperator
-from airflow.sdk import TaskGroup, dag
+from airflow.sdk import TaskGroup, dag, task
 from airflow.task.trigger_rule import TriggerRule
 
 from dag_assets import (
@@ -98,6 +98,9 @@ from dag_common import (
 # 밀린 날짜가 많아도 한 run이 이만큼만 처리하고 끝낸다. run이 하루를 넘겨
 # 다음 날 station_master 스냅샷을 굶기지 않게 하는 안전장치 (위 doc 참고).
 DEFAULT_MAX_DAYS_PER_RUN = "3"
+
+# select_rental_history_snapshot/promote_rental_history_raw와 같은 KST 기준 논리 시각.
+KST = ZoneInfo("Asia/Seoul")
 
 MAX_DAYS_PER_RUN_TEMPLATE = "{{ params.max_days_per_run }}"
 
@@ -196,17 +199,45 @@ def bronze_daily_batch_all_sources():
         )
 
         # Bronze commit과 확정 워터마크가 모두 정합한 뒤에만 Asset을 발행한다.
-        publish_bronze_asset = EmptyOperator(
-            task_id="publish_bronze_asset",
-            outlets=[RENTAL_HISTORY_BRONZE],
-        )
+        # #137: Silver가 S3의 "최신 COMPLETE promotion"을 추측하지 않도록, 이 promotion을
+        # 유일하게 식별하는 run_date/promotion_id/promotion_key를 Asset event에 실어
+        # 보낸다. promotion_id/key 포맷은 promote_to_bronze와 같은 cutoff로 계산하므로
+        # 항상 그 태스크가 실제로 쓴 marker와 일치한다 (jobs.rental_history_snapshot_policy.
+        # build_promotion_id/promotion_key와 동일 규칙 - dag-processor 환경은 ingestion을
+        # import할 수 없어 여기서 다시 계산한다. dag_common.py 참고).
+        @task(task_id="publish_bronze_asset", outlets=[RENTAL_HISTORY_BRONZE])
+        def publish_bronze_asset(**context):
+            dag_run = context["dag_run"]
+            conf_cutoff = (
+                dag_run.conf.get("collection_cutoff_at")
+                if dag_run is not None and dag_run.conf
+                else None
+            )
+            cutoff = (
+                datetime.fromisoformat(conf_cutoff)
+                if conf_cutoff
+                else context["data_interval_end"]
+            )
+            cutoff = cutoff.astimezone(KST)
+
+            run_date = cutoff.date()
+            promotion_id = cutoff.strftime("%Y%m%dT%H%M%S%z")
+            promotion_key = (
+                "_meta/promotion/bronze_rental_history/"
+                f"run_date={run_date.isoformat()}/promotion_id={promotion_id}/promotion.json"
+            )
+            context["outlet_events"][RENTAL_HISTORY_BRONZE].extra = {
+                "run_date": run_date.isoformat(),
+                "promotion_id": promotion_id,
+                "promotion_key": promotion_key,
+            }
 
         (
             collect_final_raw
             >> select_final_or_preliminary
             >> promote_to_bronze
             >> update_confirmed_watermark
-            >> publish_bronze_asset
+            >> publish_bronze_asset()
         )
 
     BashOperator(
