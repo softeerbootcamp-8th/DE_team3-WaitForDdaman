@@ -126,19 +126,22 @@ def write_samples(spark: SparkSession, cfg, anchor_plan: dict) -> dict:
 
     파티션 단위 dynamic overwrite 라 같은 앵커로 재실행해도 중복되지 않는다.
     """
+    from pipeline.train_risk_model.sql_engine import SqlEngine
+
+    engine = SqlEngine.for_spark(spark)
     sample_path = cfg.get_path("paths.train_sample")
     pos_path = cfg.get_path("paths.label_pos_new")
 
     train_anchors = [date.fromisoformat(d) for d in anchor_plan["train_anchors"]]
     holdout_anchors = [date.fromisoformat(d) for d in anchor_plan["holdout_anchors"]]
 
-    rent = ft.apply_trip_filters(ft.read_rental(spark, cfg), cfg)
-    fault = ft.read_fault(spark, cfg)
+    rent = ft.apply_trip_filters(engine, ft.read_rental(engine, cfg), cfg)
+    fault = ft.read_fault(engine, cfg)
     rent.cache()
 
     stats = {}
     for anchor_type, anchors in (("train", train_anchors), ("holdout", holdout_anchors)):
-        df = ft.build_samples(spark, cfg, anchors, anchor_type, rent=rent, fault=fault)
+        df = ft.build_samples(engine, cfg, anchors, anchor_type, rent=rent, fault=fault)
         (
             df.write.mode("overwrite")
             .partitionBy("snapshot_date")
@@ -147,7 +150,7 @@ def write_samples(spark: SparkSession, cfg, anchor_plan: dict) -> dict:
         stats[f"{anchor_type}_anchors"] = len(anchors)
 
     # 메인지표 분모 (피처 테이블에 없는 자전거까지 포함)
-    pos_new = ft.build_pos_new(fault, ft.anchor_frame(spark, holdout_anchors), cfg)
+    pos_new = ft.build_pos_new(engine, fault, ft.anchor_frame(engine, holdout_anchors), cfg)
     (
         pos_new.withColumnRenamed("as_of", "snapshot_date")
         .write.mode("overwrite")
