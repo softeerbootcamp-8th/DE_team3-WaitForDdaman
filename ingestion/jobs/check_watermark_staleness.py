@@ -23,15 +23,7 @@ import os
 from datetime import date
 
 from common.watermark import read_watermark
-from config.watermark_keys import (
-    BIKEMAN_EVENT,
-    BRONZE_FAILURE_REPORT,
-    BRONZE_RENTAL_HISTORY,
-    GOLD_DIM_BIKE,
-    SILVER_BIKEMAN_ACTION,
-    SILVER_FAILURE_REPORT,
-    SILVER_RENTAL_HISTORY,
-)
+from config.watermark_keys import DATASET_WATERMARK_KEYS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -44,17 +36,9 @@ DEFAULT_MAX_STALE_DAYS = 3
 # station_master/station_active는 날짜 파라미터가 없는 "항상 전체 스냅샷" API라
 # 증분 워터마크 개념이 없다 (jobs/set_watermark.py 참고) - 이 체크 대상에서 제외.
 #
-# 워터마크 키는 항상 config/watermark_keys.py 상수를 참조해서 다른 코드와
-# 값이 어긋나지 않게 한다.
-WATERMARK_DATASETS = {
-    "rental_history": BRONZE_RENTAL_HISTORY,
-    "failure_report": BRONZE_FAILURE_REPORT,
-    "bikeman_event": BIKEMAN_EVENT,
-    "silver_rental_history": SILVER_RENTAL_HISTORY,
-    "silver_failure_report": SILVER_FAILURE_REPORT,
-    "silver_bikeman_action": SILVER_BIKEMAN_ACTION,
-    "gold_dim_bike": GOLD_DIM_BIKE,
-}
+# config/watermark_keys.py의 단일 소스를 그대로 쓴다 - jobs/set_watermark.py도 동일한
+# 딕셔너리를 참조하므로, 새 데이터셋이 추가돼도 두 잡이 항상 동기화된다.
+WATERMARK_DATASETS = DATASET_WATERMARK_KEYS
 
 
 class WatermarkStalenessError(Exception):

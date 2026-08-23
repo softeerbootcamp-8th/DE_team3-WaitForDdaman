@@ -27,22 +27,14 @@ from datetime import datetime, timedelta
 import config
 from common.s3_utils import ensure_bucket
 from common.watermark import write_watermark
-from config.watermark_keys import GOLD_DIM_BIKE, SILVER_BIKEMAN_ACTION, SILVER_RENTAL_HISTORY
+from config.watermark_keys import DATASET_WATERMARK_KEYS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# 데이터셋명 -> 워터마크 키 (각 daily_batch_*.py/silver/gold 모듈에 정의된 것과 동일해야 함)
-# silver_rental_history/gold_dim_bike는 이 DAG의 params 안내에는 있었지만 실제 매핑이
-# 빠져있던 버그 - config/watermark_keys.py의 상수를 그대로 재사용해 값이 어긋나지 않게 한다.
-WATERMARK_KEYS = {
-    "rental_history": "_meta/watermark/rental_history.json",
-    "failure_report": "_meta/watermark/failure_report.json",
-    "bikeman_event": "_meta/watermark/bikeman_event.json",
-    "silver_bikeman_action": SILVER_BIKEMAN_ACTION,
-    "silver_rental_history": SILVER_RENTAL_HISTORY,
-    "gold_dim_bike": GOLD_DIM_BIKE,
-}
+# 데이터셋명 -> 워터마크 키. config/watermark_keys.py의 단일 소스를 그대로 쓴다 -
+# jobs/check_watermark_staleness.py도 동일한 딕셔너리를 참조하므로 두 잡이 항상 동기화된다.
+WATERMARK_KEYS = DATASET_WATERMARK_KEYS
 
 
 def run(date_str: str, dataset: str) -> None:

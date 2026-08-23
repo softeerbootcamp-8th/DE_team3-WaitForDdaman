@@ -32,6 +32,7 @@ from common.db_client import BikemanDbError, fetch_events_by_date
 from common.iceberg_io import append, overwrite_partition
 from common.s3_utils import ensure_bucket, put_json
 from common.watermark import read_watermark, write_watermark
+from config.watermark_keys import BIKEMAN_EVENT
 from schema.bikeman_event_schema import (
     SchemaValidationError,
     validate_and_report,
@@ -41,7 +42,7 @@ from schema.bikeman_event_schema import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-WATERMARK_KEY = "_meta/watermark/bikeman_event.json"
+WATERMARK_KEY = BIKEMAN_EVENT
 LOOKBACK_DAYS = 3
 SERVICE_START_DATE = date(2026, 6, 30)
 
