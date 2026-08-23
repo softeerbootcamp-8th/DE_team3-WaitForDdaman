@@ -24,7 +24,14 @@ x-airflow-common:
     S3_ENDPOINT: ${S3_ENDPOINT:-http://localstack:4566}
     AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-}
     APP_ENV: ${APP_ENV:-local}
-    ICEBERG_CATALOG_TYPE: ${ICEBERG_CATALOG_TYPE:-hadoop}
+    ICEBERG_CATALOG_TYPE: ${ICEBERG_CATALOG_TYPE:-jdbc}
+    # jdbc 카탈로그 인증 - config.py의 fallback(ICEBERG_JDBC_CATALOG_USER 없으면
+    # POSTGRES_USER, 그것도 없으면 하드코딩 "airflow")이 여기 컨테이너 환경에
+    # POSTGRES_USER/PASSWORD 자체가 없어서 항상 "airflow"로 떨어지는 버그가 있었다
+    # (postgres 서비스 블록에만 있고 airflow 컨테이너들엔 안 넘어옴, #169에서 실측
+    # 발견 - 로컬 실제 계정과 안 맞아 JDBC 인증 실패). 여기서 명시로 고정한다.
+    ICEBERG_JDBC_CATALOG_USER: ${POSTGRES_USER:-airflow}
+    ICEBERG_JDBC_CATALOG_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
     RISK_MODEL_CONFIG: ${RISK_MODEL_CONFIG:-/opt/airflow/pylib/config/risk_model.local.yaml}
     PYTHONPATH: /opt/airflow/pylib
   volumes:

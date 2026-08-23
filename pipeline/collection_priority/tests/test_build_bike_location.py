@@ -6,12 +6,12 @@ _baseline()/_delta()는 Iceberg 테이블을 직접 읽으므로 카탈로그가
 _merge_baseline_delta()만 검증한다 - staging/tests와 동일하게 카탈로그 설정
 없는 최소 SparkSession을 직접 만든다.
 """
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 from pyspark.sql import types as T
 
-from jobs.build_bike_location import _merge_baseline_delta
+from jobs.build_bike_location import COLD_START_LOOKBACK_DAYS, _effective_delta_start, _merge_baseline_delta
 
 BASELINE_SCHEMA = T.StructType([
     T.StructField("bike_id", T.StringType()),
@@ -113,6 +113,20 @@ def test_null_station_id_from_delta_means_not_at_any_station(spark):
 
     assert result["B1"]["last_station_id"] is None
     assert result["B1"]["last_event_at"] == datetime(2026, 8, 16, 9, 0)
+
+
+def test_effective_delta_start_uses_baseline_when_present():
+    """baseline이 있으면(정상 증분) lookback 안 걸고 그대로 쓴다."""
+    start = _effective_delta_start(date(2026, 8, 1), date(2026, 8, 17))
+    assert start == date(2026, 8, 1)
+
+
+def test_effective_delta_start_applies_lookback_on_cold_start():
+    """#147: cold start(baseline 없음)는 전체 스캔 대신 최근 N일만 본다."""
+    end = date(2026, 8, 17)
+    start = _effective_delta_start(None, end)
+    assert start == end - timedelta(days=COLD_START_LOOKBACK_DAYS - 1)
+    assert (end - start).days == COLD_START_LOOKBACK_DAYS - 1
 
 
 def test_multiple_bikes_are_independent(spark):
