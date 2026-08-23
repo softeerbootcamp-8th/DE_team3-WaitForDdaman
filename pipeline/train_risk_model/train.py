@@ -6,10 +6,13 @@ Spark 는 피처 생성까지만 쓴다 — 기술 선택 근거로 그대로 �
 
 from __future__ import annotations
 
+import os
 from datetime import date
 
 import numpy as np
 import pandas as pd
+
+import config
 
 from .features import FEATURE_COLS
 
@@ -24,17 +27,20 @@ def _open_dataset(uri: str):
     import pyarrow.dataset as ds
 
     if uri.startswith("s3a://") or uri.startswith("s3://"):
-        import os
-
         from pyarrow import fs as pafs
 
         # S3_ENDPOINT는 local(LocalStack) 전용 오버라이드다 - AWS 모드에서도 무조건
         # 읽으면(APP_ENV 무관) 실 S3 대신 LocalStack 호스트로 붙으려다 깨진다
         # (ingestion/.env가 다른 로컬 전용 설정과 함께 이 값을 늘 갖고 있어서 실측 확인됨).
-        is_local = os.environ.get("APP_ENV", "local") == "local"
+        is_local = config.SETTINGS.env == "local"
         endpoint = os.environ.get("AWS_ENDPOINT_URL") or (
             os.environ.get("S3_ENDPOINT") if is_local else None
         )
+        # AWS_ACCESS_KEY_ID/SECRET은 config.SETTINGS에 있는 값(s3_access_key/secret_key)을
+        # 쓰지 않는다 - Settings는 미설정 시 "test"(LocalStack용 더미)로 기본값을 채우는데,
+        # 여기서는 미설정 시 None을 넘겨 pyarrow가 기본 자격증명 체인(IAM Role)을 쓰게 해야
+        # 한다(get_s3_client()의 local/aws 분기와 달리, 여기는 APP_ENV=aws에서도 실 S3에
+        # STS 임시 자격증명으로 접속하는 로컬 개발 워크플로를 지원해야 하기 때문).
         kwargs = {
             "access_key": os.environ.get("AWS_ACCESS_KEY_ID"),
             "secret_key": os.environ.get("AWS_SECRET_ACCESS_KEY"),
@@ -46,8 +52,8 @@ def _open_dataset(uri: str):
         if endpoint:
             scheme, host = endpoint.split("://", 1)
             kwargs.update(endpoint_override=host, scheme=scheme)
-        elif os.environ.get("AWS_DEFAULT_REGION"):
-            kwargs["region"] = os.environ["AWS_DEFAULT_REGION"]
+        else:
+            kwargs["region"] = config.SETTINGS.s3_region
         filesystem = pafs.S3FileSystem(**kwargs)
         path = uri.split("://", 1)[1]
         return ds.dataset(path, format="parquet", partitioning="hive", filesystem=filesystem)

@@ -82,3 +82,29 @@ output "iceberg_catalog_secret_arn" {
   description = "ARN of the Secrets Manager secret holding ICEBERG_JDBC_CATALOG_USER/PASSWORD"
   value       = aws_secretsmanager_secret.iceberg_catalog.arn
 }
+
+# ---- bikeman_event_generator Lambda (#186) ----
+output "bikeman_event_generator_ecr_repository_url" {
+  description = "URL of the bikeman_event_generator Lambda ECR repository - docker push 대상"
+  value       = aws_ecr_repository.bikeman_event_generator.repository_url
+}
+
+output "generate_collect_events_lambda_arn" {
+  description = "ARN of bikeman-event-generator-generate-collect-events Lambda"
+  value       = aws_lambda_function.generate_collect_events.arn
+}
+
+output "deploy_returned_bikes_lambda_arn" {
+  description = "ARN of bikeman-event-generator-deploy-returned-bikes Lambda"
+  value       = aws_lambda_function.deploy_returned_bikes.arn
+}
+
+output "bikeman_event_generator_dlq_arn" {
+  description = "ARN of bikeman_event_generator Dead Letter Queue (SQS)"
+  value       = aws_sqs_queue.bikeman_event_generator_dlq.arn
+}
+
+output "secretsmanager_vpc_endpoint_id" {
+  description = "ID of the Secrets Manager Interface VPC Endpoint shared by serving_sync and bikeman_event_generator Lambdas"
+  value       = aws_vpc_endpoint.secretsmanager.id
+}

@@ -5,12 +5,15 @@ Bronze DAG 공통 설정 - 일 배치/백필 DAG가 import해서 쓴다.
 dag_assets.py와 같은 방식으로, Airflow가 dags 폴더를 sys.path에 넣어 파싱하므로
 `from dag_common import ...`를 별도 패키징 없이 그대로 쓸 수 있다.
 """
+import logging
 import os
 import shlex
 import time
 from datetime import timedelta
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 INGESTION_DIR = "/opt/airflow/ingestion"
 STAGING_DIR = "/opt/airflow/staging"  # staging/jobs/ 잡(Silver 등) 실행 위치
@@ -79,12 +82,15 @@ def notify_slack_on_failure(context: dict) -> None:
     if not webhook_url:
         return
 
-    ti = context["task_instance"]
-    message = f":x: *{ti.dag_id}.{ti.task_id}* 실패\n실행일: {context['ds']}\n로그: {ti.log_url}"
     try:
-        requests.post(webhook_url, json={"text": message}, timeout=10)
-    except requests.RequestException:
-        pass
+        ti = context["task_instance"]
+        message = f":x: *{ti.dag_id}.{ti.task_id}* 실패\n실행일: {context['ds']}\n로그: {ti.log_url}"
+        resp = requests.post(webhook_url, json={"text": message}, timeout=10)
+        resp.raise_for_status()
+    except Exception:
+        # 알림 자체가 실패해도 태스크 실패 처리(콜백 호출부)를 방해하면 안 되므로 항상 삼킨다.
+        # 대신 로그로는 반드시 남겨서 웹훅 만료/rate limit 등을 나중에라도 추적할 수 있게 한다.
+        logger.exception("Slack 실패 알림 전송 실패")
 
 
 def is_aws_env() -> bool:

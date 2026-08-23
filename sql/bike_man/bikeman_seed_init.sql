@@ -2,8 +2,11 @@
 -- bikeman_seed_init.sql
 --
 -- 실행 대상: 이미 떠 있는 postgres 컨테이너 (DB/USER는 루트 .env의 POSTGRES_DB/POSTGRES_USER)
--- 실행 방법:
---   docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < sql/bike_man/bikeman_seed_init.sql
+-- 실행 방법 (airflow_reader/bikeman_writer 롤 비밀번호는 평문으로 파일에 넣지 않고
+-- psql -v로 셸 환경변수에서 주입한다 - 아래 :'airflow_reader_pw'/:'bikeman_writer_pw' 참고):
+--   docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+--     -v airflow_reader_pw="$AIRFLOW_READER_PW" -v bikeman_writer_pw="$BIKEMAN_WRITER_PW" \
+--     < sql/bike_man/bikeman_seed_init.sql
 --
 -- 이 파일 하나로:
 --   1) app / bikeman / serving 스키마 생성 (airflow 스키마는 건드리지 않음 -
@@ -20,11 +23,18 @@ CREATE SCHEMA IF NOT EXISTS app;
 CREATE SCHEMA IF NOT EXISTS bikeman;
 CREATE SCHEMA IF NOT EXISTS serving;
 
+-- 롤 비밀번호를 커스텀 GUC로 세션에 전달한다 - psql의 :'var' 치환은 $$ ... $$
+-- 안에서는 동작하지 않아서(실측: 그대로 리터럴 텍스트로 남아 syntax error),
+-- DO 블록 밖에서 SET으로 세팅한 뒤 EXECUTE format(... %L, current_setting(...))으로
+-- 안전하게 SQL 리터럴로 넣는다.
+SET bikeman_seed.airflow_reader_pw = :'airflow_reader_pw';
+SET bikeman_seed.bikeman_writer_pw = :'bikeman_writer_pw';
+
 -- Airflow가 bikeman을 조회만 하도록 최소권한 롤 (선택사항, 필요 없으면 이 블록 삭제 가능)
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'airflow_reader') THEN
-        CREATE ROLE airflow_reader LOGIN PASSWORD 'airflow_reader_pw';
+        EXECUTE format('CREATE ROLE airflow_reader LOGIN PASSWORD %L', current_setting('bikeman_seed.airflow_reader_pw'));
     END IF;
 END
 $$;
@@ -51,7 +61,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA bikeman GRANT SELECT ON TABLES TO airflow_rea
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'bikeman_writer') THEN
-        CREATE ROLE bikeman_writer LOGIN PASSWORD 'bikeman_writer_pw';
+        EXECUTE format('CREATE ROLE bikeman_writer LOGIN PASSWORD %L', current_setting('bikeman_seed.bikeman_writer_pw'));
     END IF;
 END
 $$;

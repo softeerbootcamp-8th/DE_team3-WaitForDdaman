@@ -24,9 +24,14 @@
 
 ## DB 접속
 
-이 파이프라인은 저장소의 다른 job들(psycopg2 + .env 직접 연결)과 다르게, Airflow
-Connection `bikeman_postgres` + `PostgresHook`을 사용한다 (사용자 확정 사항). Connection
-필드는 `docs/superpowers/specs/2026-08-18-bikeman-event-generator-design.md` 참고.
+이 파이프라인은 Lambda(`infra/lambdas/bikeman_event_generator`, #186)로 실행된다. Airflow
+워커는 DB 자격증명을 갖지 않고 Lambda를 invoke만 한다. DB 접속 정보는 AWS Secrets
+Manager에 저장되어 있고, Lambda 콜드 스타트 시 `infra/lambdas/bikeman_event_generator/
+app/_secrets.py`의 `load_bikeman_db_secret()`이 그 시크릿을 읽어
+`BIKEMAN_WRITER_DB_HOST/PORT/NAME/USER/PASSWORD` 환경변수를 채운 뒤 잡 모듈을 호출한다.
+잡 코드(`generate_collect_events.py`/`deploy_returned_bikes.py`)는 이 환경변수들을
+`os.environ`에서 직접 읽는 psycopg2 직접 연결 방식으로, 저장소의 다른 job들과 동일한
+컨벤션을 따른다 (Airflow Connection/PostgresHook을 쓰지 않음).
 
 ## Airflow
 
@@ -40,8 +45,13 @@ Connection `bikeman_postgres` + `PostgresHook`을 사용한다 (사용자 확정
 
 ## 로컬/컨테이너 실행
 
+`_connect()`가 `BIKEMAN_WRITER_DB_HOST/NAME/USER/PASSWORD`를 `os.environ`에서 직접
+읽으므로(없으면 `KeyError`), 실행 전에 이 환경변수들을 채워야 한다:
+
 ```bash
-docker exec airflow-scheduler python3 -c "
+docker exec -e BIKEMAN_WRITER_DB_HOST=... -e BIKEMAN_WRITER_DB_NAME=... \
+  -e BIKEMAN_WRITER_DB_USER=... -e BIKEMAN_WRITER_DB_PASSWORD=... \
+  airflow-scheduler python3 -c "
 import sys
 sys.path.insert(0, '/opt/airflow/pipeline/bikeman_event_generator/jobs')
 import generate_collect_events, deploy_returned_bikes

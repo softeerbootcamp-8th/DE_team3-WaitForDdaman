@@ -50,6 +50,29 @@ def test_alarm_message_posted_to_webhook(monkeypatch):
     assert "ALARM" in sent_payload["text"]
 
 
+def test_null_trigger_field_does_not_crash(monkeypatch):
+    """Trigger가 명시적 null이면 alarm.get('Trigger', {})는 기본값 대신 None을 반환해
+    trigger.get(...)에서 AttributeError가 났었다 - or {} 로 방어한다."""
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", WEBHOOK_URL)
+    message = json.dumps({
+        "AlarmName": "some-alarm",
+        "NewStateValue": "ALARM",
+        "NewStateReason": "reason",
+        "StateChangeTime": "2026-08-23T01:23:45.000+0000",
+        "Trigger": None,
+    })
+
+    mock_resp = MagicMock()
+    mock_resp.getcode.return_value = 200
+    mock_urlopen = MagicMock()
+    mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+    with patch("infra.lambdas.notify_slack.lambda_function.urllib.request.urlopen", mock_urlopen):
+        result = lambda_handler(_sns_event(message), None)
+
+    assert result == {"statusCode": 200, "notified": 1}
+
+
 def test_non_json_message_falls_back_to_raw_text(monkeypatch):
     monkeypatch.setenv("SLACK_WEBHOOK_URL", WEBHOOK_URL)
 
@@ -81,3 +104,30 @@ def test_empty_records_returns_zero_notified(monkeypatch):
     monkeypatch.setenv("SLACK_WEBHOOK_URL", WEBHOOK_URL)
     result = lambda_handler({"Records": []}, None)
     assert result == {"statusCode": 200, "notified": 0}
+
+
+def test_one_failing_record_does_not_block_other_records(monkeypatch):
+    """한 레코드가 실패해도 나머지 레코드는 계속 전송돼야 한다 (재시도 시 중복 발송 방지)."""
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", WEBHOOK_URL)
+
+    ok_resp = MagicMock()
+    ok_resp.getcode.return_value = 200
+    ok_cm = MagicMock()
+    ok_cm.__enter__.return_value = ok_resp
+
+    mock_urlopen = MagicMock(
+        side_effect=[ok_cm, urllib.error.URLError("connection refused")]
+    )
+
+    event = {
+        "Records": [
+            {"Sns": {"Message": ALARM_MESSAGE, "Subject": "ok-alarm"}},
+            {"Sns": {"Message": ALARM_MESSAGE, "Subject": "bad-alarm"}},
+        ]
+    }
+
+    with patch("infra.lambdas.notify_slack.lambda_function.urllib.request.urlopen", mock_urlopen):
+        with pytest.raises(RuntimeError):
+            lambda_handler(event, None)
+
+    assert mock_urlopen.call_count == 2

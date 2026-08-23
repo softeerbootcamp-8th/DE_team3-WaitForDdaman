@@ -20,18 +20,11 @@ Airflow에서는 PythonOperator로 run()을 호출한다 - 정체가 감지되�
 """
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 from common.watermark import read_watermark
-from config.watermark_keys import (
-    BIKEMAN_EVENT,
-    BRONZE_FAILURE_REPORT,
-    BRONZE_RENTAL_HISTORY,
-    GOLD_DIM_BIKE,
-    SILVER_BIKEMAN_ACTION,
-    SILVER_FAILURE_REPORT,
-    SILVER_RENTAL_HISTORY,
-)
+from config.watermark_keys import DATASET_WATERMARK_KEYS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -44,17 +37,9 @@ DEFAULT_MAX_STALE_DAYS = 3
 # station_master/station_active는 날짜 파라미터가 없는 "항상 전체 스냅샷" API라
 # 증분 워터마크 개념이 없다 (jobs/set_watermark.py 참고) - 이 체크 대상에서 제외.
 #
-# 워터마크 키는 항상 config/watermark_keys.py 상수를 참조해서 다른 코드와
-# 값이 어긋나지 않게 한다.
-WATERMARK_DATASETS = {
-    "rental_history": BRONZE_RENTAL_HISTORY,
-    "failure_report": BRONZE_FAILURE_REPORT,
-    "bikeman_event": BIKEMAN_EVENT,
-    "silver_rental_history": SILVER_RENTAL_HISTORY,
-    "silver_failure_report": SILVER_FAILURE_REPORT,
-    "silver_bikeman_action": SILVER_BIKEMAN_ACTION,
-    "gold_dim_bike": GOLD_DIM_BIKE,
-}
+# config/watermark_keys.py의 단일 소스를 그대로 쓴다 - jobs/set_watermark.py도 동일한
+# 딕셔너리를 참조하므로, 새 데이터셋이 추가돼도 두 잡이 항상 동기화된다.
+WATERMARK_DATASETS = DATASET_WATERMARK_KEYS
 
 
 class WatermarkStalenessError(Exception):
@@ -62,18 +47,26 @@ class WatermarkStalenessError(Exception):
 
 
 def stale_datasets(as_of: date, max_stale_days: int) -> list[dict]:
-    """기준일(as_of) 대비 max_stale_days보다 더 정체된 데이터셋 목록을 반환한다."""
-    stale = []
-    for dataset, watermark_key in WATERMARK_DATASETS.items():
-        watermark = read_watermark(watermark_key=watermark_key)
-        days_stale = (as_of - watermark).days
-        if days_stale > max_stale_days:
-            stale.append({
-                "dataset": dataset,
-                "watermark_key": watermark_key,
-                "last_processed_date": watermark.isoformat(),
-                "days_stale": days_stale,
-            })
+    """기준일(as_of) 대비 max_stale_days보다 더 정체된 데이터셋 목록을 반환한다.
+
+    데이터셋마다 독립적인 S3 GetObject라 순차 실행할 이유가 없다 - 동시에 읽는다.
+    """
+    datasets = list(WATERMARK_DATASETS.items())
+    with ThreadPoolExecutor(max_workers=len(datasets) or 1) as executor:
+        watermarks = executor.map(
+            lambda item: read_watermark(watermark_key=item[1]), datasets
+        )
+
+        stale = []
+        for (dataset, watermark_key), watermark in zip(datasets, watermarks):
+            days_stale = (as_of - watermark).days
+            if days_stale > max_stale_days:
+                stale.append({
+                    "dataset": dataset,
+                    "watermark_key": watermark_key,
+                    "last_processed_date": watermark.isoformat(),
+                    "days_stale": days_stale,
+                })
     return stale
 
 
