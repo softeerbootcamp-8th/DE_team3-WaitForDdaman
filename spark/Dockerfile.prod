@@ -24,24 +24,30 @@ USER root
 RUN curl -fsSL -o "$SPARK_HOME/jars/postgresql-42.7.3.jar" \
       "https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.3/postgresql-42.7.3.jar"
 
-# 앱 코드. 로컬/Airflow 실행(airflow/dags/gold_risk_decision_dag.py의 _bash())과
-# 동일한 상대 구조를 /opt/app 아래 그대로 재현한다 - import config / from
-# common.xxx / from jobs.xxx / from pipeline.train_risk_model.xxx가 코드 수정
-# 없이 그대로 동작하려면 디렉터리 이름과 깊이가 로컬과 같아야 한다.
+# 앱 코드. 로컬/Airflow 실행과 동일한 상대 구조를 /opt/app 아래 그대로 재현한다 -
+# import config / from common.xxx / from schema.xxx (bare) 와
+# from ingestion.common.xxx / from pipeline.train_risk_model.xxx (qualified) 가
+# 코드 수정 없이 그대로 동작하려면 디렉터리 이름과 깊이가 로컬과 같아야 한다.
+# 대상 잡: ingestion/jobs/initial_load_{rental_history,failure_report}.py,
+# pipeline/train_risk_model/samples.py, airflow/scripts/check_*.py.
 COPY config/ /opt/app/config/
 COPY ingestion/common/ /opt/app/ingestion/common/
+COPY ingestion/jobs/ /opt/app/ingestion/jobs/
+COPY ingestion/schema/ /opt/app/ingestion/schema/
 COPY pipeline/train_risk_model/ /opt/app/pipeline/train_risk_model/
-COPY pipeline/risk_model/jobs/ /opt/app/pipeline/risk_model/jobs/
+COPY airflow/scripts/ /opt/app/airflow/scripts/
 
 # Python 의존성. pyspark는 베이스 이미지가 이미 제공하므로 재설치하지 않는다.
 COPY spark/requirements-emr.txt /opt/app/requirements-emr.txt
 RUN pip3 install --no-cache-dir -r /opt/app/requirements-emr.txt
 
-# 로컬 bash 실행과 동일한 PYTHONPATH 3분할 규칙:
-#   /opt/app                     -> config, pipeline.train_risk_model.* (namespace package)
-#   /opt/app/ingestion            -> common.*
-#   /opt/app/pipeline/risk_model  -> jobs.*
-ENV PYTHONPATH="/opt/app:/opt/app/ingestion:/opt/app/pipeline/risk_model"
+# 로컬 bash 실행과 동일한 PYTHONPATH 2분할 규칙:
+#   /opt/app            -> config, ingestion.common.*, pipeline.train_risk_model.*
+#                          (namespace package)
+#   /opt/app/ingestion  -> common.*, schema.*
+# 두 경로가 동시에 있어야 파일별로 다른 import 스타일(bare / qualified)이
+# 코드 수정 없이 전부 해결된다.
+ENV PYTHONPATH="/opt/app:/opt/app/ingestion"
 
 # 필요한 jar가 전부 이미 클래스패스에 있으므로(Iceberg/Hadoop-AWS는 베이스
 # 이미지의 extraClassPath, Postgres JDBC는 위 baked-in 사본), spark_session.py가
@@ -50,9 +56,8 @@ ENV SPARK_JARS_ALREADY_BAKED="true"
 
 # pipeline/train_risk_model/settings.py의 DEFAULT_CONFIG는 Airflow compose 전용
 # 마운트 경로(/opt/airflow/pylib/config/risk_model.yaml)라 이 컨테이너엔 없다.
-# load_config()를 인자 없이 부르는 잡(build_bike_features_daily,
-# run_risk_scoring_model 경유 build_fact_bike_risk)이 시작 즉시
-# FileNotFoundError로 죽지 않도록 위 COPY로 들어온 실제 경로를 가리킨다.
+# load_config()를 인자 없이 부를 수 있는 잡(pipeline/train_risk_model/samples.py)이
+# 시작 즉시 FileNotFoundError로 죽지 않도록 위 COPY로 들어온 실제 경로를 가리킨다.
 ENV RISK_MODEL_CONFIG="/opt/app/config/risk_model.yaml"
 
 # EMR Serverless는 이 이미지를 hadoop 유저로 실행한다.
