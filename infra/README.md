@@ -23,31 +23,57 @@ services/web/Dockerfile.prod
 
 ## 아키텍처 요약
 
-- 단일 EC2 인스턴스(`t4g.large`, arm64/Graviton2) 위에서 `docker compose`로 전체 스택 실행:
-  Postgres(Airflow 메타DB + bikeman/serving 스키마), Airflow 4개 컨테이너
-  (apiserver/scheduler/dag-processor/triggerer) + airflow-init, `services/api`(FastAPI),
-  `services/web`(nginx + React 정적 빌드).
+- EC2 인스턴스(`t4g.large`, arm64/Graviton2, `waitfor-ddaman-ec2`) 위에서 `docker compose`로
+  애플리케이션 컨테이너 실행: Airflow 4개 컨테이너(apiserver/scheduler/dag-processor/
+  triggerer) + airflow-init, `services/api`(FastAPI), `services/web`(nginx + React 정적 빌드).
+  **EC2 안에는 더 이상 Postgres 컨테이너가 없다** (2026-08-22 신규 VPC/RDS 컷오버로 분리 -
+  `docker-compose.prod.yml`에 `postgres:` 서비스 없음. 아래 "복구/인프라 이관 runbook" 참고).
+- Airflow 메타데이터(`airflow-metadata-db-v2`)와 bikeman/serving/Iceberg 카탈로그 스키마
+  (`domain-db-v2`)는 전용 VPC(`waitforddaman-vpc`, `10.20.0.0/16`) 안의 RDS 2대로 분리돼
+  EC2 생명주기와 독립적이다 - EC2를 교체해도 데이터는 그대로 남는다.
 - ingestion/staging PySpark 잡은 별도 Spark 클러스터 없이 Airflow 컨테이너 안에서
   직접 실행된다(JVM 포함 이미지, `airflow/Dockerfile.prod`). **추후 EMR 도입 예정** —
   전환되면 이 부분 아키텍처가 바뀔 수 있음.
 - 이미지는 ECR 3개 리포지토리(`waitforddaman-airflow`, `-api`, `-web`)에 저장, EC2는
   인스턴스 프로파일 IAM Role로 pull(정적 AWS 키 미사용).
-- Iceberg 카탈로그는 `hadoop`로 고정(Glue 권한 없음).
-- serving 스키마는 추후 RDS(`db.t4g.medium`)로 이전 예정(다른 담당자 영역, 이번 범위 아님).
+- Iceberg 카탈로그는 `jdbc`(RDS `domain-db-v2`의 `iceberg_catalog` 스키마, 전용 롤
+  `iceberg_catalog_rw`) - 2026-08-22 hadoop에서 전환. **왜 바꿨나**: hadoop 카탈로그는
+  테이블 포인터(`version-hint.text`)가 S3에만 있고 그 갱신을 보장하는 트랜잭션 저장소가
+  없어서, 이번처럼 EC2/인프라를 통째로 교체하는 상황에서 "어느 시점 이후 커밋을 새
+  환경이 못 보는" 문제가 그대로 노출된다(아래 runbook 3번 항목 참고). RDS 기반 JDBC
+  카탈로그로 옮기면 카탈로그 메타데이터가 컴퓨트(EC2) 생명주기와 완전히 분리돼 이 문제가
+  구조적으로 없어진다. Glue 대신 자체 RDS를 쓰는 이유는 그대로(Glue 권한 없음).
+- serving 스키마도 `domain-db-v2`로 이관 완료 (더 이상 "추후 이전 예정" 아님).
 
 ## 사전 준비 (AWS 콘솔, 1회)
 
-1. **ECR**: `ap-northeast-2`에 리포지토리 3개 생성 — `waitforddaman-airflow`, `waitforddaman-api`, `waitforddaman-web`.
-2. **IAM 역할(EC2용)**: `waitforddaman-ec2-role` — trusted entity: EC2.
+2026-08-22 신규 VPC/RDS/EC2 병행 구축·컷오버(이슈 #163) 이후 실제로 살아있는 구성 기준.
+이전 세대(단일 EC2 + 기본 VPC + `waitforddaman-prod-sg`)는 컷오버 완료 후 완전히
+삭제됐다(§8) - 아래는 그 자리를 대체한 현재 구성이다.
+
+1. **ECR**: `ap-northeast-2`에 리포지토리 3개 생성 — `waitforddaman-airflow`, `waitforddaman-api`, `waitforddaman-web`. (변경 없음)
+2. **전용 VPC** `waitforddaman-vpc` (`10.20.0.0/16`) - 이전엔 기본 VPC 퍼블릭 서브넷을
+   그대로 썼는데, RDS 격리가 검증되지 않은 상태였다. 이번에 전용 VPC로 분리했다.
+3. **RDS 2대** (전용 VPC 안, private):
+   - `airflow-metadata-db-v2` — Airflow 메타데이터 전용.
+   - `domain-db-v2` — bikeman/serving 스키마 + Iceberg JDBC 카탈로그(`iceberg_catalog`
+     스키마, 전용 롤 `iceberg_catalog_rw`) 공용.
+   - 마스터 계정 비밀번호 및 `bikeman_writer`/`airflow_reader`/`serving_writer`/
+     `iceberg_catalog_rw` 각 롤 비밀번호는 전부 서로 다른 값으로 분리 관리한다(과거
+     전부 동일 값을 쓰다가 이슈 #193에서 로테이션 완료 - 아래 "알려진 제약/후속 작업" 참고).
+4. **IAM 역할(EC2용)**: `waitforddaman-ec2-role` — trusted entity: EC2.
    - 커스텀 정책(`waitforddaman-s3-access`): `RAW_BUCKET`/`WAREHOUSE_BUCKET`에 대해
      `s3:GetObject/PutObject/DeleteObject/ListBucket`.
    - AWS 관리형 `AmazonEC2ContainerRegistryReadOnly` (ECR pull).
-   - Glue 권한은 부여하지 않음(hadoop 카탈로그라 불필요).
-3. **보안그룹** `waitforddaman-prod-sg`: 인바운드 22(SSH, 관리자 IP만) / 80(웹, 전체 공개) /
-   8080(Airflow UI, 관리자 IP만). 5432/8000은 인바운드 규칙 없음(내부망 전용).
-4. **키페어**: `waitforddaman-prod-key` (RSA, .pem).
-5. **EC2 인스턴스**: Amazon Linux 2023, **반드시 arm64 AMI**(t4g.large가 Graviton),
-   `t4g.large`, gp3 50GB, 위 보안그룹 + IAM 인스턴스 프로파일 연결.
+   - Glue 권한은 부여하지 않음(JDBC 카탈로그라 불필요 - RDS 접근은 보안그룹으로 제어).
+5. **보안그룹**: `waitforddaman-prod-sg-v2`(EC2용, 인바운드 22/8080은 팀 IP 관리형 prefix
+   list만 허용, 80/443은 전체 공개, 5432/8000은 인바운드 규칙 없음 - 내부망 전용) +
+   `waitforddaman-rds-sg`(RDS용, EC2 보안그룹발 5432만 허용) + `iceberg-catalog-sg`.
+   **주의**: EC2를 다시 교체하면 SG 이름/ID도 바뀐다 - "복구 runbook" 4번(CD IAM 정책의
+   보안그룹 ARN 하드코딩) 반드시 같이 갱신할 것.
+6. **키페어**: `waitforddaman-prod-key` (RSA, .pem).
+7. **EC2 인스턴스**: Amazon Linux 2023, **반드시 arm64 AMI**(t4g.large가 Graviton),
+   `t4g.large`, gp3 50GB, 위 보안그룹 + IAM 인스턴스 프로파일 연결, 신규 VPC 서브넷에 배치.
 
 ## EC2 최초 부트스트랩
 
@@ -127,10 +153,14 @@ aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-postgres healthy 확인 후 1회 시드 스크립트 실행:
+1회 시드 스크립트 실행 (RDS 컷오버 이후로는 `postgres` 컨테이너가 없으므로 `domain-db-v2`에
+직접 접속한다 - `airflow_reader`/`bikeman_writer` 롤 비밀번호는 파일에 평문으로 넣지 않고
+`-v`로 주입한다, 이슈 #193):
 ```bash
-docker compose -f docker-compose.prod.yml exec -T postgres \
-  psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" < sql/bike_man/bikeman_seed_init.sql
+docker exec -e PGPASSWORD="$DOMAIN_MASTER_PW" airflow-scheduler \
+  psql -h domain-db-v2.<endpoint> -U hamzzi -d waitforddaman \
+  -v airflow_reader_pw="$AIRFLOW_READER_PW" -v bikeman_writer_pw="$BIKEMAN_WRITER_PW" \
+  < sql/bike_man/bikeman_seed_init.sql
 ```
 
 ## CI/CD (GitHub Actions)
@@ -188,9 +218,83 @@ GitHub Actions에 정적 AWS 키를 저장하지 않는 이유: 계정 SCP가 MF
 이미지만 갱신할 때). 사전에 `aws login --profile console`로 브라우저 인증이 필요하다 —
 `aws configure`의 정적 키는 위 SCP 때문에 ECR이 거부된다.
 
+## 복구 / 인프라 이관 runbook (2026-08-22 신규 VPC/RDS/EC2 컷오버 실전 기록)
+
+병행 구축 → 컷오버 과정에서 실제로 겪은 문제와 해결 순서. RDS 스냅샷 복원이나
+EC2 교체가 다시 필요할 때 이 순서를 그대로 따른다.
+
+### 1. RDS 스냅샷 복원 직후 - DAG pause 상태를 신뢰하지 말 것 [중요]
+
+**문제**: 스냅샷 생성 시각이 "구 환경 DAG 전체 pause" 시각보다 먼저였던 경우,
+복원된 메타DB는 pause 이전 상태를 그대로 담고 있다. 새 스택을 `docker compose up -d`로
+올리는 순간 스케줄러가 즉시 살아나고, `is_paused=false`인 DAG들이 스케줄/Asset
+트리거 조건을 만나면 곧바로 실행될 수 있다. 실측: 새 환경에서 `airflow dags list`로
+확인해보니 17개 DAG 전부 `is_paused=false` 상태로 복원됨.
+
+**대응 순서**:
+1. `airflow-init`만 먼저 올려 DB 마이그레이션을 완료한다 (스케줄러는 아직 올리지 않음)
+2. 스케줄러를 포함한 나머지 컨테이너를 올리기 **전에** 위험을 인지하고 있다가,
+   올리자마자 즉시 전체 pause한다:
+   ```bash
+   docker exec airflow-scheduler airflow dags pause --treat-dag-id-as-regex ".*" --yes
+   ```
+3. 이후 `SELECT count(*) FILTER (WHERE is_paused=false) FROM dag;`를 메타DB에 직접
+   쿼리해 0인지 확인한다 (CLI 출력이 실제 반영 전 상태를 보여줄 때가 있어 CLI 응답만
+   믿지 말 것)
+4. `dag_run` 테이블에 스택 기동 이후 시각의 row가 있는지 확인해 실제 피해가 없었는지
+   검증한다:
+   ```sql
+   SELECT count(*) FROM dag_run WHERE start_date > '<스택 기동 시각>';
+   ```
+
+### 2. Airflow Connection은 스냅샷에 있어도 검증 없이 믿지 말 것
+
+`bikeman_postgres`처럼 UI로만 생성되고 프로비저닝 코드가 없는 Connection은, 메타DB
+복원이 이론상 이를 보존해야 함에도 실측에서는 존재하지 않았다(원인 불명 - 스냅샷
+시점에 애초에 없었을 가능성). 복원 후 반드시 직접 확인:
+```bash
+docker exec airflow-scheduler airflow connections get bikeman_postgres
+```
+없으면 이 Connection을 실제로 쓰는 역할(`bikeman_writer` - bikeman 쓰기 + serving
+읽기)로 재생성한다:
+```bash
+docker exec airflow-scheduler airflow connections add "bikeman_postgres" \
+  --conn-type "postgres" --conn-host "<domain-db 엔드포인트>" \
+  --conn-schema "<db명>" --conn-login "bikeman_writer" \
+  --conn-password "<bikeman_writer 비밀번호>" --conn-port 5432
+```
+
+### 3. Iceberg JDBC 카탈로그로 기존 테이블 이관
+
+`ingestion/jobs/register_tables_in_jdbc_catalog.py`로 hadoop 카탈로그의 기존
+테이블을 JDBC 카탈로그에 전부 등록한다(멱등 - 재실행 시 이미 등록된 건 스킵).
+등록 전 S3에서 `version-hint.text`를 리스팅해 실제 테이블 목록을 직접 확정할 것 -
+`airflow/scripts/check_silver_catalog.py`의 하드코딩된 테이블 상수는 최신이 아닐 수
+있다(실측: silver/gold 각 5종으로 적혀 있었으나 실제로는 24개 테이블 존재).
+등록 후 hadoop(구)/jdbc(신) 카탈로그의 행수를 대조해 검증한다.
+
+**주의**: 구 환경 DAG가 계속 hadoop 카탈로그로 커밋 중이면 새 카탈로그가 그 갱신을
+못 본다(포인터 메커니즘이 다름) - 반드시 구 DAG 전체 pause 후 등록할 것.
+
+### 4. CD가 사용하는 IAM 정책의 보안그룹 ARN은 새 SG로 교체해야 함 [중요]
+
+`waitforddaman-gha-role`의 인라인 정책 `sg-ssh-manage`가 `ec2:AuthorizeSecurityGroupIngress`
+/ `RevokeSecurityGroupIngress`의 `Resource`를 특정 보안그룹 ARN으로 하드코딩하고
+있다. EC2를 새 인스턴스(새 SG)로 교체하면 GitHub Secrets(`SSH_SECURITY_GROUP_ID`)만
+바꿔서는 부족하고, 이 IAM 정책의 `Resource`도 새 SG ARN으로 같이 바꿔야 CD의
+"러너 IP 임시 허용" 스텝이 통과한다. 안 바꾸면 `UnauthorizedOperation`으로 배포
+job이 SSH를 열기 전 단계에서 실패한다(타겟 서버는 건드려지지 않아 안전하게 실패).
+
 ## 알려진 제약 / 후속 작업
 
 - 이 계정은 조직 SCP로 일부 AWS 서비스(ECR 등)가 막혀 있을 수 있음 — 계정 관리자 확인 필요.
 - EC2 `t4g.large`(8GB) 제약으로 `bronze_ingest`/`silver_process` pool 동시성을 1로 낮춤 —
   반기 CSV(~700MB)급 파일 처리 시 실측 후 필요하면 driver 메모리도 추가 조정.
-- EMR, serving RDS 이전은 별도 트랙(타 담당자) — 이 문서 범위 밖.
+- EMR 도입은 별도 트랙(타 담당자) — 이 문서 범위 밖. (serving RDS 이전은 이번 컷오버로 완료됨)
+- ~~§8 구 환경(EC2/RDS 2대/보안그룹) 삭제~~ — 완료 (이슈 #193). 구 RDS는 최종 스냅샷
+  (`domain-db-snapshot`, `airflow-metadata-db-snapshot`) 남기고 삭제.
+- ~~§12 비밀번호 로테이션~~ — 완료 (이슈 #193). RDS 마스터(`hamzzi`)와
+  `bikeman_writer`/`airflow_reader`/`serving_writer`/`iceberg_catalog_rw` 롤이 전부
+  같은 값을 공유하던 문제를 해결하고 서로 다른 값으로 분리했다. 사람이 직접 로그인하는
+  Airflow 웹 UI 계정(`_AIRFLOW_WWW_USER_PASSWORD`)만 팀 합의로 기존 값을 유지.
+- CD host-key 검증, 배포 후 헬스게이트/자동 롤백 추가는 급하지 않은 개선 항목으로 보류.
