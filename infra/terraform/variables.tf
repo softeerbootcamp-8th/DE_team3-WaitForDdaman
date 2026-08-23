@@ -121,7 +121,7 @@ variable "iceberg_catalog_master_password" {
 }
 
 variable "emr_spark_image_tag" {
-  description = "emr-spark-prod ECR 리포의 이미지 태그"
+  description = "waitforddaman-emr-spark-prod ECR 리포의 이미지 태그"
   type        = string
   default     = "latest"
 }

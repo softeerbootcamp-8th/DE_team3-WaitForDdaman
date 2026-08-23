@@ -69,7 +69,7 @@ output "emr_spark_execution_role_arn" {
 }
 
 output "emr_spark_ecr_repository_url" {
-  description = "URL of the emr-spark-prod ECR repository - docker push target"
+  description = "URL of the waitforddaman-emr-spark-prod ECR repository - docker push target"
   value       = aws_ecr_repository.emr_spark.repository_url
 }
 
