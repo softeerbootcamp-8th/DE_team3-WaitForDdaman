@@ -1,5 +1,6 @@
-# 프로덕션 구성. 이 브랜치(production)에는 로컬/dev용 compose·Dockerfile이 없다 -
-# 로컬 개발은 develop / develop-services 브랜치에서 한다.
+# 프로덕션 구성. production 배포와 CD는 이 파일만 사용한다.
+# release 동기화로 로컬/dev용 compose·Dockerfile이 브랜치에 같이 존재할 수 있지만,
+# 운영 EC2에서는 docker-compose.prod.yml만 실행한다.
 #
 # postgres 컨테이너가 없다: Airflow 메타데이터는 airflow-metadata-db RDS,
 # 도메인/서빙 데이터는 domain-db RDS를 쓴다.
@@ -28,6 +29,7 @@ x-airflow-common:
     # (ingestion/README.md에 문서화된 설계). 여기서 빈 문자열 기본값조차 주면 STS
     # 자격증명 체인을 오히려 방해할 수 있어 아예 생략한다.
     APP_ENV: aws
+    SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
     ICEBERG_CATALOG_TYPE: ${ICEBERG_CATALOG_TYPE:-jdbc}  # RDS(domain-db) 기반 JDBC 카탈로그로 전환 (2026-08-22)
     ICEBERG_CATALOG_NAME: ${ICEBERG_CATALOG_NAME:-bike_catalog}
     ICEBERG_WAREHOUSE_PATH: ${ICEBERG_WAREHOUSE_PATH}
@@ -36,8 +38,14 @@ x-airflow-common:
     ICEBERG_JDBC_CATALOG_URI: ${ICEBERG_JDBC_CATALOG_URI}
     ICEBERG_JDBC_CATALOG_USER: ${ICEBERG_JDBC_CATALOG_USER}
     ICEBERG_JDBC_CATALOG_PASSWORD: ${ICEBERG_JDBC_CATALOG_PASSWORD}
+    ICEBERG_CATALOG_SECRET_ARN: ${ICEBERG_CATALOG_SECRET_ARN:-}
     RAW_BUCKET: ${RAW_BUCKET}
     WAREHOUSE_BUCKET: ${WAREHOUSE_BUCKET}
+    EMR_SPARK_APPLICATION_ID: ${EMR_SPARK_APPLICATION_ID:-}
+    EMR_SPARK_EXECUTION_ROLE_ARN: ${EMR_SPARK_EXECUTION_ROLE_ARN:-}
+    EMR_SPARK_POLL_INTERVAL_SECONDS: ${EMR_SPARK_POLL_INTERVAL_SECONDS:-30}
+    EMR_SPARK_POLL_MAX_SECONDS: ${EMR_SPARK_POLL_MAX_SECONDS:-21600}
+    EMR_RISK_MODEL_CONFIG: ${EMR_RISK_MODEL_CONFIG:-/opt/app/config/risk_model.yaml}
     # t4g.large(8GB)에서 6g 힙 JVM을 동시에 여러 개 띄우면 OOM 위험이 크므로
     # 로컬 튜닝(local[2] 등)은 유지하되 driver 메모리는 낮춰서 사용한다.
     # 실측 후 조정 필요 - ingestion/common/spark_session.py 참고.

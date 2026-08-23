@@ -22,7 +22,7 @@ silver.bikeman_action ─────────> gold.bike_last_action ──�
 
 ## jobs
 
-- `build_dim_bike.py`: `silver.rental_history` -> `gold.dim_bike` (자전거별 최초 등장일, append-only INSERT + PyDeequ 검증)
+- `build_dim_bike.py`: `silver.rental_history` -> `gold.dim_bike` (자전거별 최초 등장일, append-only INSERT + SQL 어서션 검증)
   - 컬럼: `snapshot_date`(파티션, 최초 등장일), `bike_id`(PK), `first_seen_at`, `start_year`
   - 한 자전거는 최초 등장한 날짜 파티션에 딱 한 번만 존재 (MERGE/UPDATE 없음 - first_seen_at은 불변, UPSERT 시 기존값 절대 덮어쓰지 않음)
   - 상한선: Silver 워터마크(`config/watermark_keys.py`의 `SILVER_RENTAL_HISTORY`), 하한선: Gold 전용 워터마크(`GOLD_DIM_BIKE`)
@@ -33,19 +33,19 @@ silver.bikeman_action ─────────> gold.bike_last_action ──�
   - 델타 시작일은 `gold.bike_location` 자신의 `MAX(snapshot_date)`를 워터마크로 재사용해서 정한다(별도 워터마크 파일 없음) - 평소엔 구간이 하루뿐이지만, DAG 실행이 하루 이상 밀린 뒤에도 그 사이 파티션을 전부 다시 스캔해 자동 복구된다(2026-08-17, 리뷰로 발견: "어제 하루"로 고정하면 실행이 밀렸을 때 그 사이 파티션이 영영 재스캔 안 되는 조용한 데이터 유실이 있었음)
   - `last_station_id`가 null이면 데이터 결측이 아니라 대여소가 아닌 곳에 반납된 경우(노상 방치 등) - `fact_station_inventory` 재고 집계에서 자연스럽게 제외됨
   - 파티션 없이 매 실행마다 전체 덮어쓰기 (이력을 쌓지 않는 "현재 상태" 테이블)
-  - 적재 전 PyDeequ 검증(`bike_id` 유일성/완전성) - 실패 시 적재 없이 배치 중단
+  - 적재 전 SQL 어서션 검증(`bike_id` 유일성/완전성) - 실패 시 적재 없이 배치 중단
 - `build_station_active.py`: `silver.station_master` + `silver.station_active` -> `gold.station_active` (TEMP, 운영 중인 대여소만)
   - 컬럼: `station_id`, `station_name`, `region`, `district`, `hold_num`, `latitude`, `longitude`, `snapshot_date`
   - station_master(전체 등록 대여소) 중 station_active(실시간 상태가 보고되는 대여소)에도 존재하는 것만 INNER JOIN으로 필터링
   - `silver.station_active`는 `station_id` 필터 테이블(컬럼 `snapshot_date`, `station_id` 2개뿐, `staging/jobs/silver_station_active.py`)이라 이 잡은 station_id만 뽑아 쓰고 나머지 속성은 전부 station_master에서 가져온다 - 대여소 수가 적어(수백~수천 건) `F.broadcast()`로 셔플 없이 조인한다
-  - 적재 전 PyDeequ 검증(`station_id` 유일성/완전성) - 실패 시 적재 없이 배치 중단
+  - 적재 전 SQL 어서션 검증(`station_id` 유일성/완전성) - 실패 시 적재 없이 배치 중단
 - `build_fact_station_inventory.py`: `gold.bike_location` + `gold.station_active` + `silver.bikeman_action` -> `gold.fact_station_inventory`
   - 컬럼: `station_id`, `bike_cnt`, `hold_num`, `target_bike_cnt`, `snapshot_date`
   - 자전거의 최종 위치는 대여이력 기준 위치(`bike_location`)와 수거(COLLECT)/배치(DEPLOY) 이벤트 중 더 최신인 쪽을 따른다 - COLLECT가 최신이면 재고 집계에서 제외, DEPLOY가 최신이면 그 station_id로 위치를 덮어씀 (자세한 규칙은 파일 docstring 참고)
   - `target_bike_cnt`는 거치대 수(`hold_num`)를 목표치로 사용
   - `gold.station_active`(운영 중인 대여소만) 기준으로 집계하므로, 자전거가 0대인 대여소도 0으로 나온다 - `station_active`(left/outer 쪽)를 기준으로 `bike_cnt` 집계 결과(대여소당 최대 1행이라 더 작음)를 `F.broadcast()`로 왼쪽에 조인한다(left outer join은 build 대상이 오른쪽이어야 해서 작은 쪽을 오른쪽에 둠)
   - `bike_cnt` 집계 자체는 매번 전체 재계산(자전거 하나만 바뀌어도 대여소 합계가 통째로 바뀌므로 carry-forward 불가). 대신 그 재료인 자전거별 최신 수거/배치 이벤트는 `gold.bike_last_action`(신규, 증분 유지 상태 테이블)에서 가져온다 - `silver.bikeman_action`(계속 커지는 이벤트 로그)을 매번 전체 스캔하지 않고, 아직 반영 안 된 구간만 스캔해서 병합(델타 구간 산정 방식은 `build_bike_location.py`와 동일한 self-tracking watermark 방식)
-  - 적재 전 PyDeequ 검증 - `gold.bike_last_action`은 `bike_id` 유일성/완전성, `gold.fact_station_inventory`는 `station_id` 유일성/완전성 + `bike_cnt` 음수 아님 - 실패 시 적재 없이 배치 중단
+  - 적재 전 SQL 어서션 검증 - `gold.bike_last_action`은 `bike_id` 유일성/완전성, `gold.fact_station_inventory`는 `station_id` 유일성/완전성 + `bike_cnt` 음수 아님 - 실패 시 적재 없이 배치 중단
 
 ## Airflow
 

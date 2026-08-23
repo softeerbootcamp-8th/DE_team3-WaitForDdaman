@@ -28,18 +28,49 @@ TriggerDagRunOperator로 트리거한다. bike_risk_daily 마트가 필요로 �
 fact_bike_risk/fact_bike_decision은 이 DAG의 산출물이라, gold_dim_fact가 아니라
 여기서 트리거해야 두 마트(station_daily 포함) 모두 만들 재료가 갖춰진다.
 """
+import os
+import sys
 from datetime import timedelta
 
 import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
-from airflow.providers.standard.sensors.bash import BashSensor
+from airflow.providers.standard.sensors.python import PythonSensor
 from airflow.sdk import dag
+
+from dag_common import notify_slack_on_failure
 
 RISK_MODEL_DIR = "/opt/airflow/pipeline/risk_model"
 INGESTION_DIR = "/opt/airflow/ingestion"
 AIRFLOW_HOME_DIR = "/opt/airflow"
 PYTHON = "python"
+
+
+def _load_ingestion_env(env_path: str) -> None:
+    """gold_dim_fact_dag.py의 _load_ingestion_env와 동일한 이유·동일한 구현 -
+    PythonSensor가 서브프로세스 없이 이 프로세스 안에서 바로 is_ready()를 호출하므로,
+    ingestion/.env(APP_ENV=local + LocalStack 엔드포인트)를 여기서 직접 덮어써야
+    컨테이너 자체 환경변수(배포 시 APP_ENV=aws)로 새는 걸 막는다."""
+    if not os.path.exists(env_path):
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ[key.strip()] = value.strip()
+
+
+_load_ingestion_env(f"{INGESTION_DIR}/.env")
+
+# PythonSensor가 판정 함수를 직접 호출할 수 있도록 ingestion을 네임스페이스 패키지
+# 루트로 sys.path에 얹는다 (gold_dim_fact_dag.py와 동일한 패턴). config가 위에서
+# 로드한 ingestion/.env 값으로 평가되도록 반드시 _load_ingestion_env 다음에 import한다.
+if INGESTION_DIR not in sys.path:
+    sys.path.insert(0, INGESTION_DIR)
+
+from jobs.check_silver_watermark import is_ready as watermark_ready  # noqa: E402
 
 DAG_ID = "gold_risk_decision"
 
@@ -53,6 +84,7 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=30),
+    "on_failure_callback": notify_slack_on_failure,
 }
 
 
@@ -65,15 +97,6 @@ def _bash(job_module: str, extra_env: str = "") -> str:
     )
 
 
-def _ingestion_bash(job_module: str, extra_env: str = "") -> str:
-    # check_silver_watermark.py는 ingestion/jobs 소속 - gold_dim_fact_dag.py의
-    # wait_for_silver_rental_history와 동일한 커맨드 형태를 그대로 쓴다.
-    return (
-        f"cd {INGESTION_DIR} && set -a && source .env && set +a && "
-        f"PYTHONDONTWRITEBYTECODE=1 {extra_env}{PYTHON} -m jobs.{job_module}"
-    )
-
-
 @dag(
     dag_id=DAG_ID,
     schedule=None,  # gold_dim_fact.trigger_risk_decision(TriggerDagRunOperator)로만 실행
@@ -83,19 +106,22 @@ def _ingestion_bash(job_module: str, extra_env: str = "") -> str:
     default_args=default_args,
     tags=["gold", "trigger_only"],
     params={
-        "snapshot_date": "",  # 미지정 시 각 job이 오늘 날짜로 기본 처리
+        "snapshot_date": "",  # 수동 재처리용. 미지정 시 dag_run.conf.snapshot_date 또는 ds 사용
     },
     doc_md=__doc__,
 )
 def gold_risk_decision():
+    snapshot_date_expr = '{{ dag_run.conf.get("snapshot_date") or params.snapshot_date or ds }}'
+
     # 1. wait_for_silver_failure_report - rental_history는 gold_dim_fact가 이미
     # 대기해줬지만 failure_report는 그 DAG 스코프 밖이라 여기서 직접 확인한다.
-    wait_for_silver_failure_report = BashSensor(
+    # gold_dim_fact_dag.py의 wait_for_silver_rental_history와 동일하게 BashSensor(#145
+    # 이전 버전에서 poke마다 서브프로세스를 띄우던 방식) 대신 PythonSensor로 watermark_ready를
+    # 직접 호출한다 - 판정 로직(워터마크 비교) 자체는 그대로다.
+    wait_for_silver_failure_report = PythonSensor(
         task_id="wait_for_silver_failure_report",
-        bash_command=_ingestion_bash(
-            "check_silver_watermark",
-            "DATASET=failure_report REQUIRED_OFFSET_DAYS=1 TARGET_DATE='{{ params.snapshot_date or ds }}' ",
-        ),
+        python_callable=watermark_ready,
+        op_kwargs={"dataset": "failure_report", "target_date": snapshot_date_expr, "required_offset_days": 1},
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,
@@ -106,23 +132,23 @@ def gold_risk_decision():
     # failure_report 대기 뒤에만 실행하면 된다.
     build_bike_features_daily = BashOperator(
         task_id="build_bike_features_daily",
-        bash_command=_bash("build_bike_features_daily", "SNAPSHOT_DATE='{{ params.snapshot_date }}' "),
+        bash_command=_bash("build_bike_features_daily", f"SNAPSHOT_DATE='{snapshot_date_expr}' "),
         execution_timeout=timedelta(minutes=30),
     )
 
     # 3. run_risk_scoring_model + build_fact_bike_risk
-    # 원안엔 별도 태스크였지만, 모델 로드/추론 -> UPSERT가 하나의 Spark 세션 안에서
-    # 자연스럽게 이어지는 처리라(build_fact_bike_risk.py) 태스크도 하나로 합쳤다.
+    # 원안엔 별도 태스크였지만, 모델 로드/추론 -> 적재가 한 job 안에서 자연스럽게
+    # 이어지는 처리라(build_fact_bike_risk.py) 태스크도 하나로 합쳤다.
     run_risk_scoring_model = BashOperator(
         task_id="run_risk_scoring_model",
-        bash_command=_bash("build_fact_bike_risk", "SNAPSHOT_DATE='{{ params.snapshot_date }}' "),
+        bash_command=_bash("build_fact_bike_risk", f"SNAPSHOT_DATE='{snapshot_date_expr}' "),
         execution_timeout=timedelta(minutes=30),
     )
 
     # 4. build_fact_bike_decision
     build_fact_bike_decision = BashOperator(
         task_id="build_fact_bike_decision",
-        bash_command=_bash("build_fact_bike_decision", "SNAPSHOT_DATE='{{ params.snapshot_date }}' "),
+        bash_command=_bash("build_fact_bike_decision", f"SNAPSHOT_DATE='{snapshot_date_expr}' "),
         execution_timeout=timedelta(minutes=30),
     )
 
@@ -137,7 +163,7 @@ def gold_risk_decision():
         task_id="trigger_serving_sync",
         trigger_dag_id="gold_to_serving_sync",
         logical_date="{{ logical_date }}",
-        conf={"snapshot_date": "{{ params.snapshot_date or ds }}"},
+        conf={"snapshot_date": snapshot_date_expr},
         wait_for_completion=False,
         reset_dag_run=True,
     )

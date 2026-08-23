@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# 프로덕션 이미지 3개를 빌드해서 ECR에 push한다.
+# 프로덕션 이미지와 EMR Spark 이미지를 빌드해서 ECR에 push한다.
 #
 # GitHub Actions에서 ECR로 직접 push하려면 OIDC IAM 역할이 필요한데 계정 권한이
 # 없어서(SCP가 MFA 없는 요청을 차단) 이 단계만 로컬에서 수동으로 돌린다.
@@ -44,15 +44,16 @@ if ! aws ecr get-login-password --profile "$AWS_PROFILE_NAME" --region "$AWS_REG
   exit 1
 fi
 
-# name:dockerfile:context
+# name:dockerfile:context:platform
 IMAGES=(
-  "waitforddaman-airflow:airflow/Dockerfile.prod:."
-  "waitforddaman-api:services/api/Dockerfile.prod:."
-  "waitforddaman-web:services/web/Dockerfile.prod:services/web"
+  "waitforddaman-airflow:airflow/Dockerfile.prod:.:linux/arm64"
+  "waitforddaman-api:services/api/Dockerfile.prod:.:linux/arm64"
+  "waitforddaman-web:services/web/Dockerfile.prod:services/web:linux/arm64"
+  "emr-spark-prod:spark/Dockerfile.prod:.:linux/amd64"
 )
 
 for spec in "${IMAGES[@]}"; do
-  IFS=':' read -r name dockerfile context <<< "$spec"
+  IFS=':' read -r name dockerfile context platform <<< "$spec"
 
   tag_args=(-t "${REGISTRY}/${name}:latest")
   if [[ -n "$EXTRA_TAG" ]]; then
@@ -60,10 +61,10 @@ for spec in "${IMAGES[@]}"; do
   fi
 
   echo ""
-  echo "==> 빌드: $name ($dockerfile)"
-  # EC2가 t4g.large(arm64)라 arm64 이미지가 필요하다. 맥(Apple Silicon)에서는
-  # 네이티브라 --platform 없이도 되지만, x86 머신에서 돌릴 때도 맞게 나오도록 명시한다.
-  docker build --platform linux/arm64 -f "$dockerfile" "${tag_args[@]}" "$context"
+  echo "==> 빌드: $name ($dockerfile, $platform)"
+  # EC2 서비스 이미지는 t4g.large(arm64)에 맞춰 linux/arm64로, EMR Serverless
+  # 커스텀 Spark 이미지는 EMR 런타임 기준 linux/amd64로 빌드한다.
+  docker build --platform "$platform" -f "$dockerfile" "${tag_args[@]}" "$context"
 
   echo "==> push: $name"
   docker push "${REGISTRY}/${name}:latest"
@@ -73,7 +74,7 @@ for spec in "${IMAGES[@]}"; do
 done
 
 echo ""
-echo "완료. 이미지 3개가 ECR에 올라갔다."
+echo "완료. 프로덕션 이미지와 EMR Spark 이미지가 ECR에 올라갔다."
 echo "배포는 production 브랜치에 push하면 cd.yml이 자동으로 처리한다."
 echo "지금 바로 수동 배포하려면:"
 echo "  ssh -i ~/.ssh/waitforddaman-prod-key.pem ec2-user@<EC2_HOST> \\"

@@ -22,9 +22,17 @@ Airflow 3의 Task SDK가 태스크 실행 컨텍스트에서 메타데이터 DB 
 도달하지 못한다 - REQUIRED_OFFSET_DAYS로 필요한 만큼 과거로 보정한다.
 
 이 스크립트는 성공/실패가 아니라 "아직 준비 안 됨"을 나타내야 하므로, 준비 안 됐을
-때도 예외 없이 exit code 1로 조용히 끝낸다 (BashSensor가 poke_interval마다 재시도).
+때도 예외 없이 False/exit code 1로 조용히 끝낸다 (PythonSensor가 poke_interval마다
+재시도).
 
-사용법 (BashSensor에서):
+### PythonSensor로 전환 (2026-08-22, #145)
+판정 로직(워터마크 비교)은 그대로 두고, BashSensor의 exit-code 우회 대신
+is_ready()를 PythonSensor python_callable로 직접 호출하도록 정리한다.
+
+사용법 (PythonSensor에서):
+    is_ready("rental_history", "2026-08-17", required_offset_days=1)
+
+CLI로도 그대로 쓸 수 있다:
     TARGET_DATE=2026-08-17 DATASET=rental_history REQUIRED_OFFSET_DAYS=1 \
         python -m jobs.check_silver_watermark
 """
@@ -47,25 +55,29 @@ DATASET_WATERMARK_KEYS = {
 }
 
 
-def run() -> None:
-    dataset = os.environ["DATASET"]
+def is_ready(dataset: str, target_date: str, required_offset_days: int = 0) -> bool:
     if dataset not in DATASET_WATERMARK_KEYS:
         logger.error("알 수 없는 DATASET: %s (가능한 값: %s)", dataset, list(DATASET_WATERMARK_KEYS))
-        sys.exit(1)
+        return False
 
-    target_date = datetime.strptime(os.environ["TARGET_DATE"], "%Y-%m-%d").date()
-    offset_days = int(os.getenv("REQUIRED_OFFSET_DAYS", "0"))
-    required_date = target_date - timedelta(days=offset_days)
+    target = datetime.strptime(target_date, "%Y-%m-%d").date()
+    required_date = target - timedelta(days=required_offset_days)
 
     watermark_key = DATASET_WATERMARK_KEYS[dataset]
     watermark = read_watermark(watermark_key=watermark_key)
 
     if watermark >= required_date:
         logger.info("%s 준비 완료 (워터마크=%s >= 필요일=%s)", dataset, watermark, required_date)
-        sys.exit(0)
+        return True
 
     logger.info("%s 아직 준비 안 됨 (워터마크=%s < 필요일=%s)", dataset, watermark, required_date)
-    sys.exit(1)
+    return False
+
+
+def run() -> None:
+    offset_days = int(os.getenv("REQUIRED_OFFSET_DAYS", "0"))
+    ready = is_ready(os.environ["DATASET"], os.environ["TARGET_DATE"], offset_days)
+    sys.exit(0 if ready else 1)
 
 
 if __name__ == "__main__":

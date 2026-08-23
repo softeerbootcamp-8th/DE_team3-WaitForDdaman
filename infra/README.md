@@ -1,300 +1,105 @@
 # infra
 
-프로덕션(EC2 + ECR + docker compose + GitHub Actions) 배포 설정과 절차.
+AWS 인프라 및 Lambda / Terraform 배포 설정입니다.
 
-## 이 브랜치에는 로컬 개발용 파일이 없다
+## 구성 요소
 
-`production` 브랜치는 배포 전용이라 dev/local 파일을 의도적으로 제거했다
-(`docker-compose.yml`, `docker-compose.local.yml`, `airflow/Dockerfile`,
-`airflow/Dockerfile.local`, `services/*/Dockerfile`, `config/risk_model.local.yaml`).
-남은 건 `.prod` 계열뿐이다:
+1. **Lambda 함수 (2개)**
+   - `fetch_station_master_raw`: 매일 서울시 `tbCycleStationInfo`를 호출하여 S3 raw 영역에 저장 (`s3://<RAW_BUCKET>/raw/station_master/api/snapshot_date=YYYY-MM-DD/payload.json`)
+   - `fetch_station_active_raw`: 매일 서울시 `bikeList`를 호출하여 S3 raw 영역에 저장 (`s3://<RAW_BUCKET>/raw/station_active/api/snapshot_date=YYYY-MM-DD/payload.json`)
+   - 런타임: Python 3.12, 메모리 256MB, 타임아웃 180s (VPC/NAT 불필요)
 
-```
-docker-compose.prod.yml
-airflow/Dockerfile.prod
-services/api/Dockerfile.prod
-services/web/Dockerfile.prod
-```
+2. **스케줄러 (EventBridge)**
+   - Rule: `daily-raw-fetch-at-0010-kst` (`cron(10 15 * * ? *)` = 한국시간 매일 00:10 KST)
+   - Airflow 일 배치 실행(01:00)보다 앞서 원천 raw 데이터를 확보
 
-**로컬 개발은 `develop` / `develop-services` 브랜치에서 한다.** 각 모듈 README에
-남아 있는 로컬 실행 설명(LocalStack, `docker compose -f docker-compose.local.yml` 등)은
-그 브랜치 기준이다. 또 `production`은 단방향(develop → production)으로만 운용한다 —
-이 브랜치를 develop으로 되머지하면 위 삭제가 전파되어 팀원들 로컬 환경이 깨진다.
+3. **장애 대응 및 알림**
+   - **DLQ**: Lambda 실행 실패 시 `raw-fetch-lambda-dlq` SQS에 실패 이벤트 보존 (14일 보존)
+   - **CloudWatch Alarm**: Lambda 실행 오류(Errors >= 1) 및 DLQ 메시지 발생 시 SNS 토픽(`raw-fetch-lambda-alerts`)으로 알림
+   - **Slack 알림** (`notify_slack` Lambda, Issue #180): 위 SNS 토픽을 구독해 알람을 Slack 인커밍 웹훅으로 전달. `slack_webhook_url` 변수가 빈 문자열이면(로컬/dev 기본값) 관련 리소스가 전부 생성되지 않는다 - 운영 환경에서만 값을 채워서 활성화한다.
 
-## 아키텍처 요약
+## 배포 방법 (Terraform)
 
-- EC2 인스턴스(`t4g.large`, arm64/Graviton2, `waitfor-ddaman-ec2`) 위에서 `docker compose`로
-  애플리케이션 컨테이너 실행: Airflow 4개 컨테이너(apiserver/scheduler/dag-processor/
-  triggerer) + airflow-init, `services/api`(FastAPI), `services/web`(nginx + React 정적 빌드).
-  **EC2 안에는 더 이상 Postgres 컨테이너가 없다** (2026-08-22 신규 VPC/RDS 컷오버로 분리 -
-  `docker-compose.prod.yml`에 `postgres:` 서비스 없음. 아래 "복구/인프라 이관 runbook" 참고).
-- Airflow 메타데이터(`airflow-metadata-db-v2`)와 bikeman/serving/Iceberg 카탈로그 스키마
-  (`domain-db-v2`)는 전용 VPC(`waitforddaman-vpc`, `10.20.0.0/16`) 안의 RDS 2대로 분리돼
-  EC2 생명주기와 독립적이다 - EC2를 교체해도 데이터는 그대로 남는다.
-- ingestion/staging PySpark 잡은 별도 Spark 클러스터 없이 Airflow 컨테이너 안에서
-  직접 실행된다(JVM 포함 이미지, `airflow/Dockerfile.prod`). **추후 EMR 도입 예정** —
-  전환되면 이 부분 아키텍처가 바뀔 수 있음.
-- 이미지는 ECR 3개 리포지토리(`waitforddaman-airflow`, `-api`, `-web`)에 저장, EC2는
-  인스턴스 프로파일 IAM Role로 pull(정적 AWS 키 미사용).
-- Iceberg 카탈로그는 `jdbc`(RDS `domain-db-v2`의 `iceberg_catalog` 스키마, 전용 롤
-  `iceberg_catalog_rw`) - 2026-08-22 hadoop에서 전환. **왜 바꿨나**: hadoop 카탈로그는
-  테이블 포인터(`version-hint.text`)가 S3에만 있고 그 갱신을 보장하는 트랜잭션 저장소가
-  없어서, 이번처럼 EC2/인프라를 통째로 교체하는 상황에서 "어느 시점 이후 커밋을 새
-  환경이 못 보는" 문제가 그대로 노출된다(아래 runbook 3번 항목 참고). RDS 기반 JDBC
-  카탈로그로 옮기면 카탈로그 메타데이터가 컴퓨트(EC2) 생명주기와 완전히 분리돼 이 문제가
-  구조적으로 없어진다. Glue 대신 자체 RDS를 쓰는 이유는 그대로(Glue 권한 없음).
-- serving 스키마도 `domain-db-v2`로 이관 완료 (더 이상 "추후 이전 예정" 아님).
-
-## 사전 준비 (AWS 콘솔, 1회)
-
-2026-08-22 신규 VPC/RDS/EC2 병행 구축·컷오버(이슈 #163) 이후 실제로 살아있는 구성 기준.
-이전 세대(단일 EC2 + 기본 VPC + `waitforddaman-prod-sg`)는 컷오버 완료 후 완전히
-삭제됐다(§8) - 아래는 그 자리를 대체한 현재 구성이다.
-
-1. **ECR**: `ap-northeast-2`에 리포지토리 3개 생성 — `waitforddaman-airflow`, `waitforddaman-api`, `waitforddaman-web`. (변경 없음)
-2. **전용 VPC** `waitforddaman-vpc` (`10.20.0.0/16`) - 이전엔 기본 VPC 퍼블릭 서브넷을
-   그대로 썼는데, RDS 격리가 검증되지 않은 상태였다. 이번에 전용 VPC로 분리했다.
-3. **RDS 2대** (전용 VPC 안, private):
-   - `airflow-metadata-db-v2` — Airflow 메타데이터 전용.
-   - `domain-db-v2` — bikeman/serving 스키마 + Iceberg JDBC 카탈로그(`iceberg_catalog`
-     스키마, 전용 롤 `iceberg_catalog_rw`) 공용.
-   - 마스터 계정 비밀번호 및 `bikeman_writer`/`airflow_reader`/`serving_writer`/
-     `iceberg_catalog_rw` 각 롤 비밀번호는 전부 서로 다른 값으로 분리 관리한다(과거
-     전부 동일 값을 쓰다가 이슈 #193에서 로테이션 완료 - 아래 "알려진 제약/후속 작업" 참고).
-4. **IAM 역할(EC2용)**: `waitforddaman-ec2-role` — trusted entity: EC2.
-   - 커스텀 정책(`waitforddaman-s3-access`): `RAW_BUCKET`/`WAREHOUSE_BUCKET`에 대해
-     `s3:GetObject/PutObject/DeleteObject/ListBucket`.
-   - AWS 관리형 `AmazonEC2ContainerRegistryReadOnly` (ECR pull).
-   - Glue 권한은 부여하지 않음(JDBC 카탈로그라 불필요 - RDS 접근은 보안그룹으로 제어).
-5. **보안그룹**: `waitforddaman-prod-sg-v2`(EC2용, 인바운드 22/8080은 팀 IP 관리형 prefix
-   list만 허용, 80/443은 전체 공개, 5432/8000은 인바운드 규칙 없음 - 내부망 전용) +
-   `waitforddaman-rds-sg`(RDS용, EC2 보안그룹발 5432만 허용) + `iceberg-catalog-sg`.
-   **주의**: EC2를 다시 교체하면 SG 이름/ID도 바뀐다 - "복구 runbook" 4번(CD IAM 정책의
-   보안그룹 ARN 하드코딩) 반드시 같이 갱신할 것.
-6. **키페어**: `waitforddaman-prod-key` (RSA, .pem).
-7. **EC2 인스턴스**: Amazon Linux 2023, **반드시 arm64 AMI**(t4g.large가 Graviton),
-   `t4g.large`, gp3 50GB, 위 보안그룹 + IAM 인스턴스 프로파일 연결, 신규 VPC 서브넷에 배치.
-
-## EC2 최초 부트스트랩
+`seoul_api_key`, `slack_webhook_url`은 민감값이라 커맨드라인 `-var`로 넘기면 셸 히스토리에 남는다.
+대신 `terraform.tfvars`(git에 커밋되지 않음, `.gitignore` 처리됨)에 채워서 쓴다.
 
 ```bash
-ssh -i ~/.ssh/waitforddaman-prod-key.pem ec2-user@<EC2_PUBLIC_IP>
+cd infra/terraform
 
-# Docker 설치
-sudo dnf install -y docker
-sudo systemctl enable --now docker
-sudo usermod -aG docker ec2-user   # 재접속해야 반영됨
+# 최초 1회: 템플릿 복사 후 실제 값 채우기
+cp terraform.tfvars.example terraform.tfvars
+vi terraform.tfvars   # seoul_api_key 채우기, Slack 알림 쓸 거면 slack_webhook_url도 채우기
 
-# Docker Compose plugin (AL2023 저장소에 없어 GitHub 릴리스에서 arm64 바이너리 직접 설치)
-sudo mkdir -p /usr/local/lib/docker/cli-plugins
-LATEST=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep -o '"tag_name": "[^"]*' | cut -d'"' -f4)
-sudo curl -SL "https://github.com/docker/compose/releases/download/${LATEST}/docker-compose-linux-aarch64" \
-  -o /usr/local/lib/docker/cli-plugins/docker-compose
-sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+# 초기화
+terraform init
 
-# AWS CLI (deploy 스크립트가 ECR 로그인에 사용)
-sudo dnf install -y aws-cli
-
-# 배포 디렉터리
-sudo mkdir -p /opt/waitforddaman && sudo chown ec2-user:ec2-user /opt/waitforddaman
+# 계획 검토 / 배포 (terraform.tfvars를 자동으로 읽음)
+terraform plan
+terraform apply
 ```
 
-로컬에서 compose 파일 복사:
+## serving_sync RDS 적재/검증 Lambda (#172)
+
+목적: `gold_to_serving_sync` DAG의 `write_bike_risk_daily` / `write_station_daily` /
+`verify_bike_risk_daily_sync` / `verify_station_daily_sync` 4개 태스크가 Airflow
+워커에서 직접 Postgres(RDS)에 접속하던 걸 Lambda로 옮겨서, 이 DB 자격증명
+(`SERVING_DB_*`)을 워커에서 완전히 제거한다.
+
+### 구성 요소
+
+1. **Lambda 함수 3개, 이미지는 1개만 공유** (`infra/lambdas/serving_sync/`)
+   - `serving-sync-write-bike-risk-daily` / `serving-sync-write-station-daily` /
+     `serving-sync-verify` - 셋 다 같은 ECR 이미지를 가리키고 `image_config.command`만
+     달라서(`app.write_bike_risk_daily.handler` 등) 이미지 안의 다른 진입점을 고른다.
+     빌드는 한 번, 함수(리소스)는 셋이라 함수별로 예약 동시성을 따로 걸 수 있다.
+   - 핸들러는 얇다 - 실제 로직은 `pipeline/serving_sync/jobs/write_bike_risk_daily.py`
+     등에 그대로 있고(로컬 `python -m jobs.write_bike_risk_daily` 경로와 완전히 같은
+     코드), 핸들러는 (1) Secrets Manager에서 DB 자격증명을 읽어 os.environ에 채우고
+     (2) event를 그 잡의 입력으로 옮겨준 뒤 그대로 호출한다.
+   - `verify-serving-sync`는 `table.inspect.partitions()`(매니페스트만 읽음, 데이터
+     스캔 없음)로 Iceberg row count를 구한다.
+   - 동기 호출(`RequestResponse`) 고정 - 비동기는 Lambda 자체 재시도가 붙어
+     `DELETE+INSERT`가 두 번 돌 수 있다.
+
+2. **VPC 연결 + S3 Gateway VPC Endpoint** - 기존 raw-fetch Lambda(위 1번)는 VPC가
+   필요 없었지만, 이번엔 RDS에 붙어야 해서 VPC 안에 둔다. NAT 없이 S3(Iceberg 데이터/
+   카탈로그)에 접근하려고 Gateway 타입 VPC 엔드포인트를 같이 둔다(무료).
+
+3. **Secrets Manager** - `SERVING_DB_HOST/PORT/NAME/USER/PASSWORD`와
+   `ICEBERG_JDBC_CATALOG_USER/PASSWORD`를 담은 시크릿을 Lambda가 콜드 스타트 시
+   읽어 온다(`app/_secrets.py`). Terraform에는 시크릿 ARN만 변수로 들어가고 값
+   자체는 안 들어간다.
+
+4. **Airflow → Lambda** - `LambdaInvokeFunctionOperator`(`apache-airflow-providers-amazon`,
+   이 저장소에서 Airflow가 Lambda를 직접 호출하는 첫 사례)로 위 4개 태스크를 호출한다.
+
+### 아직 채워야 하는 것 - VPC/RDS 실제 값
+
+`infra/terraform/serving_sync.tf`/`variables.tf`는 **작성은 끝났지만 `terraform apply`는
+하지 않았다** - 아래 변수들은 기본값이 없어서 실제 배포 전에 반드시 채워야 한다.
+값을 몰라서(이 세션에서는 확인 불가) 지금은 코드만 준비해뒀다.
+
+| 변수 | 필요한 값 |
+| --- | --- |
+| `vpc_id` | RDS가 있는 기존 VPC ID |
+| `subnet_ids` | Lambda를 배치할 서브넷(RDS에 접근 가능해야 함) |
+| `route_table_ids` | S3 Gateway VPC Endpoint를 연결할 라우트 테이블 |
+| `rds_security_group_id` | 기존 RDS 보안그룹 ID (여기에 Lambda발 5432 인바운드 규칙이 추가됨) |
+| `serving_db_secret_arn` | 위 자격증명들을 담은 기존(또는 새로 만들) Secrets Manager 시크릿 ARN |
+| `iceberg_jdbc_catalog_uri` | 실제 RDS 엔드포인트를 가리키는 jdbc URI |
+
+또한 `airflow/requirements-ci.txt`에 `apache-airflow-providers-amazon`을 추가했는데,
+실제 배포 컨테이너(`apache/airflow` 베이스 이미지)에 이 provider가 기본 번들되어
+있는지는 확인하지 못했다 - 안 되어 있으면 `airflow/Dockerfile.local`/`.prod`에도
+설치 단계 추가가 필요하다.
+
+**진행하려면**: 위 표의 값들을 확인한 뒤
+
 ```bash
-scp -i ~/.ssh/waitforddaman-prod-key.pem docker-compose.prod.yml ec2-user@<EC2_PUBLIC_IP>:/opt/waitforddaman/
+cd infra/terraform
+terraform plan -var="vpc_id=..." -var="subnet_ids=[...]" -var="route_table_ids=[...]" \
+  -var="rds_security_group_id=..." -var="serving_db_secret_arn=..." \
+  -var="iceberg_jdbc_catalog_uri=..." -var="seoul_api_key=..." -var="raw_bucket=..."
 ```
-
-`/opt/waitforddaman/.env`를 서버에서 직접 작성(레포에는 절대 커밋하지 않음, `.env.example` 참고).
-prod 전용 차이: `APP_ENV=aws`, `ICEBERG_CATALOG_TYPE=hadoop`, `SPARK_LOCAL_EXECUTION=true`,
-`S3_ENDPOINT`/정적 AWS 키 미설정(인스턴스 IAM Role 사용), `AIRFLOW_DB_*`/`DOMAIN_DB_*`/
-`SERVING_DB_*`/`BIKEMAN_DB_*`는 RDS 엔드포인트.
-
-### .env 관리 방식
-
-`.env` 파일이 두 개라 혼동하기 쉽다:
-
-| 파일 | 용도 | git |
-|---|---|---|
-| `.env` (저장소 루트) | **로컬 개발용** (develop 브랜치 기준) | 무시됨 |
-| `.env.prod` (저장소 루트) | **프로덕션 값의 source of truth** | 무시됨 |
-| `/opt/waitforddaman/.env` (EC2) | 실제로 컨테이너가 읽는 파일 | - |
-| `.env.example` | 템플릿(플레이스홀더만) | **추적됨** |
-
-`.env.prod`를 편집한 뒤 아래로 반영한다. **서버에서 직접 편집하지 말 것** — 로컬과
-갈려서 다음 sync에 덮어써진다.
-
-```bash
-./infra/sync-env.sh              # 반영만 (DAG가 source하는 값은 다음 태스크에 바로 적용)
-./infra/sync-env.sh --restart    # compose environment: 블록 값을 바꿨을 때
-```
-
-스크립트가 하는 일: 플레이스홀더 미기입 검사 → scp → **권한 640 설정** → 컨테이너에서
-실제로 읽히는지 확인.
-
-**DB 비밀번호는 URL에 넣지 않는다:** `docker-compose.prod.yml`은 접속 URL에서 비밀번호를
-빼고 `PGPASSWORD`로 따로 넘긴다. URL에 그대로 끼우면 `@` `/` `:` 가 들어간 비밀번호가
-**에러 없이 다른 host/db로 파싱된다**(실측: `p@ss/w:rd#1` → host=`ss`). psycopg2가
-libpq를 거치며 `PGPASSWORD`를 집어오므로 URL에서 빼도 정상 연결된다. 비밀번호를
-교체할 때 특수문자를 피할 필요가 없어진다.
-
-**권한이 왜 중요한가:** Airflow 컨테이너가 uid 50000 / **gid 0**으로 돌면서 이 파일을
-`/opt/airflow/ingestion/.env`로 마운트해 `source`한다. `chmod 600`으로 두면 컨테이너가
-읽지 못해 **모든 DAG 태스크가 "Permission denied"로 실패한다**(실제로 겪음). 그룹 root에
-읽기 권한을 주면 컨테이너는 읽고 호스트의 다른 사용자는 못 읽는 상태가 된다. 수동 scp로는
-이 단계를 빼먹기 쉬워서 스크립트로 굳혔다.
-
-## 최초 수동 배포
-
-```bash
-cd /opt/waitforddaman
-export ECR_REGISTRY=<account-id>.dkr.ecr.ap-northeast-2.amazonaws.com
-export IMAGE_TAG=latest
-aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin $ECR_REGISTRY
-docker compose -f docker-compose.prod.yml up -d
-```
-
-1회 시드 스크립트 실행 (RDS 컷오버 이후로는 `postgres` 컨테이너가 없으므로 `domain-db-v2`에
-직접 접속한다 - `airflow_reader`/`bikeman_writer` 롤 비밀번호는 파일에 평문으로 넣지 않고
-`-v`로 주입한다, 이슈 #193):
-```bash
-docker exec -e PGPASSWORD="$DOMAIN_MASTER_PW" airflow-scheduler \
-  psql -h domain-db-v2.<endpoint> -U hamzzi -d waitforddaman \
-  -v airflow_reader_pw="$AIRFLOW_READER_PW" -v bikeman_writer_pw="$BIKEMAN_WRITER_PW" \
-  < sql/bike_man/bikeman_seed_init.sql
-```
-
-## CI/CD (GitHub Actions)
-
-| 단계 | 실행 주체 | AWS 인증 |
-|---|---|---|
-| 테스트/린트/빌드 검증 | `ci.yml` (PR마다 자동) | 불필요 |
-| 이미지 빌드 & ECR push | `cd.yml` (production push 시 자동) | OIDC 역할 assume |
-| EC2 배포 | `cd.yml` (위와 같은 워크플로우) | 불필요(SSH만) |
-
-- **`ci.yml`**: PR마다 pytest + web lint/build + 3개 prod Dockerfile 빌드 검증(push 없음).
-  테스트는 모듈별로 cwd/PYTHONPATH를 맞춰서 실행해야 한다(각 모듈 테스트가 자기
-  디렉터리 기준으로 import함). `PYSPARK_PYTHON`도 명시해야 Spark 워커/드라이버
-  파이썬 버전 불일치로 안 죽는다.
-- **`cd.yml`**: `production` push 시 ① OIDC로 `waitforddaman-gha-role` assume →
-  QEMU/buildx로 3개 이미지 arm64 크로스 빌드 → ECR push(`:latest` + `:커밋SHA`),
-  ② SSH로 EC2 접속해 해당 SHA 태그로 `docker compose pull && up -d`.
-  `workflow_dispatch`로 수동 실행도 가능.
-- 필요한 GitHub Secrets (4개): `AWS_OIDC_ROLE_ARN`, `EC2_HOST`, `EC2_SSH_USER`,
-  `EC2_SSH_PRIVATE_KEY`.
-- **주의**: `down -v`는 절대 CD/운영 스크립트에 넣지 않는다 — Postgres named volume이
-  날아가면 Airflow 메타데이터 + bikeman/serving 데이터가 전부 소실된다.
-
-### OIDC 인증 구성 (1회 생성, 완료됨)
-```
-IAM Identity Provider : token.actions.githubusercontent.com (audience: sts.amazonaws.com)
-IAM Role              : waitforddaman-gha-role
-  - trust  : 위 provider + sub가 정확히
-             repo:softeerbootcamp-8th/DE_team3-WaitForDdaman:ref:refs/heads/production
-             일 때만 assume 가능 (다른 브랜치/저장소는 실패)
-  - policy : ecr-push      (인라인) ECR 인증 + waitforddaman-* 리포지토리 push/pull
-             sg-ssh-manage (인라인) waitforddaman-prod-sg의 22번 인바운드 add/remove
-```
-
-### 러너 IP 임시 허용 (SSH 배포용)
-보안그룹 22번은 팀 IP만 허용하는데 GitHub 러너 IP는 매 실행마다 바뀐다. 그래서
-`deploy` 잡이 배포 직전 자기 IP(`/32`)만 열고, 끝나면 회수한다:
-
-1. `checkip.amazonaws.com`으로 러너 공인 IP 조회
-2. `ec2:AuthorizeSecurityGroupIngress`로 22번 개방
-3. SSH 배포
-4. `ec2:RevokeSecurityGroupIngress`로 회수 — **`if: always()`** 이므로 배포가 실패해도
-   반드시 실행된다. 이게 없으면 실패한 실행의 IP가 SG에 영구히 남아 오염된다.
-
-동시 실행 시 한쪽이 회수하는 사이 다른 쪽이 배포 중일 수 있어 `concurrency`로
-배포를 직렬화한다(`group: production-deploy`, `cancel-in-progress: false`).
-
-22번을 `0.0.0.0/0`으로 열거나 GitHub 공개 IP 대역 전체를 허용하는 방식은 쓰지 않는다.
-GitHub Actions에 정적 AWS 키를 저장하지 않는 이유: 계정 SCP가 MFA 없는 IAM 사용자
-요청을 차단하므로 정적 키로는 ECR이 거부된다. assumed-role 세션은 통과한다
-(EC2 인스턴스 역할이 MFA 없이 ECR pull되는 것과 같은 이유).
-
-### 로컬에서 직접 push해야 할 때
-`./infra/push-images.sh`가 남아 있다(CD가 막혔을 때의 폴백, 또는 CD 없이 급하게
-이미지만 갱신할 때). 사전에 `aws login --profile console`로 브라우저 인증이 필요하다 —
-`aws configure`의 정적 키는 위 SCP 때문에 ECR이 거부된다.
-
-## 복구 / 인프라 이관 runbook (2026-08-22 신규 VPC/RDS/EC2 컷오버 실전 기록)
-
-병행 구축 → 컷오버 과정에서 실제로 겪은 문제와 해결 순서. RDS 스냅샷 복원이나
-EC2 교체가 다시 필요할 때 이 순서를 그대로 따른다.
-
-### 1. RDS 스냅샷 복원 직후 - DAG pause 상태를 신뢰하지 말 것 [중요]
-
-**문제**: 스냅샷 생성 시각이 "구 환경 DAG 전체 pause" 시각보다 먼저였던 경우,
-복원된 메타DB는 pause 이전 상태를 그대로 담고 있다. 새 스택을 `docker compose up -d`로
-올리는 순간 스케줄러가 즉시 살아나고, `is_paused=false`인 DAG들이 스케줄/Asset
-트리거 조건을 만나면 곧바로 실행될 수 있다. 실측: 새 환경에서 `airflow dags list`로
-확인해보니 17개 DAG 전부 `is_paused=false` 상태로 복원됨.
-
-**대응 순서**:
-1. `airflow-init`만 먼저 올려 DB 마이그레이션을 완료한다 (스케줄러는 아직 올리지 않음)
-2. 스케줄러를 포함한 나머지 컨테이너를 올리기 **전에** 위험을 인지하고 있다가,
-   올리자마자 즉시 전체 pause한다:
-   ```bash
-   docker exec airflow-scheduler airflow dags pause --treat-dag-id-as-regex ".*" --yes
-   ```
-3. 이후 `SELECT count(*) FILTER (WHERE is_paused=false) FROM dag;`를 메타DB에 직접
-   쿼리해 0인지 확인한다 (CLI 출력이 실제 반영 전 상태를 보여줄 때가 있어 CLI 응답만
-   믿지 말 것)
-4. `dag_run` 테이블에 스택 기동 이후 시각의 row가 있는지 확인해 실제 피해가 없었는지
-   검증한다:
-   ```sql
-   SELECT count(*) FROM dag_run WHERE start_date > '<스택 기동 시각>';
-   ```
-
-### 2. Airflow Connection은 스냅샷에 있어도 검증 없이 믿지 말 것
-
-`bikeman_postgres`처럼 UI로만 생성되고 프로비저닝 코드가 없는 Connection은, 메타DB
-복원이 이론상 이를 보존해야 함에도 실측에서는 존재하지 않았다(원인 불명 - 스냅샷
-시점에 애초에 없었을 가능성). 복원 후 반드시 직접 확인:
-```bash
-docker exec airflow-scheduler airflow connections get bikeman_postgres
-```
-없으면 이 Connection을 실제로 쓰는 역할(`bikeman_writer` - bikeman 쓰기 + serving
-읽기)로 재생성한다:
-```bash
-docker exec airflow-scheduler airflow connections add "bikeman_postgres" \
-  --conn-type "postgres" --conn-host "<domain-db 엔드포인트>" \
-  --conn-schema "<db명>" --conn-login "bikeman_writer" \
-  --conn-password "<bikeman_writer 비밀번호>" --conn-port 5432
-```
-
-### 3. Iceberg JDBC 카탈로그로 기존 테이블 이관
-
-`ingestion/jobs/register_tables_in_jdbc_catalog.py`로 hadoop 카탈로그의 기존
-테이블을 JDBC 카탈로그에 전부 등록한다(멱등 - 재실행 시 이미 등록된 건 스킵).
-등록 전 S3에서 `version-hint.text`를 리스팅해 실제 테이블 목록을 직접 확정할 것 -
-`airflow/scripts/check_silver_catalog.py`의 하드코딩된 테이블 상수는 최신이 아닐 수
-있다(실측: silver/gold 각 5종으로 적혀 있었으나 실제로는 24개 테이블 존재).
-등록 후 hadoop(구)/jdbc(신) 카탈로그의 행수를 대조해 검증한다.
-
-**주의**: 구 환경 DAG가 계속 hadoop 카탈로그로 커밋 중이면 새 카탈로그가 그 갱신을
-못 본다(포인터 메커니즘이 다름) - 반드시 구 DAG 전체 pause 후 등록할 것.
-
-### 4. CD가 사용하는 IAM 정책의 보안그룹 ARN은 새 SG로 교체해야 함 [중요]
-
-`waitforddaman-gha-role`의 인라인 정책 `sg-ssh-manage`가 `ec2:AuthorizeSecurityGroupIngress`
-/ `RevokeSecurityGroupIngress`의 `Resource`를 특정 보안그룹 ARN으로 하드코딩하고
-있다. EC2를 새 인스턴스(새 SG)로 교체하면 GitHub Secrets(`SSH_SECURITY_GROUP_ID`)만
-바꿔서는 부족하고, 이 IAM 정책의 `Resource`도 새 SG ARN으로 같이 바꿔야 CD의
-"러너 IP 임시 허용" 스텝이 통과한다. 안 바꾸면 `UnauthorizedOperation`으로 배포
-job이 SSH를 열기 전 단계에서 실패한다(타겟 서버는 건드려지지 않아 안전하게 실패).
-
-## 알려진 제약 / 후속 작업
-
-- 이 계정은 조직 SCP로 일부 AWS 서비스(ECR 등)가 막혀 있을 수 있음 — 계정 관리자 확인 필요.
-- EC2 `t4g.large`(8GB) 제약으로 `bronze_ingest`/`silver_process` pool 동시성을 1로 낮춤 —
-  반기 CSV(~700MB)급 파일 처리 시 실측 후 필요하면 driver 메모리도 추가 조정.
-- EMR 도입은 별도 트랙(타 담당자) — 이 문서 범위 밖. (serving RDS 이전은 이번 컷오버로 완료됨)
-- ~~§8 구 환경(EC2/RDS 2대/보안그룹) 삭제~~ — 완료 (이슈 #193). 구 RDS는 최종 스냅샷
-  (`domain-db-snapshot`, `airflow-metadata-db-snapshot`) 남기고 삭제.
-- ~~§12 비밀번호 로테이션~~ — 완료 (이슈 #193). RDS 마스터(`hamzzi`)와
-  `bikeman_writer`/`airflow_reader`/`serving_writer`/`iceberg_catalog_rw` 롤이 전부
-  같은 값을 공유하던 문제를 해결하고 서로 다른 값으로 분리했다. 사람이 직접 로그인하는
-  Airflow 웹 UI 계정(`_AIRFLOW_WWW_USER_PASSWORD`)만 팀 합의로 기존 값을 유지.
-- CD host-key 검증, 배포 후 헬스게이트/자동 롤백 추가는 급하지 않은 개선 항목으로 보류.
+로 계획을 검토한 뒤 `apply`하면 된다. 이미지는 별도로 빌드/푸시해야 한다
+(`infra/lambdas/serving_sync/Dockerfile` 상단 주석 참고).

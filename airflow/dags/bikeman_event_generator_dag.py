@@ -21,62 +21,41 @@ returned_bikes의 "어제 COLLECT" 조회보다 먼저 커밋해 같은 방식�
 잠재적 여지도 있어, 재발 방지 차원에서 deploy_returned_bikes >> generate_collect_events
 로 순서를 강제한다.
 
-### 왜 BashOperator가 아니라 PythonOperator + PostgresHook인가
-이 저장소의 다른 모든 job은 psycopg2 + .env 직접 연결 + `python -m jobs.X` 단독 실행
-컨벤션을 따르지만, 이 DAG는 사용자 확정에 따라 Airflow UI Connection(bikeman_postgres)
-+ PostgresHook을 쓴다 (docs/superpowers/specs/2026-08-18-bikeman-event-generator-design.md 참고).
+### Lambda 전환 (#186)
+generate_collect_events/deploy_returned_bikes 둘 다 PostgresHook(Airflow Connection
+bikeman_postgres)으로 워커에서 직접 RDS에 접속했었다. gold_to_serving_sync(#172)와
+같은 이유(워커의 DB 자격증명 제거)로 Lambda로 옮긴다 - bikeman/serving 스키마가
+같은 domain-db 인스턴스라(docs/RDS 적재 및 세팅 설계.md 2절), #172만 하고 이 DAG를
+남겨두면 워커는 여전히 DB에 붙는 경로가 남아 그 변경의 실질 이득이 없다.
 """
-import sys
+import json
 from datetime import timedelta
 
 import pendulum
-import requests
-from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.amazon.aws.operators.lambda_function import LambdaInvokeFunctionOperator
 from airflow.sdk import dag
 
-JOBS_DIR = "/opt/airflow/pipeline/bikeman_event_generator/jobs"
-if JOBS_DIR not in sys.path:
-    sys.path.insert(0, JOBS_DIR)
+from dag_common import notify_slack_on_failure
 
-import deploy_returned_bikes  # noqa: E402
-import generate_collect_events  # noqa: E402
+# Terraform(infra/terraform/bikeman_event_generator.tf)의 aws_lambda_function.
+# function_name과 반드시 같아야 한다 (#186).
+GENERATE_COLLECT_EVENTS_LAMBDA = "bikeman-event-generator-generate-collect-events"
+DEPLOY_RETURNED_BIKES_LAMBDA = "bikeman-event-generator-deploy-returned-bikes"
 
 default_args = {
     "retries": 2,
     "retry_delay": timedelta(minutes=5),
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=30),
+    "on_failure_callback": notify_slack_on_failure,
 }
 
 
-def _notify_slack_on_failure(context: dict) -> None:
-    import os
-
-    webhook_url = os.getenv("SLACK_WEBHOOK_URL")
-    if not webhook_url:
-        return
-
-    ti = context["task_instance"]
-    message = f":x: *{ti.dag_id}.{ti.task_id}* 실패\n실행일: {context['ds']}\n로그: {ti.log_url}"
-    try:
-        requests.post(webhook_url, json={"text": message}, timeout=10)
-    except requests.RequestException:
-        pass
-
-
-default_args["on_failure_callback"] = _notify_slack_on_failure
-
-
-def _target_date(context: dict) -> str:
-    return context["dag_run"].conf.get("snapshot_date") or context["ds"]
-
-
-def _run_generate_collect_events(**context) -> None:
-    generate_collect_events.run(_target_date(context))
-
-
-def _run_deploy_returned_bikes(**context) -> None:
-    deploy_returned_bikes.run(_target_date(context))
+def _lambda_payload() -> str:
+    """LambdaInvokeFunctionOperator의 payload(JSON 문자열) - gold_to_serving_sync_dag.py의
+    _lambda_payload()와 동일한 규칙. dag_run.conf의 snapshot_date를 자기 ds보다
+    우선한다(트리거 상류 DAG가 처리한 날짜와 어긋나지 않게)."""
+    return json.dumps({"snapshot_date": "{{ dag_run.conf.get('snapshot_date') or ds }}"})
 
 
 @dag(
@@ -90,14 +69,18 @@ def _run_deploy_returned_bikes(**context) -> None:
     doc_md=__doc__,
 )
 def bikeman_event_generator():
-    generate_collect_events_task = PythonOperator(
+    generate_collect_events_task = LambdaInvokeFunctionOperator(
         task_id="generate_collect_events",
-        python_callable=_run_generate_collect_events,
+        function_name=GENERATE_COLLECT_EVENTS_LAMBDA,
+        invocation_type="RequestResponse",
+        payload=_lambda_payload(),
         execution_timeout=timedelta(minutes=10),
     )
-    deploy_returned_bikes_task = PythonOperator(
+    deploy_returned_bikes_task = LambdaInvokeFunctionOperator(
         task_id="deploy_returned_bikes",
-        python_callable=_run_deploy_returned_bikes,
+        function_name=DEPLOY_RETURNED_BIKES_LAMBDA,
+        invocation_type="RequestResponse",
+        payload=_lambda_payload(),
         execution_timeout=timedelta(minutes=10),
     )
 

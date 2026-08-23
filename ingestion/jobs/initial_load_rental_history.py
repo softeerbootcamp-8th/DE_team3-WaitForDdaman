@@ -28,9 +28,9 @@ from pathlib import Path
 from pyspark.sql import functions as F
 
 import config
-from common.encoding_utils import convert_euckr_file_to_utf8
+from common.encoding_utils import EncodingMismatchError, convert_euckr_file_to_utf8
 from common.file_utils import unzip_if_needed
-from common.s3_utils import ensure_bucket, upload_file
+from common.s3_utils import download_file, ensure_bucket, split_s3_uri, upload_file
 from common.spark_session import build_spark_session
 from schema.rental_history_schema import (
     SchemaValidationError,
@@ -144,11 +144,6 @@ def run(input_file: str) -> None:
     spark = build_spark_session("bronze-initial-load-rental-history")
     _ensure_bronze_table(spark)
 
-    raw_path = Path(input_file)
-    if not raw_path.exists():
-        logger.error("입력 파일이 없습니다: %s", input_file)
-        sys.exit(1)
-
     total_rows, failed, skipped = 0, False, False
 
     # 이 TemporaryDirectory는 파일 1개 처리 범위로 한정된다 (프로세스 자체도 파일 1개만
@@ -157,6 +152,16 @@ def run(input_file: str) -> None:
     # 예전처럼 폴더 전체를 한 세션으로 순회하며 무한정 누적되는 구조가 아니다.
     with tempfile.TemporaryDirectory() as tmpdir:
         workdir = Path(tmpdir)
+        if input_file.startswith("s3://"):
+            bucket, key = split_s3_uri(input_file)
+            raw_path = workdir / Path(key).name
+            download_file(bucket, key, raw_path)
+        else:
+            raw_path = Path(input_file)
+            if not raw_path.exists():
+                logger.error("입력 파일이 없습니다: %s", input_file)
+                sys.exit(1)
+
         for csv_path in unzip_if_needed(raw_path, workdir):
             try:
                 # write.distribution-mode=hash를 테이블 속성으로 지정해뒀으므로
@@ -178,6 +183,11 @@ def run(input_file: str) -> None:
             except SchemaValidationError as e:
                 logger.error("스키마 검증 실패: %s (%s)", csv_path.name, e)
                 failed = True  # 안전하게 실패: 이 CSV만 스킵하고 나머지(압축 안 다른 CSV)는 계속 처리
+            except EncodingMismatchError as e:
+                # EUC-KR/CP949가 아닌 다른 인코딩으로 추정됨 - 조용히 깨진 데이터를
+                # 적재하는 대신 스키마 검증 실패와 동일하게 취급한다 (이 CSV만 스킵).
+                logger.error("인코딩 불일치로 스킵: %s (%s)", csv_path.name, e)
+                failed = True
 
     logger.info(
         "파일 처리 종료: %s, 총 %d행, 다른 데이터셋으로 스킵=%s, 스키마 실패=%s",

@@ -73,7 +73,7 @@ window_days: 14 / horizon_days: 3 / exclude_recent_days: 30
 
 `train_and_evaluate` 태스크는 매 실행마다 `models.candidates`(`rule_trips`/`logreg`/`lgbm`) 전부를 학습·평가하지만, **승격 후보는 항상 `models.primary`(lgbm)로 고정**한다. `select_best()`가 고르는 "이번 평가 1등"은 리포트로만 로그에 남고 승격에는 안 쓰인다. 이유:
 
-- `rule_trips`는 `score()`가 확률이 아니라 trips 개수를 그대로 반환한다 - 그게 승격되면 `risk_score`가 0~100 범위를 벗어나 추론 쪽 PyDeequ 검증이 깨진다. 애초에 "rule 대조군이 발표 근거가 된다"(위 표 참고)는 리포트용 설계다.
+- `rule_trips`는 `score()`가 확률이 아니라 trips 개수를 그대로 반환한다 - 그게 승격되면 `risk_score`가 0~100 범위를 벗어나 추론 쪽 SQL 어서션 검증이 깨진다. 애초에 "rule 대조군이 발표 근거가 된다"(위 표 참고)는 리포트용 설계다.
 - `logreg`/`lgbm`처럼 둘 다 확률을 반환하는 타입끼리도 캘리브레이션(확률 분포)이 달라서, 재학습마다 champion 타입이 바뀌면 `risk_grade` 컷오프가 조용히 안 맞게 된다(에러 없이 등급만 이상해짐). 모델 아키텍처를 바꾸는 건 재학습이 자동으로 정할 일이 아니라 `models.primary`를 사람이 바꾸는 명시적 결정이어야 한다.
 
 ## 테스트 방법
@@ -187,8 +187,10 @@ docker exec airflow-scheduler airflow tasks states-for-dag-run risk_model_train 
 - `run.fault_lookback_days` 기본 **null**(전체 이력) — 노트북과 동일한 `days_since_fail` 값.
   느리면 400 정도로 두되, 그 경우 "400일 이전 고장"은 `9999`(미고장)와 구분되지 않는다.
 - silver 컬럼명 매핑 — 아키텍처 SVG 기준으로 채웠다. 실제 컬럼명이 다르면 config 만 수정.
-- EMR 전환 시점 — `build_train_samples` 태스크만 `EmrAddStepsOperator` 로 바꾸면 된다.
-  `samples.py` 에 `--anchor-plan` CLI 를 이미 붙여뒀다.
+- EMR 전환 — `APP_ENV=aws` 에서는 `build_train_samples` 태스크가 boto3
+  `emr-serverless.start_job_run` 으로 `samples.py` 를 실행한다. EMR Worker에는 공유
+  파일시스템이 없으므로 `--anchor-plan-json` 으로 앵커 plan을 인라인 전달한다
+  (`--anchor-plan` 파일 경로 방식도 로컬/수동 실행용으로 유지).
 - MLflow — `mlflow.enabled: false`. 켤 경우 compose에 tracking server(백엔드=기존 postgres 별 DB,
   아티팩트=S3) 추가가 필요하고, joblib 은 S3 직접 저장 + 경로를 태그로 남겨 폴백을 유지한다.
 - 추론 — `gold_risk_decision`(`pipeline/risk_model`)이 위 계약대로 연결돼 있음. 다만 이 환경엔 아직 `registry.json`에 champion이 없어서(`risk_model_train`을 `dry_run=false`로 실제 실행해 승격시킨 적 없음) end-to-end 동작은 미검증 상태 — 실제 학습 실행 후 확인 필요.

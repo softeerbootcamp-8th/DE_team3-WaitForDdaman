@@ -7,7 +7,7 @@
 
 ## jobs
 
-- `build_bike_features_daily.py`: `silver.rental_history` + `silver.failure_report` -> `gold.bike_features_daily` (하루치 통째로 재계산, OVERWRITE + PyDeequ 검증)
+- `build_bike_features_daily.py`: `silver.rental_history` + `silver.failure_report` -> `gold.bike_features_daily` (하루치 통째로 재계산, OVERWRITE + SQL 어서션 검증)
   - 컬럼: `snapshot_date`(파티션), `bike_id`, `trips`, `dist_km`, `instant_ret`, `fail_150d`, `days_since_fail`, `days_since_last_rent`, `trend_ratio`
   - 기준일 이전 14일 rolling window로 집계. 피처 로직은 `pipeline/train_risk_model/features.py`의 `build_features_for_inference()`를 그대로 호출한다(학습·추론 공유, train-serving skew 방지) - `dim_bike`처럼 누적 처리 아님, 워터마크 없음
   - `gold_dim_fact` 산출물이 아니라 이 폴더가 직접 만든다 - 순수 추론 입력이라 risk_model 스코프
@@ -15,11 +15,11 @@
   - champion은 `registry.json`에서 로드하고(`{model_root}/registry.json`), 승격 후보는 학습 쪽(`risk_model_train_dag.py`)에서 항상 `models.primary`(lgbm)로 고정돼 있어 여기서는 model_type 분기를 신경 쓸 필요가 없다
   - `risk_score`는 모델이 출력한 원본 확률(0~1)에 100을 곱한 값(0~100), `risk_grade`는 95/99 컷오프로 Normal/Warning/Critical 3등급 (이 컷오프 값은 champion의 확률 분포에 맞춰 재검증이 필요할 수 있음 - 재학습마다 드리프트 가능)
   - 독립 job이 아니라 `build_fact_bike_risk.py`가 라이브러리로 불러 쓴다
-- `build_fact_bike_risk.py`: `gold.bike_features_daily` -> `gold.fact_bike_risk` (하루치 통째로 재계산, OVERWRITE + PyDeequ 검증)
+- `build_fact_bike_risk.py`: `gold.bike_features_daily` -> `gold.fact_bike_risk` (하루치 통째로 재계산, OVERWRITE + SQL 어서션 검증)
   - 컬럼: `snapshot_date`(파티션), `bike_id`, `risk_score`, `risk_grade`, `model_version`
   - `bikeman_action` 최신 이벤트가 "수거"(미배치)인 자전거만 제외 - 대여중단 상태는 재고 상황에 따라 다시 바뀔 수 있어 매일 재포함
   - 날짜 범위를 누적 처리하지 않아 워터마크 없음, `SNAPSHOT_DATE` 환경변수(기본값 오늘)로 대상일 지정
-- `build_fact_bike_decision.py`: `gold.fact_bike_risk` + `gold.fact_station_inventory` -> `gold.fact_bike_decision` (OVERWRITE + PyDeequ 검증)
+- `build_fact_bike_decision.py`: `gold.fact_bike_risk` + `gold.fact_station_inventory` -> `gold.fact_bike_decision` (OVERWRITE + SQL 어서션 검증)
   - 컬럼: `snapshot_date`(파티션), `bike_id`, `action`(`대여중단`/`보류` 2종 - `수거`는 이 job 스코프 밖)
   - 대여소별 `suspendable_bike_cnt = max(0, bike_cnt - target_bike_cnt)`, `warning_available_cnt = suspendable_bike_cnt - critical_cnt`
   - Critical은 무조건 대여중단, Warning은 대여소 내 `risk_score` 랭킹이 `warning_available_cnt` 이내일 때만 대여중단

@@ -1,128 +1,151 @@
-"""build_mart_bike_risk_daily 조인/집계 순수 로직 테스트."""
-from datetime import date
+"""build_mart_bike_risk_daily 조인/집계 순수 로직 테스트 (#172)."""
+from datetime import datetime, timezone
 
-import pytest
-from pyspark.sql import types as T
+import pyarrow as pa
 
 from build_mart_bike_risk_daily import _fail_history_agg, build_mart_bike_risk_daily
 
-RAW_FAILURE_SCHEMA = T.StructType([
-    T.StructField("bike_no", T.StringType()),
-    T.StructField("reg_dttm", T.StringType()),
-    T.StructField("failure_type", T.StringType()),
-])
-
-RISK_SCHEMA = T.StructType([
-    T.StructField("bike_id", T.StringType()),
-    T.StructField("risk_score", T.DoubleType()),
-    T.StructField("risk_grade", T.StringType()),
-])
-DECISION_SCHEMA = T.StructType([
-    T.StructField("bike_id", T.StringType()),
-    T.StructField("action", T.StringType()),
-])
-LOCATION_SCHEMA = T.StructType([
-    T.StructField("bike_id", T.StringType()),
-    T.StructField("last_station_id", T.StringType()),
-])
-STATION_ACTIVE_SCHEMA = T.StructType([
-    T.StructField("station_id", T.StringType()),
-    T.StructField("station_name", T.StringType()),
-    T.StructField("region", T.StringType()),
-    T.StructField("district", T.StringType()),
-])
-DIM_BIKE_SCHEMA = T.StructType([
-    T.StructField("bike_id", T.StringType()),
-    T.StructField("start_year", T.IntegerType()),
-])
-FEATURES_SCHEMA = T.StructType([
-    T.StructField("bike_id", T.StringType()),
-    T.StructField("dist_km", T.DoubleType()),
-])
-STATION_RISK_SCHEMA = T.StructType([
-    T.StructField("station_id", T.StringType()),
-    T.StructField("risk_cnt", T.IntegerType()),
-    T.StructField("healthy_ratio", T.DoubleType()),
-])
-FAILURE_SCHEMA = T.StructType([
-    T.StructField("bike_id", T.StringType()),
-    T.StructField("fail_history", T.ArrayType(T.StringType())),
-])
+SNAPSHOT_DATE = "2026-08-18"
 
 
-@pytest.fixture(scope="module")
-def spark():
-    from pyspark.sql import SparkSession
+def utc(*args) -> datetime:
+    return datetime(*args, tzinfo=timezone.utc)
 
-    session = (
-        SparkSession.builder.appName("test-build-mart-bike-risk-daily")
-        .master("local[1]")
-        .config("spark.driver.bindAddress", "127.0.0.1")
-        .config("spark.driver.host", "127.0.0.1")
-        .config("spark.sql.shuffle.partitions", "1")
-        .getOrCreate()
+
+def risk_table(rows: list[tuple]) -> pa.Table:
+    return pa.table(
+        {
+            "bike_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "risk_score": pa.array([r[1] for r in rows], type=pa.float64()),
+            "risk_grade": pa.array([r[2] for r in rows], type=pa.string()),
+        }
     )
-    session.sparkContext.setLogLevel("ERROR")
-    yield session
-    session.stop()
 
 
-def build(spark, risk_rows, decision_rows):
-    risk_df = spark.createDataFrame(risk_rows, RISK_SCHEMA)
-    decision_df = spark.createDataFrame(decision_rows, DECISION_SCHEMA)
-    location_df = spark.createDataFrame(
-        [(r[0], "ST-1") for r in risk_rows], LOCATION_SCHEMA
+def decision_table(rows: list[tuple]) -> pa.Table:
+    return pa.table(
+        {
+            "bike_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "action": pa.array([r[1] for r in rows], type=pa.string()),
+        }
     )
-    station_active_df = spark.createDataFrame(
-        [("ST-1", "테스트대여소", "강북", "마포구")], STATION_ACTIVE_SCHEMA
+
+
+def location_table(rows: list[tuple]) -> pa.Table:
+    return pa.table(
+        {
+            "bike_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "last_station_id": pa.array([r[1] for r in rows], type=pa.string()),
+        }
     )
-    dim_bike_df = spark.createDataFrame([(r[0], 2020) for r in risk_rows], DIM_BIKE_SCHEMA)
-    features_df = spark.createDataFrame([(r[0], 12.5) for r in risk_rows], FEATURES_SCHEMA)
-    station_risk_df = spark.createDataFrame([], STATION_RISK_SCHEMA)
-    failure_df = spark.createDataFrame([], FAILURE_SCHEMA)
-    return {
-        r["bike_id"]: r
-        for r in build_mart_bike_risk_daily(
-            risk_df, decision_df, location_df, station_active_df, dim_bike_df,
-            features_df, station_risk_df, failure_df, date(2026, 8, 18),
-        ).collect()
-    }
 
 
-def test_mart_omits_action_column(spark):
-    result = build(spark, [("B1", 10.0, "Normal")], [("B1", "보류")])
-    assert "action" not in result["B1"].asDict()
+def station_active_table(rows: list[tuple]) -> pa.Table:
+    return pa.table(
+        {
+            "station_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "station_name": pa.array([r[1] for r in rows], type=pa.string()),
+            "region": pa.array([r[2] for r in rows], type=pa.string()),
+            "district": pa.array([r[3] for r in rows], type=pa.string()),
+        }
+    )
 
 
-def test_mart_keeps_only_decided_bikes(spark):
+def dim_bike_table(rows: list[tuple]) -> pa.Table:
+    return pa.table(
+        {
+            "bike_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "start_year": pa.array([r[1] for r in rows], type=pa.int32()),
+        }
+    )
+
+
+def features_table(rows: list[tuple]) -> pa.Table:
+    return pa.table(
+        {
+            "bike_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "dist_km": pa.array([r[1] for r in rows], type=pa.float64()),
+        }
+    )
+
+
+def station_risk_table(rows: list[tuple]) -> pa.Table:
+    return pa.table(
+        {
+            "station_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "risk_cnt": pa.array([r[1] for r in rows], type=pa.int32()),
+            "healthy_ratio": pa.array([r[2] for r in rows], type=pa.float64()),
+        }
+    )
+
+
+def failure_table(rows: list[tuple]) -> pa.Table:
+    return pa.table(
+        {
+            "bike_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "fail_history": pa.array([r[1] for r in rows], type=pa.list_(pa.string())),
+        }
+    )
+
+
+def raw_failure_table(rows: list[tuple]) -> pa.Table:
+    return pa.table(
+        {
+            "bike_no": pa.array([r[0] for r in rows], type=pa.string()),
+            "reg_dttm": pa.array([r[1] for r in rows], type=pa.timestamp("us", tz="UTC")),
+            "failure_type": pa.array([r[2] for r in rows], type=pa.string()),
+        }
+    )
+
+
+def build(risk_rows, decision_rows) -> dict:
+    location_rows = [(r[0], "ST-1") for r in risk_rows]
+    result = build_mart_bike_risk_daily(
+        risk_table(risk_rows),
+        decision_table(decision_rows),
+        location_table(location_rows),
+        station_active_table([("ST-1", "테스트대여소", "강북", "마포구")]),
+        dim_bike_table([(r[0], 2020) for r in risk_rows]),
+        features_table([(r[0], 12.5) for r in risk_rows]),
+        station_risk_table([]),
+        failure_table([]),
+        SNAPSHOT_DATE,
+    )
+    return {r["bike_id"]: r for r in result.to_pylist()}
+
+
+def test_mart_omits_action_column():
+    result = build([("B1", 10.0, "Normal")], [("B1", "보류")])
+    assert "action" not in result["B1"]
+
+
+def test_mart_keeps_only_decided_bikes():
     result = build(
-        spark,
         [("B1", 90.0, "Critical"), ("B2", 10.0, "Normal")],
         [("B1", "대여중단")],
     )
     assert sorted(result) == ["B1"]
 
 
-def test_aging_is_snapshot_year_minus_start_year(spark):
-    result = build(spark, [("B1", 10.0, "Normal")], [("B1", "보류")])
+def test_aging_is_snapshot_year_minus_start_year():
+    result = build([("B1", 10.0, "Normal")], [("B1", "보류")])
     assert result["B1"]["aging"] == 2026 - 2020
 
 
-def test_no_risk_scored_station_defaults_to_full_health(spark):
-    result = build(spark, [("B1", 10.0, "Normal")], [("B1", "보류")])
-    assert result["B1"]["healthy_ratio"] == pytest.approx(100.0)
+def test_no_risk_scored_station_defaults_to_full_health():
+    result = build([("B1", 10.0, "Normal")], [("B1", "보류")])
+    assert result["B1"]["healthy_ratio"] == 100.0
 
 
-def test_fail_history_agg_orders_most_recent_first(spark):
-    raw = spark.createDataFrame(
+def test_fail_history_agg_orders_most_recent_first():
+    raw = raw_failure_table(
         [
-            ("B1", "2026-01-01 00:00:00", "펑크"),
-            ("B1", "2026-03-01 00:00:00", "타이어마모"),
-            ("B1", "2026-02-01 00:00:00", "체인끊김"),
-        ],
-        RAW_FAILURE_SCHEMA,
+            ("B1", utc(2026, 1, 1), "펑크"),
+            ("B1", utc(2026, 3, 1), "타이어마모"),
+            ("B1", utc(2026, 2, 1), "체인끊김"),
+        ]
     )
-    result = {r["bike_id"]: r for r in _fail_history_agg(raw, date(2026, 8, 18)).collect()}
+    result = {r["bike_id"]: r for r in _fail_history_agg(raw, "2026-08-18").to_pylist()}
     assert result["B1"]["fail_history"] == [
         "2026-03-01 타이어마모",
         "2026-02-01 체인끊김",
@@ -130,12 +153,9 @@ def test_fail_history_agg_orders_most_recent_first(spark):
     ]
 
 
-def test_fail_history_agg_respects_limit(spark):
-    raw = spark.createDataFrame(
-        [(f"B2", f"2026-01-0{i} 00:00:00", f"고장{i}") for i in range(1, 8)],
-        RAW_FAILURE_SCHEMA,
-    )
-    result = {r["bike_id"]: r for r in _fail_history_agg(raw, date(2026, 8, 18), limit=5).collect()}
+def test_fail_history_agg_respects_limit():
+    raw = raw_failure_table([("B2", utc(2026, 1, i), f"고장{i}") for i in range(1, 8)])
+    result = {r["bike_id"]: r for r in _fail_history_agg(raw, "2026-08-18", limit=5).to_pylist()}
     assert result["B2"]["fail_history"] == [
         "2026-01-07 고장7",
         "2026-01-06 고장6",

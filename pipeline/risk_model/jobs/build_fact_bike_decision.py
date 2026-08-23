@@ -8,22 +8,35 @@ action은 대여중단/보류 2가지뿐이다. capacity(정비 인력 기준)�
 dim_bike처럼 날짜 범위를 누적 처리하는 잡이 아니라 하루치(target_date)를 통째로
 재계산해서 OVERWRITE하는 구조라 워터마크가 없다 - 파티션을 다시 덮어써도 같은 입력이면
 같은 결과가 나오므로 재실행이 그냥 멱등하게 처리된다.
+
+### Spark 제거 (#171)
+읽기/쓰기는 pyiceberg, 재고 조인 + 랭킹 윈도우는 pyarrow에 윈도우 함수가 없어 DuckDB
+SQL(row_number() OVER)로 옮긴다. 병합 로직은 순수 DuckDB SQL이라 단위 테스트가 가능하다.
+
+사용법:
+    python -m jobs.build_fact_bike_decision
+    SNAPSHOT_DATE=2026-08-17 python -m jobs.build_fact_bike_decision
 """
 import logging
 import os
 import sys
 from datetime import date
 
-os.environ.setdefault("SPARK_VERSION", "3.5")
-
-from pydeequ.checks import Check, CheckLevel
-from pydeequ.verification import VerificationResult, VerificationSuite
-from pyspark.sql import functions as F
-from pyspark.sql.window import Window
+import duckdb
+import pyarrow as pa
+from pyiceberg.exceptions import NoSuchTableError
+from pyiceberg.expressions import EqualTo
+from pyiceberg.partitioning import PartitionField, PartitionSpec
+from pyiceberg.schema import Schema
+from pyiceberg.transforms import IdentityTransform
+from pyiceberg.types import DateType, NestedField, StringType
 
 import config
+from common.duckdb_io import query_arrow
+from common.iceberg_catalog import build_iceberg_catalog
+from common.iceberg_io import overwrite_partition
 from common.s3_utils import ensure_bucket
-from common.spark_session import build_spark_session_with_deequ, stop_spark_session_with_deequ
+from common.sql_assert import QualityCheck, QualityCheckError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -31,157 +44,158 @@ logger = logging.getLogger(__name__)
 SUSPEND = "대여중단"
 HOLD = "보류"
 
+FACT_BIKE_RISK_TABLE = "gold.fact_bike_risk"
+BIKE_LOCATION_TABLE = "gold.bike_location"
+# NOTE: 대여소 재고 입력을 배치 추정(fact_station_inventory) vs 실시간(station_inventory_snapshot)
+# 중 뭘 쓸지 아직 팀 확정 전. 지금은 fact_station_inventory(bike_cnt/hold_num/target_bike_cnt)
+# 기준으로 짜뒀고, 확정되면 이 테이블명과 join 컬럼명만 바꾸면 된다.
+STATION_INVENTORY_TABLE = "gold.fact_station_inventory"
+GOLD_TABLE = "gold.fact_bike_decision"
+PARTITION_COLUMN = "snapshot_date"
 
-class GoldValidationError(Exception):
-    """PyDeequ 품질 검증 실패 - 이 예외는 배치를 즉시 중단시켜야 한다."""
-
-
-def _fact_bike_risk_table():
-    return f"{config.SETTINGS.iceberg_catalog_name}.gold.fact_bike_risk"
-
-
-def _bike_location_table():
-    return f"{config.SETTINGS.iceberg_catalog_name}.gold.bike_location"
-
-
-def _station_inventory_table():
-    # NOTE: 대여소 재고 입력을 배치 추정(fact_station_inventory) vs 실시간(station_inventory_snapshot)
-    # 중 뭘 쓸지 아직 팀 확정 전. 지금은 fact_station_inventory(bike_cnt/hold_num/target_bike_cnt)
-    # 기준으로 짜뒀고, 확정되면 이 함수와 join 컬럼명만 바꾸면 된다.
-    return f"{config.SETTINGS.iceberg_catalog_name}.gold.fact_station_inventory"
-
-
-def _gold_table():
-    return f"{config.SETTINGS.iceberg_catalog_name}.gold.fact_bike_decision"
+GOLD_SCHEMA = Schema(
+    NestedField(1, "snapshot_date", DateType(), required=False),
+    NestedField(2, "bike_id", StringType(), required=False),
+    NestedField(3, "action", StringType(), required=False),
+)
+GOLD_PARTITION_SPEC = PartitionSpec(
+    PartitionField(source_id=1, field_id=1000, transform=IdentityTransform(), name=PARTITION_COLUMN)
+)
 
 
-def _ensure_fact_bike_decision_table(spark) -> None:
-    catalog = config.SETTINGS.iceberg_catalog_name
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {catalog}.gold")
-    spark.sql(
-        f"""
-        CREATE TABLE IF NOT EXISTS {_gold_table()} (
-            snapshot_date DATE,
-            bike_id STRING,
-            action STRING
-        )
-        USING iceberg
-        PARTITIONED BY (snapshot_date)
-        """
-    )
+def _ensure_fact_bike_decision_table(catalog):
+    catalog.create_namespace_if_not_exists("gold")
+    try:
+        return catalog.load_table(GOLD_TABLE)
+    except NoSuchTableError:
+        logger.info("%s 테이블 신규 생성", GOLD_TABLE)
+        return catalog.create_table(GOLD_TABLE, schema=GOLD_SCHEMA, partition_spec=GOLD_PARTITION_SPEC)
 
 
-def _validate_fact_bike_decision(spark, df, risk_df) -> None:
+def _validate_fact_bike_decision(table: pa.Table, risk_table: pa.Table) -> None:
     """오늘자 파티션만 검증한다 (OVERWRITE 구조)."""
-    check = Check(spark, CheckLevel.Error, "fact_bike_decision_check")
-    result = (
-        VerificationSuite(spark)
-        .onData(df)
-        .addCheck(
-            check.isComplete("bike_id")
-            .isComplete("action")
-            .isContainedIn("action", [SUSPEND, HOLD])
-        )
-        .run()
+    (
+        QualityCheck("fact_bike_decision_check")
+        .is_complete("bike_id")
+        .is_complete("action")
+        .is_contained_in("action", [SUSPEND, HOLD])
+        .run(table)
+        .raise_if_failed(QualityCheckError)
     )
-    result_df = VerificationResult.checkResultsAsDataFrame(spark, result)
-    result_df.show(truncate=False)
-
-    if result.status != "Success":
-        failed_constraints = [r["constraint"] for r in result_df.collect() if r["constraint_status"] != "Success"]
-        raise GoldValidationError(f"fact_bike_decision 품질 검증 실패: {failed_constraints}")
 
     # 참조 무결성: 오늘자 fact_bike_decision의 모든 bike_id는 오늘자 fact_bike_risk에도 있어야 한다.
-    orphan_count = df.join(risk_df.select("bike_id"), on="bike_id", how="left_anti").count()
+    conn = duckdb.connect(":memory:")
+    conn.register("decision", table)
+    conn.register("risk", risk_table)
+    orphan_count = query_arrow(
+        conn,
+        "SELECT COUNT(*) AS cnt FROM decision d LEFT JOIN risk r ON d.bike_id = r.bike_id WHERE r.bike_id IS NULL",
+    )["cnt"][0].as_py()
     if orphan_count > 0:
-        raise GoldValidationError(f"fact_bike_risk에 없는 bike_id {orphan_count}건 발견")
+        raise QualityCheckError(f"fact_bike_risk에 없는 bike_id {orphan_count}건 발견")
 
 
-def _process_date(spark, target_date):
+# 대여소별 suspendable_bike_cnt(여유분), critical_cnt(즉시 대여중단 확정 수)
+# 설계 문서엔 "Critical부터 순서대로 잔여량 차감" 식 반복 처리로 설명돼있지만,
+# Critical은 예산 확인 없이 무조건 대여중단(=항상 critical_cnt만큼만 소진)이고
+# Warning은 고정 랭킹 컷이라, 반복문 없이 이 닫힌 식(suspendable - critical) +
+# 랭킹 비교 한 번으로 동일한 결과가 나온다 (문서 예시 두 개로 직접 검증함).
+_DECIDE_ACTIONS_SQL = """
+    WITH bikes AS (
+        -- 재고 정보 없는 대여소(운영 중단 등)면 warning_available_cnt가 null로
+        -- 남아 그 대여소의 Warning 자전거는 비교 조건이 거짓이 되어 자동으로
+        -- 보류 처리된다 (에러로 죽지 않고 안전한 쪽으로 fallback).
+        SELECT
+            r.bike_id, r.risk_score, r.risk_grade, l.last_station_id AS station_id,
+            i.bike_cnt, i.target_bike_cnt
+        FROM risk r
+        JOIN location l ON r.bike_id = l.bike_id
+        LEFT JOIN inventory i ON l.last_station_id = i.station_id
+    ),
+    station_cap AS (
+        SELECT
+            station_id,
+            GREATEST(0, GREATEST(0, bike_cnt - target_bike_cnt)
+                - SUM(CASE WHEN risk_grade = 'Critical' THEN 1 ELSE 0 END)) AS warning_available_cnt
+        FROM bikes
+        GROUP BY station_id, bike_cnt, target_bike_cnt
+    ),
+    ranked AS (
+        SELECT
+            b.bike_id, b.risk_grade,
+            row_number() OVER (PARTITION BY b.station_id ORDER BY b.risk_score DESC) AS warning_rank,
+            sc.warning_available_cnt
+        FROM bikes b
+        LEFT JOIN station_cap sc ON b.station_id = sc.station_id
+    )
+    SELECT
+        CAST(? AS DATE) AS snapshot_date,
+        bike_id,
+        CASE
+            WHEN risk_grade = 'Critical' THEN ?
+            WHEN risk_grade = 'Warning' AND warning_rank <= COALESCE(warning_available_cnt, 0) THEN ?
+            ELSE ?
+        END AS action
+    FROM ranked
+"""
+
+
+def _decide_actions(
+    risk_table: pa.Table, location_table: pa.Table, inventory_table: pa.Table, target_date: date
+) -> pa.Table:
+    conn = duckdb.connect(":memory:")
+    conn.register("risk", risk_table)
+    conn.register("location", location_table)
+    conn.register("inventory", inventory_table)
+    return query_arrow(
+        conn, _DECIDE_ACTIONS_SQL, [target_date.strftime("%Y-%m-%d"), SUSPEND, SUSPEND, HOLD]
+    )
+
+
+def _process_date(catalog, gold_table, target_date: date) -> int:
     date_str = target_date.strftime("%Y-%m-%d")
 
-    risk_df = spark.read.table(_fact_bike_risk_table()).filter(F.col("snapshot_date") == date_str)
-    row_count = risk_df.count()
+    risk_table = catalog.load_table(FACT_BIKE_RISK_TABLE).scan(
+        row_filter=EqualTo("snapshot_date", date_str)
+    ).to_arrow()
+    row_count = len(risk_table)
     if row_count == 0:
         logger.info("%s: fact_bike_risk에 처리할 데이터 없음", date_str)
         return 0
 
-    location_df = spark.read.table(_bike_location_table()).select("bike_id", "last_station_id")
-    inventory_df = spark.read.table(_station_inventory_table()).select(
-        "station_id", "bike_cnt", "target_bike_cnt"
-    )
+    location_table = catalog.load_table(BIKE_LOCATION_TABLE).scan(
+        selected_fields=("bike_id", "last_station_id")
+    ).to_arrow()
+    inventory_table = catalog.load_table(STATION_INVENTORY_TABLE).scan(
+        selected_fields=("station_id", "bike_cnt", "target_bike_cnt")
+    ).to_arrow()
 
-    # inventory_df left join: 재고 정보 없는 대여소(운영 중단 등)면 warning_available_cnt가
-    # null로 남아 그 대여소의 Warning 자전거는 비교 조건이 거짓이 되어 자동으로 보류 처리된다
-    # (에러로 죽지 않고 안전한 쪽으로 fallback).
-    bikes = (
-        risk_df.join(location_df, on="bike_id", how="inner")
-        .withColumnRenamed("last_station_id", "station_id")
-        .join(inventory_df, on="station_id", how="left")
-    )
+    out_table = _decide_actions(risk_table, location_table, inventory_table, target_date)
+    overwrite_partition(gold_table, out_table, PARTITION_COLUMN, date_str)
 
-    # 대여소별 suspendable_bike_cnt(여유분), critical_cnt(즉시 대여중단 확정 수)
-    # 설계 문서엔 "Critical부터 순서대로 잔여량 차감" 식 반복 처리로 설명돼있지만,
-    # Critical은 예산 확인 없이 무조건 대여중단(=항상 critical_cnt만큼만 소진)이고
-    # Warning은 고정 랭킹 컷이라, 반복문 없이 이 닫힌 식(suspendable - critical) +
-    # 랭킹 비교 한 번으로 동일한 결과가 나온다 (문서 예시 두 개로 직접 검증함).
-    station_agg = bikes.groupBy("station_id", "bike_cnt", "target_bike_cnt").agg(
-        F.sum(F.when(F.col("risk_grade") == "Critical", 1).otherwise(0)).alias("critical_cnt")
-    )
-    station_agg = station_agg.withColumn(
-        "suspendable_bike_cnt", F.greatest(F.lit(0), F.col("bike_cnt") - F.col("target_bike_cnt"))
-    ).withColumn(
-        "warning_available_cnt", F.greatest(F.lit(0), F.col("suspendable_bike_cnt") - F.col("critical_cnt"))
-    )
+    written = catalog.load_table(GOLD_TABLE).scan(row_filter=EqualTo("snapshot_date", date_str)).to_arrow()
+    _validate_fact_bike_decision(written, risk_table)  # 실패 시 QualityCheckError -> 배치 중단
 
-    bikes = bikes.join(
-        station_agg.select("station_id", "warning_available_cnt"), on="station_id", how="left"
-    )
-
-    w = Window.partitionBy("station_id").orderBy(F.col("risk_score").desc())
-    bikes = bikes.withColumn("warning_rank", F.row_number().over(w))
-
-    bikes = bikes.withColumn(
-        "action",
-        F.when(F.col("risk_grade") == "Critical", F.lit(SUSPEND))
-        .when(
-            (F.col("risk_grade") == "Warning") & (F.col("warning_rank") <= F.col("warning_available_cnt")),
-            F.lit(SUSPEND),
-        )
-        .otherwise(F.lit(HOLD)),
-    )
-
-    out_df = bikes.select(
-        F.lit(target_date).alias("snapshot_date"), "bike_id", "action"
-    )
-    out_df.writeTo(_gold_table()).overwritePartitions()
-
-    written = spark.read.table(_gold_table()).filter(F.col("snapshot_date") == date_str)
-    _validate_fact_bike_decision(spark, written, risk_df)  # 실패 시 GoldValidationError -> 배치 중단
-
-    suspend_count = out_df.filter(F.col("action") == SUSPEND).count()
+    suspend_count = written["action"].to_pylist().count(SUSPEND)
     logger.info("%s: 자전거 %d대 중 %d대 대여중단 결정", date_str, row_count, suspend_count)
     return row_count
 
 
-def run():
+def run() -> None:
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
-    spark = build_spark_session_with_deequ("gold-build-fact-bike-decision")
+    catalog = build_iceberg_catalog()
+    gold_table = _ensure_fact_bike_decision_table(catalog)
+
+    snapshot_date_str = os.getenv("SNAPSHOT_DATE")
+    target_date = date.fromisoformat(snapshot_date_str) if snapshot_date_str else date.today()
+
     try:
-        _ensure_fact_bike_decision_table(spark)
-
-        snapshot_date_str = os.getenv("SNAPSHOT_DATE")
-        target_date = date.fromisoformat(snapshot_date_str) if snapshot_date_str else date.today()
-
-        try:
-            _process_date(spark, target_date)
-        except GoldValidationError as e:
-            logger.error("%s 처리 실패, 배치 중단: %s", target_date, e)
-            sys.exit(1)
-    finally:
-        stop_spark_session_with_deequ(spark)
+        _process_date(catalog, gold_table, target_date)
+    except QualityCheckError as e:
+        logger.error("%s 처리 실패, 배치 중단: %s", target_date, e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

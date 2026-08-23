@@ -1,15 +1,14 @@
 """
-gold.fact_station_inventory 핵심 로직 테스트
+gold.fact_station_inventory 핵심 로직 테스트 (#170)
 
-Iceberg 테이블을 직접 읽는 부분(빌드 함수들의 spark.read.table 호출)은 카탈로그가
-필요해 여기서는 테스트하지 않는다. 대신 DataFrame만으로 동작하는 순수 함수
-셋(_merge_bike_last_action / _resolve_bike_station / _aggregate_station_inventory)만
-검증한다 - staging/tests와 동일하게 카탈로그 설정 없는 최소 SparkSession을 만든다.
+Iceberg 카탈로그를 직접 읽는 부분은 여기서 테스트하지 않는다. 대신 PyArrow Table만으로
+동작하는 순수 함수 셋(_merge_bike_last_action / _resolve_bike_station /
+_aggregate_station_inventory)만 검증한다 -
+staging/tests/test_transform_silver_rental_history.py와 동일한 DuckDB 기반 패턴.
 """
-from datetime import date, datetime
+from datetime import datetime, timezone
 
-import pytest
-from pyspark.sql import types as T
+import pyarrow as pa
 
 from jobs.build_fact_station_inventory import (
     _aggregate_station_inventory,
@@ -17,106 +16,111 @@ from jobs.build_fact_station_inventory import (
     _resolve_bike_station,
 )
 
-SNAPSHOT_DATE = date(2026, 8, 17)
-
-BIKE_LAST_ACTION_BASELINE_SCHEMA = T.StructType([
-    T.StructField("bike_id", T.StringType()),
-    T.StructField("base_event_type", T.StringType()),
-    T.StructField("base_station_id", T.StringType()),
-    T.StructField("base_at", T.TimestampType()),
-])
-
-BIKE_LAST_ACTION_DELTA_SCHEMA = T.StructType([
-    T.StructField("bike_id", T.StringType()),
-    T.StructField("delta_event_type", T.StringType()),
-    T.StructField("delta_station_id", T.StringType()),
-    T.StructField("delta_at", T.TimestampType()),
-])
-
-BIKE_LOCATION_SCHEMA = T.StructType([
-    T.StructField("bike_id", T.StringType()),
-    T.StructField("last_station_id", T.StringType()),
-    T.StructField("last_event_at", T.TimestampType()),
-])
-
-LATEST_ACTION_SCHEMA = T.StructType([
-    T.StructField("bike_id", T.StringType()),
-    T.StructField("action_event_type", T.StringType()),
-    T.StructField("action_station_id", T.StringType()),
-    T.StructField("action_at", T.TimestampType()),
-])
-
-RESOLVED_SCHEMA = T.StructType([
-    T.StructField("bike_id", T.StringType()),
-    T.StructField("effective_station_id", T.StringType()),
-    T.StructField("excluded", T.BooleanType()),
-])
-
-STATION_ACTIVE_SCHEMA = T.StructType([
-    T.StructField("station_id", T.StringType()),
-    T.StructField("hold_num", T.IntegerType()),
-])
+SNAPSHOT_DATE = "2026-08-17"
 
 
-@pytest.fixture(scope="module")
-def spark():
-    from pyspark.sql import SparkSession
+def utc(*args) -> datetime:
+    return datetime(*args, tzinfo=timezone.utc)
 
-    session = (
-        SparkSession.builder.appName("test-build-fact-station-inventory")
-        .master("local[1]")
-        .config("spark.driver.bindAddress", "127.0.0.1")
-        .config("spark.driver.host", "127.0.0.1")
-        .config("spark.sql.shuffle.partitions", "1")
-        .getOrCreate()
+
+def _table(spec: dict) -> pa.Table:
+    return pa.table(spec)
+
+
+def bike_last_action_baseline(rows: list[tuple]) -> pa.Table:
+    return _table(
+        {
+            "bike_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "base_event_type": pa.array([r[1] for r in rows], type=pa.string()),
+            "base_station_id": pa.array([r[2] for r in rows], type=pa.string()),
+            "base_at": pa.array([r[3] for r in rows], type=pa.timestamp("us", tz="UTC")),
+        }
     )
-    session.sparkContext.setLogLevel("ERROR")
-    yield session
-    session.stop()
 
 
-def by_bike(df, key="bike_id"):
-    return {r[key]: r for r in df.collect()}
+def bike_last_action_delta(rows: list[tuple]) -> pa.Table:
+    return _table(
+        {
+            "bike_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "delta_event_type": pa.array([r[1] for r in rows], type=pa.string()),
+            "delta_station_id": pa.array([r[2] for r in rows], type=pa.string()),
+            "delta_at": pa.array([r[3] for r in rows], type=pa.timestamp("us", tz="UTC")),
+        }
+    )
+
+
+def bike_location(rows: list[tuple]) -> pa.Table:
+    return _table(
+        {
+            "bike_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "last_station_id": pa.array([r[1] for r in rows], type=pa.string()),
+            "last_event_at": pa.array([r[2] for r in rows], type=pa.timestamp("us", tz="UTC")),
+        }
+    )
+
+
+def latest_action(rows: list[tuple]) -> pa.Table:
+    return _table(
+        {
+            "bike_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "action_event_type": pa.array([r[1] for r in rows], type=pa.string()),
+            "action_station_id": pa.array([r[2] for r in rows], type=pa.string()),
+            "action_at": pa.array([r[3] for r in rows], type=pa.timestamp("us", tz="UTC")),
+        }
+    )
+
+
+def resolved(rows: list[tuple]) -> pa.Table:
+    return _table(
+        {
+            "bike_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "effective_station_id": pa.array([r[1] for r in rows], type=pa.string()),
+            "excluded": pa.array([r[2] for r in rows], type=pa.bool_()),
+        }
+    )
+
+
+def station_active(rows: list[tuple]) -> pa.Table:
+    return _table(
+        {
+            "station_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "hold_num": pa.array([r[1] for r in rows], type=pa.int32()),
+        }
+    )
+
+
+def by_key(table: pa.Table, key: str) -> dict:
+    return {r[key]: r for r in table.to_pylist()}
 
 
 # ---------------------------------------------------------- _merge_bike_last_action
 
 
-def test_bike_last_action_delta_wins_when_newer(spark):
-    baseline = spark.createDataFrame(
-        [("B1", "DEPLOY", "ST-1", datetime(2026, 8, 15, 9, 0))], BIKE_LAST_ACTION_BASELINE_SCHEMA
-    )
-    delta = spark.createDataFrame(
-        [("B1", "COLLECT", "ST-2", datetime(2026, 8, 16, 9, 0))], BIKE_LAST_ACTION_DELTA_SCHEMA
-    )
+def test_bike_last_action_delta_wins_when_newer():
+    baseline = bike_last_action_baseline([("B1", "DEPLOY", "ST-1", utc(2026, 8, 15, 9, 0))])
+    delta = bike_last_action_delta([("B1", "COLLECT", "ST-2", utc(2026, 8, 16, 9, 0))])
 
-    result = by_bike(_merge_bike_last_action(baseline, delta, SNAPSHOT_DATE))
+    result = by_key(_merge_bike_last_action(baseline, delta, SNAPSHOT_DATE), "bike_id")
 
     assert result["B1"]["action_event_type"] == "COLLECT"
     assert result["B1"]["action_station_id"] == "ST-2"
 
 
-def test_bike_last_action_baseline_wins_when_delta_not_newer(spark):
-    baseline = spark.createDataFrame(
-        [("B1", "DEPLOY", "ST-1", datetime(2026, 8, 16, 9, 0))], BIKE_LAST_ACTION_BASELINE_SCHEMA
-    )
-    delta = spark.createDataFrame(
-        [("B1", "COLLECT", "ST-2", datetime(2026, 8, 15, 9, 0))], BIKE_LAST_ACTION_DELTA_SCHEMA
-    )
+def test_bike_last_action_baseline_wins_when_delta_not_newer():
+    baseline = bike_last_action_baseline([("B1", "DEPLOY", "ST-1", utc(2026, 8, 16, 9, 0))])
+    delta = bike_last_action_delta([("B1", "COLLECT", "ST-2", utc(2026, 8, 15, 9, 0))])
 
-    result = by_bike(_merge_bike_last_action(baseline, delta, SNAPSHOT_DATE))
+    result = by_key(_merge_bike_last_action(baseline, delta, SNAPSHOT_DATE), "bike_id")
 
     assert result["B1"]["action_event_type"] == "DEPLOY"
     assert result["B1"]["action_station_id"] == "ST-1"
 
 
-def test_bike_last_action_carry_forward_without_delta(spark):
-    baseline = spark.createDataFrame(
-        [("B1", "DEPLOY", "ST-1", datetime(2026, 8, 15, 9, 0))], BIKE_LAST_ACTION_BASELINE_SCHEMA
-    )
-    delta = spark.createDataFrame([], BIKE_LAST_ACTION_DELTA_SCHEMA)
+def test_bike_last_action_carry_forward_without_delta():
+    baseline = bike_last_action_baseline([("B1", "DEPLOY", "ST-1", utc(2026, 8, 15, 9, 0))])
+    delta = bike_last_action_delta([])
 
-    result = by_bike(_merge_bike_last_action(baseline, delta, SNAPSHOT_DATE))
+    result = by_key(_merge_bike_last_action(baseline, delta, SNAPSHOT_DATE), "bike_id")
 
     assert result["B1"]["action_station_id"] == "ST-1"
 
@@ -124,70 +128,52 @@ def test_bike_last_action_carry_forward_without_delta(spark):
 # --------------------------------------------------------------- _resolve_bike_station
 
 
-def test_resolve_uses_bike_location_when_no_action(spark):
-    bike_location = spark.createDataFrame(
-        [("B1", "ST-1", datetime(2026, 8, 15, 9, 0))], BIKE_LOCATION_SCHEMA
-    )
-    latest_action = spark.createDataFrame([], LATEST_ACTION_SCHEMA)
+def test_resolve_uses_bike_location_when_no_action():
+    bl = bike_location([("B1", "ST-1", utc(2026, 8, 15, 9, 0))])
+    la = latest_action([])
 
-    result = by_bike(_resolve_bike_station(bike_location, latest_action))
+    result = by_key(_resolve_bike_station(bl, la), "bike_id")
 
     assert result["B1"]["effective_station_id"] == "ST-1"
     assert result["B1"]["excluded"] is False
 
 
-def test_resolve_uses_bike_location_when_action_is_older(spark):
-    bike_location = spark.createDataFrame(
-        [("B1", "ST-1", datetime(2026, 8, 16, 9, 0))], BIKE_LOCATION_SCHEMA
-    )
-    latest_action = spark.createDataFrame(
-        [("B1", "COLLECT", None, datetime(2026, 8, 15, 9, 0))], LATEST_ACTION_SCHEMA
-    )
+def test_resolve_uses_bike_location_when_action_is_older():
+    bl = bike_location([("B1", "ST-1", utc(2026, 8, 16, 9, 0))])
+    la = latest_action([("B1", "COLLECT", None, utc(2026, 8, 15, 9, 0))])
 
-    result = by_bike(_resolve_bike_station(bike_location, latest_action))
+    result = by_key(_resolve_bike_station(bl, la), "bike_id")
 
     assert result["B1"]["effective_station_id"] == "ST-1"
     assert result["B1"]["excluded"] is False
 
 
-def test_resolve_newest_collect_excludes_bike(spark):
-    bike_location = spark.createDataFrame(
-        [("B1", "ST-1", datetime(2026, 8, 15, 9, 0))], BIKE_LOCATION_SCHEMA
-    )
-    latest_action = spark.createDataFrame(
-        [("B1", "COLLECT", None, datetime(2026, 8, 16, 9, 0))], LATEST_ACTION_SCHEMA
-    )
+def test_resolve_newest_collect_excludes_bike():
+    bl = bike_location([("B1", "ST-1", utc(2026, 8, 15, 9, 0))])
+    la = latest_action([("B1", "COLLECT", None, utc(2026, 8, 16, 9, 0))])
 
-    result = by_bike(_resolve_bike_station(bike_location, latest_action))
+    result = by_key(_resolve_bike_station(bl, la), "bike_id")
 
     assert result["B1"]["effective_station_id"] is None
     assert result["B1"]["excluded"] is True
 
 
-def test_resolve_newest_deploy_overwrites_station(spark):
-    bike_location = spark.createDataFrame(
-        [("B1", "ST-1", datetime(2026, 8, 15, 9, 0))], BIKE_LOCATION_SCHEMA
-    )
-    latest_action = spark.createDataFrame(
-        [("B1", "DEPLOY", "ST-9", datetime(2026, 8, 16, 9, 0))], LATEST_ACTION_SCHEMA
-    )
+def test_resolve_newest_deploy_overwrites_station():
+    bl = bike_location([("B1", "ST-1", utc(2026, 8, 15, 9, 0))])
+    la = latest_action([("B1", "DEPLOY", "ST-9", utc(2026, 8, 16, 9, 0))])
 
-    result = by_bike(_resolve_bike_station(bike_location, latest_action))
+    result = by_key(_resolve_bike_station(bl, la), "bike_id")
 
     assert result["B1"]["effective_station_id"] == "ST-9"
     assert result["B1"]["excluded"] is False
 
 
-def test_resolve_deploy_without_station_falls_back_to_bike_location(spark):
+def test_resolve_deploy_without_station_falls_back_to_bike_location():
     """DEPLOY인데 station_id가 없는 이례적 케이스 - bike_location 값으로 폴백."""
-    bike_location = spark.createDataFrame(
-        [("B1", "ST-1", datetime(2026, 8, 15, 9, 0))], BIKE_LOCATION_SCHEMA
-    )
-    latest_action = spark.createDataFrame(
-        [("B1", "DEPLOY", None, datetime(2026, 8, 16, 9, 0))], LATEST_ACTION_SCHEMA
-    )
+    bl = bike_location([("B1", "ST-1", utc(2026, 8, 15, 9, 0))])
+    la = latest_action([("B1", "DEPLOY", None, utc(2026, 8, 16, 9, 0))])
 
-    result = by_bike(_resolve_bike_station(bike_location, latest_action))
+    result = by_key(_resolve_bike_station(bl, la), "bike_id")
 
     assert result["B1"]["effective_station_id"] == "ST-1"
     assert result["B1"]["excluded"] is False
@@ -196,37 +182,36 @@ def test_resolve_deploy_without_station_falls_back_to_bike_location(spark):
 # --------------------------------------------------------- _aggregate_station_inventory
 
 
-def test_aggregate_station_with_no_bikes_gets_zero(spark):
-    resolved = spark.createDataFrame([], RESOLVED_SCHEMA)
-    station_active = spark.createDataFrame([("ST-1", 10)], STATION_ACTIVE_SCHEMA)
+def test_aggregate_station_with_no_bikes_gets_zero():
+    res = resolved([])
+    sa = station_active([("ST-1", 10)])
 
-    result = by_bike(_aggregate_station_inventory(resolved, station_active, SNAPSHOT_DATE), key="station_id")
+    result = by_key(_aggregate_station_inventory(res, sa, SNAPSHOT_DATE), "station_id")
 
     assert result["ST-1"]["bike_cnt"] == 0
     assert result["ST-1"]["target_bike_cnt"] == 10
 
 
-def test_aggregate_counts_only_non_excluded_bikes_with_station(spark):
-    resolved = spark.createDataFrame(
+def test_aggregate_counts_only_non_excluded_bikes_with_station():
+    res = resolved(
         [
             ("B1", "ST-1", False),
             ("B2", "ST-1", False),
             ("B3", "ST-1", True),  # excluded(COLLECT) - 집계 제외
             ("B4", None, False),  # 대여소 없음(노상 방치) - 집계 제외
-        ],
-        RESOLVED_SCHEMA,
+        ]
     )
-    station_active = spark.createDataFrame([("ST-1", 10)], STATION_ACTIVE_SCHEMA)
+    sa = station_active([("ST-1", 10)])
 
-    result = by_bike(_aggregate_station_inventory(resolved, station_active, SNAPSHOT_DATE), key="station_id")
+    result = by_key(_aggregate_station_inventory(res, sa, SNAPSHOT_DATE), "station_id")
 
     assert result["ST-1"]["bike_cnt"] == 2
 
 
-def test_aggregate_snapshot_date_is_set(spark):
-    resolved = spark.createDataFrame([], RESOLVED_SCHEMA)
-    station_active = spark.createDataFrame([("ST-1", 10)], STATION_ACTIVE_SCHEMA)
+def test_aggregate_snapshot_date_is_set():
+    res = resolved([])
+    sa = station_active([("ST-1", 10)])
 
-    result = by_bike(_aggregate_station_inventory(resolved, station_active, SNAPSHOT_DATE), key="station_id")
+    result = by_key(_aggregate_station_inventory(res, sa, SNAPSHOT_DATE), "station_id")
 
-    assert result["ST-1"]["snapshot_date"] == SNAPSHOT_DATE
+    assert result["ST-1"]["snapshot_date"].isoformat() == SNAPSHOT_DATE

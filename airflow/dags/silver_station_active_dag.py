@@ -23,8 +23,9 @@ bronze_daily_batch_all_sources DAG의 daily_batch_station_active 태스크가 �
 이 DAG는 그 갱신을 스케줄 트리거로 사용한다.
 
 ### PYTHONPATH
-staging/에는 자체 common/이 없어 ingestion/common/(spark_session)을 재사용하고,
-config는 레포 최상위 config 패키지를 쓴다(/opt/airflow/pylib/config로 마운트됨).
+staging/에는 자체 common/이 없어 ingestion/common/(iceberg_catalog, iceberg_io 등)을
+재사용하고, config는 레포 최상위 config 패키지를 쓴다(/opt/airflow/pylib/config로
+마운트됨).
 """
 from datetime import timedelta
 
@@ -36,7 +37,7 @@ from dag_assets import STATION_ACTIVE_BRONZE
 from dag_common import DEFAULT_ARGS, SILVER_POOL
 
 PYLIB_DIR = "/opt/airflow/pylib"          # config 패키지 (docker-compose가 ./config를 마운트)
-INGESTION_DIR = "/opt/airflow/ingestion"  # common/(spark_session), .env 출처
+INGESTION_DIR = "/opt/airflow/ingestion"  # common/(iceberg_catalog, iceberg_io 등), .env 출처
 STAGING_DIR = "/opt/airflow/staging"      # 잡 실행 위치
 PYTHON_BIN = "python"
 
