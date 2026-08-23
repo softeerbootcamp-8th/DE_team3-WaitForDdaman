@@ -20,6 +20,11 @@ resource "aws_db_instance" "iceberg_catalog" {
   engine_version = "16.14"
   instance_class = "db.t4g.micro"
 
+  # RDS가 마이너 버전을 자동으로 16.14보다 올리면 Terraform이 매번 16.14로
+  # 되돌리려 드는 드리프트가 생긴다 - 버전을 명시적으로 고정한 만큼 자동 업그레이드도
+  # 끈다(실측: 리뷰에서 발견, 2026-08-23).
+  auto_minor_version_upgrade = false
+
   db_name  = "iceberg_catalog"
   username = var.iceberg_catalog_master_username
   password = var.iceberg_catalog_master_password
@@ -34,16 +39,30 @@ resource "aws_db_instance" "iceberg_catalog" {
   vpc_security_group_ids  = [var.iceberg_catalog_sg_id]
   backup_retention_period = 7
 
-  skip_final_snapshot       = false
+  # prod의 유일한 Iceberg 카탈로그 저장소가 되므로(컷오버 후) 실수로 지워지면
+  # 전체 warehouse의 테이블 포인터를 잃는다 - 삭제 보호를 켠다(실측: 리뷰에서
+  # 발견, 2026-08-23).
+  deletion_protection = true
+
+  skip_final_snapshot = false
+  # 스냅샷 식별자가 고정값이라, destroy -> 재생성 -> 또 destroy를 반복하면 두 번째
+  # destroy에서 "이미 존재하는 스냅샷 이름"으로 실패해 destroy가 중간에 멈춘다.
+  # deletion_protection=true라 애초에 destroy 자체가 의도적 2단계 조작이 되므로
+  # 이 리스크는 낮지만, 실제로 재파괴가 필요해지면 이 값을 수동으로 바꾸거나
+  # 기존 스냅샷을 먼저 지워야 한다.
   final_snapshot_identifier = "iceberg-catalog-final-snapshot"
 }
 
 # ---- Secrets Manager: EMR job이 런타임에 읽는 자격증명 ----
 # JSON 키는 infra/lambdas/serving_sync/app/_secrets.py의 _SECRET_ENV_KEYS 관례와
 # 동일 - 나중에(다음 이슈) EMR StartJobRun 트리거 쪽에서 같은 로더 패턴을 재사용
-#할 수 있게 맞춘다.
+# 할 수 있게 맞춘다.
 resource "aws_secretsmanager_secret" "iceberg_catalog" {
   name = "iceberg-catalog-jdbc-credentials"
+  # 기본 30일 소프트 삭제 대기 때문에 destroy 후 짧은 시간 안에 재생성하면 이름
+  # 충돌로 실패한다 - 7일로 줄여 재현/반복 작업을 덜 번거롭게 한다(실측: 리뷰에서
+  # 발견, 2026-08-23).
+  recovery_window_in_days = 7
 }
 
 resource "aws_secretsmanager_secret_version" "iceberg_catalog" {
@@ -54,9 +73,12 @@ resource "aws_secretsmanager_secret_version" "iceberg_catalog" {
   })
 }
 
-# ---- 보안그룹: EMR Serverless 워커 -> iceberg_catalog RDS ----
-# 인바운드 불필요(워커는 outbound만 발생). 아웃바운드도 전체 허용이 아니라
-# iceberg-catalog-sg로 5432만 좁힌다.
+# ---- 보안그룹: EMR Serverless 워커 -> iceberg_catalog RDS + AWS API ----
+# 인바운드 불필요(워커는 outbound만 발생). RDS(5432)는 iceberg-catalog-sg로만
+# 좁히지만, 443(S3/Secrets Manager/CloudWatch Logs)은 이 리포에 그 서비스들의
+# 인터페이스 VPC 엔드포인트가 없어(S3는 Gateway 엔드포인트뿐 - serving_sync.tf
+# 참고) 전체 허용해야 한다 - 안 그러면 실행 Role의 S3/Secrets/Logs 권한이 전부
+# 무용지물이 된다(실측: 리뷰에서 발견, 2026-08-23).
 resource "aws_security_group" "emr_serverless_worker" {
   name = "emr-serverless-worker-sg"
   # 한글 원문: "EMR Serverless 워커 아웃바운드 전용 보안그룹 (인바운드 불필요)"
@@ -70,6 +92,15 @@ resource "aws_security_group" "emr_serverless_worker" {
     to_port         = 5432
     protocol        = "tcp"
     security_groups = [var.iceberg_catalog_sg_id]
+  }
+
+  egress {
+    # 한글 원문: "S3/Secrets Manager/CloudWatch Logs 접근용 HTTPS 아웃바운드 허용 (인터페이스 VPC 엔드포인트 없음)"
+    description = "Allow HTTPS outbound for S3/Secrets Manager/CloudWatch Logs (no interface VPC endpoints)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 }
 
@@ -86,6 +117,21 @@ resource "aws_security_group_rule" "iceberg_catalog_allow_emr_serverless" {
   source_security_group_id = aws_security_group.emr_serverless_worker.id
   # 한글 원문: "EMR Serverless 워커의 iceberg_catalog RDS 접근 허용"
   description = "Allow iceberg_catalog RDS access from EMR Serverless workers"
+}
+
+# prod의 Iceberg JDBC 카탈로그가 이 인스턴스로 옮기면(.env.prod 컷오버), 이미
+# 같은 카탈로그를 쓰는 serving_sync Lambda(#172, serving_sync.tf)도 이 RDS에
+# 붙어야 한다 - 안 해두면 컷오버 시점에 serving_sync가 카탈로그 접근을 잃는다
+# (실측: 리뷰에서 발견, 2026-08-23).
+resource "aws_security_group_rule" "iceberg_catalog_allow_serving_sync" {
+  type                     = "ingress"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  security_group_id        = var.iceberg_catalog_sg_id
+  source_security_group_id = aws_security_group.serving_sync_lambda_sg.id
+  # 한글 원문: "serving_sync Lambda의 iceberg_catalog RDS 접근 허용 (카탈로그 컷오버 대비)"
+  description = "Allow iceberg_catalog RDS access from serving_sync Lambda"
 }
 
 # ---- (수동 절차, 이 리포에서 실행 안 함) 콘솔에서 잘못 들어간 CIDR 규칙 제거 ----
@@ -120,8 +166,11 @@ locals {
 }
 
 # EMR Serverless 서비스가 이 리포에서 이미지를 pull할 수 있게 허용 (AWS 공식
-# 커스텀 이미지 가이드의 리포지토리 정책 - aws:SourceArn으로 이 Application으로만
-# 범위를 좁힌다).
+# 커스텀 이미지 가이드의 리포지토리 정책). aws_emrserverless_application의 ARN을
+# 직접 참조하면 apply 순서가 "리포 -> Application(이미지 검증 위해 정책 필요) ->
+# 정책"으로 역전되어 최초 apply가 실패한다(실측: 리뷰에서 발견, 2026-08-23) -
+# 그래서 이 계정의 EMR Serverless application 전체로 범위를 넓혀 그 순환을 끊는다
+# (여전히 confused-deputy 방지 목적은 유지 - 다른 계정/서비스는 pull 불가).
 data "aws_iam_policy_document" "emr_spark_ecr_policy_doc" {
   statement {
     sid    = "EmrServerlessCustomImageSupport"
@@ -138,7 +187,7 @@ data "aws_iam_policy_document" "emr_spark_ecr_policy_doc" {
     condition {
       test     = "ArnLike"
       variable = "aws:SourceArn"
-      values   = [aws_emrserverless_application.emr_spark.arn]
+      values   = ["arn:aws:emr-serverless:${var.aws_region}:${data.aws_caller_identity.current.account_id}:/applications/*"]
     }
   }
 }
@@ -178,9 +227,20 @@ resource "aws_iam_role" "emr_spark_execution_role" {
 # 이 리포에 Glue 사용 흔적이 없음(기존 조사로 확인됨).
 data "aws_iam_policy_document" "emr_spark_execution_policy_doc" {
   statement {
-    sid     = "S3RawWarehouseAccess"
-    effect  = "Allow"
-    actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+    sid    = "S3RawWarehouseAccess"
+    effect = "Allow"
+    # AbortMultipartUpload/ListBucketMultipartUploads/GetBucketLocation 추가 -
+    # S3A/Iceberg의 Parquet 멀티파트 업로드·정리 경로에 필요함(실측: 리뷰에서
+    # 발견, 2026-08-23). 나머지는 원래 있던 조회/쓰기/삭제 권한.
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject",
+      "s3:ListBucket",
+      "s3:AbortMultipartUpload",
+      "s3:ListBucketMultipartUploads",
+      "s3:GetBucketLocation",
+    ]
     resources = [
       "arn:aws:s3:::${var.raw_bucket}",
       "arn:aws:s3:::${var.raw_bucket}/*",
@@ -197,6 +257,10 @@ data "aws_iam_policy_document" "emr_spark_execution_policy_doc" {
   }
 
   # EMR Serverless 전용 관리형 정책이 없어 CloudWatch Logs 권한을 직접 부여한다.
+  # 로그 그룹 경로 2개를 모두 허용 - EMR Serverless 기본 관리형 로그 그룹은
+  # /aws/emr-serverless이고, 다음 이슈(StartJobRun)에서 monitoringConfiguration으로
+  # /emr-serverless/* 아래에 직접 지정할 수도 있어 둘 다 열어둔다(실측: 리뷰에서
+  # 발견, 2026-08-23 - 로그 그룹 이름이 안 맞으면 조용히 로그가 사라짐).
   statement {
     sid    = "CloudWatchLogs"
     effect = "Allow"
@@ -205,7 +269,10 @@ data "aws_iam_policy_document" "emr_spark_execution_policy_doc" {
       "logs:CreateLogStream",
       "logs:PutLogEvents",
     ]
-    resources = ["arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/emr-serverless/*"]
+    resources = [
+      "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/emr-serverless/*",
+      "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/emr-serverless*",
+    ]
   }
 }
 
