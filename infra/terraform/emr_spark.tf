@@ -108,3 +108,113 @@ resource "aws_security_group_rule" "iceberg_catalog_allow_emr_serverless" {
 #   3. 위 스텁 리소스 블록을 코드에서 삭제하고 terraform apply
 #      (state에는 남아있다가 "코드에 없음"으로 판정되어 destroy됨 - SG의 다른
 #      규칙이나 SG 자체는 전혀 안 건드림)
+
+# ---- ECR: prod Spark 커스텀 이미지 (spark/Dockerfile.prod push 대상) ----
+resource "aws_ecr_repository" "emr_spark" {
+  name                 = "emr-spark-prod"
+  image_tag_mutability = "MUTABLE"
+}
+
+locals {
+  emr_spark_image_uri = "${aws_ecr_repository.emr_spark.repository_url}:${var.emr_spark_image_tag}"
+}
+
+# EMR Serverless 서비스가 이 리포에서 이미지를 pull할 수 있게 허용 (AWS 공식
+# 커스텀 이미지 가이드의 리포지토리 정책 - aws:SourceArn으로 이 Application으로만
+# 범위를 좁힌다).
+data "aws_iam_policy_document" "emr_spark_ecr_policy_doc" {
+  statement {
+    sid    = "EmrServerlessCustomImageSupport"
+    effect = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["emr-serverless.amazonaws.com"]
+    }
+    actions = [
+      "ecr:BatchGetImage",
+      "ecr:DescribeImages",
+      "ecr:GetDownloadUrlForLayer",
+    ]
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = [aws_emrserverless_application.emr_spark.arn]
+    }
+  }
+}
+
+resource "aws_ecr_repository_policy" "emr_spark" {
+  repository = aws_ecr_repository.emr_spark.name
+  policy     = data.aws_iam_policy_document.emr_spark_ecr_policy_doc.json
+}
+
+# ---- IAM: EMR Serverless job 실행 Role ----
+# 트러스트 정책은 AWS 공식 가이드 패턴 그대로 (Principal=emr-serverless.amazonaws.com,
+# aws:SourceAccount 조건).
+data "aws_caller_identity" "current" {}
+
+data "aws_iam_policy_document" "emr_spark_assume_role" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["emr-serverless.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+}
+
+resource "aws_iam_role" "emr_spark_execution_role" {
+  name               = "emr-spark-execution-role"
+  assume_role_policy = data.aws_iam_policy_document.emr_spark_assume_role.json
+}
+
+# Glue 권한은 넣지 않는다 - jdbc 카탈로그만 쓰고(ICEBERG_CATALOG_TYPE=jdbc),
+# 이 리포에 Glue 사용 흔적이 없음(기존 조사로 확인됨).
+data "aws_iam_policy_document" "emr_spark_execution_policy_doc" {
+  statement {
+    sid     = "S3RawWarehouseAccess"
+    effect  = "Allow"
+    actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+    resources = [
+      "arn:aws:s3:::${var.raw_bucket}",
+      "arn:aws:s3:::${var.raw_bucket}/*",
+      "arn:aws:s3:::${var.warehouse_bucket}",
+      "arn:aws:s3:::${var.warehouse_bucket}/*",
+    ]
+  }
+
+  statement {
+    sid       = "IcebergCatalogSecretAccess"
+    effect    = "Allow"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [aws_secretsmanager_secret.iceberg_catalog.arn]
+  }
+
+  # EMR Serverless 전용 관리형 정책이 없어 CloudWatch Logs 권한을 직접 부여한다.
+  statement {
+    sid    = "CloudWatchLogs"
+    effect = "Allow"
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+    ]
+    resources = ["arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/emr-serverless/*"]
+  }
+}
+
+resource "aws_iam_policy" "emr_spark_execution_policy" {
+  name   = "emr-spark-execution-policy"
+  policy = data.aws_iam_policy_document.emr_spark_execution_policy_doc.json
+}
+
+resource "aws_iam_role_policy_attachment" "emr_spark_execution_attach" {
+  role       = aws_iam_role.emr_spark_execution_role.name
+  policy_arn = aws_iam_policy.emr_spark_execution_policy.arn
+}
