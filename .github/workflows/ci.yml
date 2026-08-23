@@ -134,7 +134,7 @@ jobs:
           (cd staging && PYTHONPATH="$ROOT:$ROOT/ingestion:$ROOT/staging" pytest tests -q)
           echo "::endgroup::"
 
-          for mod in bikeman_event_generator serving_sync collection_priority; do
+          for mod in bikeman_event_generator serving_sync collection_priority risk_model; do
             echo "::group::pipeline/$mod"
             (cd "pipeline/$mod" && PYTHONPATH="$ROOT/pipeline/$mod:$ROOT/pipeline/$mod/jobs:$ROOT:$ROOT/ingestion" pytest tests -q)
             echo "::endgroup::"
