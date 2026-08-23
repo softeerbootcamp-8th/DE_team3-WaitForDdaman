@@ -120,7 +120,9 @@ def test_rental_history_asset_is_published_only_by_the_publish_task(dag):
     }
 
     assert producers == {f"{GROUP}.publish_bronze_asset"}
-    assert _task(dag, f"{GROUP}.publish_bronze_asset").task_type == "EmptyOperator"
+    # #137: promotion metadata를 Asset event에 실어 보내야 해서 EmptyOperator에서
+    # TaskFlow PythonOperator로 바뀌었다.
+    assert _task(dag, f"{GROUP}.publish_bronze_asset").task_type == "_PythonDecoratedOperator"
 
 
 def test_other_bronze_sources_stay_independent_of_the_rental_group(dag):
