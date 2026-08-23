@@ -6,18 +6,22 @@ FROM public.ecr.aws/emr-serverless/spark/emr-7.2.0:latest
 
 USER root
 
-# Iceberg / Hadoop-AWS / JDBC 카탈로그 드라이버 jar.
+# JDBC 카탈로그 드라이버 jar (Postgres).
 # EMR Serverless 워커는 런타임에 인터넷이 없어 spark.jars.packages(Maven 런타임
 # 다운로드, ingestion/common/spark_session.py의 로컬/EC2 실행 방식)를 그대로 못
 # 쓴다. 빌드 시점(이 이미지를 만드는 CI/로컬 머신)엔 인터넷이 있으므로 여기서
-# 미리 받아 $SPARK_HOME/jars/에 넣는다. 버전은 spark_session.py와 동일하게 고정.
-RUN curl -fsSL -o "$SPARK_HOME/jars/iceberg-spark-runtime-3.5_2.12-1.5.2.jar" \
-      "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.5.2/iceberg-spark-runtime-3.5_2.12-1.5.2.jar" \
- && curl -fsSL -o "$SPARK_HOME/jars/iceberg-aws-bundle-1.5.2.jar" \
-      "https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-aws-bundle/1.5.2/iceberg-aws-bundle-1.5.2.jar" \
- && curl -fsSL -o "$SPARK_HOME/jars/hadoop-aws-3.3.4.jar" \
-      "https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar" \
- && curl -fsSL -o "$SPARK_HOME/jars/postgresql-42.7.3.jar" \
+# 미리 받아 $SPARK_HOME/jars/에 넣는다.
+#
+# Iceberg / Hadoop-AWS는 여기서 굽지 않는다. 베이스 이미지의
+# spark-defaults.conf가 spark.driver/executor.extraClassPath에
+# /usr/share/aws/iceberg/lib/iceberg-spark3-runtime.jar,
+# /usr/lib/hadoop/hadoop-aws.jar을 이미 올려두고, extraClassPath는
+# $SPARK_HOME/jars보다 앞선다 - 즉 우리가 구워도 실제 로딩되는 건 항상 EMR
+# 자체 빌드다(실측 확인). 같은 런타임 jar를 중복으로 올리면
+# spark.driver.userClassPathFirst 등으로 우선순위가 바뀌는 순간 버전 충돌만
+# 생기므로 굽지 않는 게 맞다. Postgres JDBC 드라이버만 베이스 이미지에 없어
+# 실제로 이 baked-in 사본이 클래스를 공급한다.
+RUN curl -fsSL -o "$SPARK_HOME/jars/postgresql-42.7.3.jar" \
       "https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.3/postgresql-42.7.3.jar"
 
 # 앱 코드. 로컬/Airflow 실행(airflow/dags/gold_risk_decision_dag.py의 _bash())과
@@ -39,7 +43,8 @@ RUN pip3 install --no-cache-dir -r /opt/app/requirements-emr.txt
 #   /opt/app/pipeline/risk_model  -> jobs.*
 ENV PYTHONPATH="/opt/app:/opt/app/ingestion:/opt/app/pipeline/risk_model"
 
-# jar를 위에서 이미 $SPARK_HOME/jars에 baked-in했으므로, spark_session.py가
+# 필요한 jar가 전부 이미 클래스패스에 있으므로(Iceberg/Hadoop-AWS는 베이스
+# 이미지의 extraClassPath, Postgres JDBC는 위 baked-in 사본), spark_session.py가
 # spark.jars.packages(Ivy 런타임 다운로드)를 설정하지 않도록 끈다.
 ENV SPARK_JARS_ALREADY_BAKED="true"
 
