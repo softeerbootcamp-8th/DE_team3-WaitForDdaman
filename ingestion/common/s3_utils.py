@@ -78,6 +78,23 @@ def upload_file(local_path: Path, bucket: str, key: str) -> None:
     logger.info("업로드 완료: %s -> s3://%s/%s", local_path, bucket, key)
 
 
+def download_file(bucket: str, key: str, local_path: Path) -> None:
+    s3 = get_s3_client()
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    s3.download_file(bucket, key, str(local_path))
+    logger.info("다운로드 완료: s3://%s/%s -> %s", bucket, key, local_path)
+
+
+def split_s3_uri(uri: str) -> tuple[str, str]:
+    if not uri.startswith("s3://"):
+        raise ValueError(f"S3 URI가 아닙니다: {uri}")
+    rest = uri[len("s3://"):]
+    bucket, _, key = rest.partition("/")
+    if not bucket or not key:
+        raise ValueError(f"S3 URI 형식이 올바르지 않습니다: {uri}")
+    return bucket, key
+
+
 def put_json(bucket: str, key: str, payload: Any) -> None:
     s3 = get_s3_client()
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")

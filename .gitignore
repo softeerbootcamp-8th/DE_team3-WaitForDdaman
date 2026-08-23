@@ -82,3 +82,6 @@ Thumbs.db
 *.ini
 
 node_modules/
+
+# Claude superpowers 작업물 (스펙/리뷰/진행상황 등, 커밋 금지)
+.superpowers/

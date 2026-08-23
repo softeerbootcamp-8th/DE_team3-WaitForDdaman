@@ -10,12 +10,13 @@
   · 포인터   : XCom 에는 경로와 지표 요약만. 데이터프레임은 절대 안 넘긴다.
   · 설정분리 : 임계값·경로·하이퍼파라미터 전부 config/risk_model.yaml.
 
-EMR 전환 시 바뀌는 곳은 build_train_samples 태스크 하나다
-(pipeline/train_risk_model/samples.py 의 main() 을 그대로 spark-submit).
+APP_ENV=aws 에서는 build_train_samples 태스크가 EMR Serverless StartJobRun으로
+pipeline/train_risk_model/samples.py 의 main() 을 spark-submit 엔트리포인트로 실행한다.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import timedelta
@@ -55,7 +56,7 @@ except ImportError:  # 2.x 호환
     from airflow.decorators import dag, task
     from airflow.models.param import Param
 
-from dag_common import notify_slack_on_failure
+from dag_common import notify_slack_on_failure, run_emr_serverless_spark_job
 
 
 def _params() -> dict:
@@ -182,10 +183,43 @@ def risk_model_train():
     @task(retries=0)  # Spark job 은 재시도보다 로그 확인이 먼저다
     def build_train_samples(plan: dict, _gate: dict) -> dict:
         """앵커별 피처+라벨을 gold.fact_bike_train_sample 파티션에 dynamic overwrite."""
-        from pipeline.train_risk_model.samples import get_spark, write_samples
         from pipeline.train_risk_model.settings import load_config
 
         cfg = load_config()
+        app_env = os.getenv("APP_ENV", "local")
+
+        if app_env == "aws":
+            emr_plan = {k: v for k, v in plan.items() if k != "source_probe"}
+            run_emr_serverless_spark_job(
+                entry_point="local:///opt/app/pipeline/train_risk_model/samples.py",
+                entry_point_arguments=[
+                    "--anchor-plan-json",
+                    json.dumps(emr_plan, ensure_ascii=False, separators=(",", ":")),
+                ],
+                name=f"risk-model-build-samples-{plan['run_key']}",
+                log_group_name="/emr-serverless/risk-model-train",
+                log_stream_name_prefix=plan["run_key"],
+                tags={
+                    "dag_id": "risk_model_train",
+                    "task_id": "build_train_samples",
+                    "run_key": plan["run_key"],
+                },
+            )
+
+            stats = {
+                "train_anchors": len(plan["train_anchors"]),
+                "holdout_anchors": len(plan["holdout_anchors"]),
+                "sample_path": cfg.get_path("paths.train_sample"),
+                "pos_new_path": cfg.get_path("paths.label_pos_new"),
+            }
+            print(f"샘플 적재 완료(EMR Serverless): {stats}")
+            return stats
+
+        if app_env != "local":
+            raise ValueError(f"지원하지 않는 APP_ENV={app_env!r} 입니다. local 또는 aws만 허용합니다.")
+
+        from pipeline.train_risk_model.samples import get_spark, write_samples
+
         spark = get_spark(cfg, f"risk-model-samples-{plan['run_key']}")
         try:
             stats = write_samples(spark, cfg, plan)

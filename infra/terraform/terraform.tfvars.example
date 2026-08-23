@@ -53,3 +53,15 @@ airflow_worker_role_name = "REPLACE_ME"
 # Slack 알림 (notify_slack Lambda, Issue #180) - 비워두면(기본값) 관련 리소스가
 # 전부 생성되지 않는다. 값을 채우면 raw_fetch_alerts SNS 알람이 이 채널로 전달된다.
 # slack_webhook_url = "https://hooks.slack.com/services/XXXXXXXXX/XXXXXXXXX/XXXXXXXXXXXXXXXXXXXXXXXX"
+
+# ---- EMR Serverless prod Spark 인프라 (#183) ----
+
+# iceberg-catalog-sg(콘솔에서 이미 생성됨)의 보안그룹 ID
+iceberg_catalog_sg_id = "sg-0ff85e9c8d00a6c6b"
+
+# iceberg_catalog RDS 마스터 비밀번호 - 반드시 실제 값으로 채울 것 (커밋 금지)
+iceberg_catalog_master_password = "REPLACE_ME"
+
+# iceberg_catalog_db_subnet_group_name = "waitforddaman-subnet"
+# iceberg_catalog_master_username      = "iceberg_admin"
+# emr_spark_image_tag                  = "latest"
