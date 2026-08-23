@@ -4,6 +4,7 @@
 
 BRONZE_RENTAL_HISTORY = "_meta/watermark/rental_history.json"
 BRONZE_FAILURE_REPORT = "_meta/watermark/failure_report.json"
+BIKEMAN_EVENT = "_meta/watermark/bikeman_event.json"
 SILVER_RENTAL_HISTORY = "_meta/watermark/silver_rental_history.json"
 SILVER_FAILURE_REPORT = "_meta/watermark/silver_failure_report.json"
 SILVER_BIKEMAN_ACTION = "_meta/watermark/silver_bikeman_action.json"

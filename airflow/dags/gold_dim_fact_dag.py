@@ -109,6 +109,8 @@ from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOpe
 from airflow.providers.standard.sensors.python import PythonSensor
 from airflow.sdk import dag
 
+from dag_common import notify_slack_on_failure
+
 INGESTION_DIR = "/opt/airflow/ingestion"
 COLLECTION_PRIORITY_DIR = "/opt/airflow/pipeline/collection_priority"
 PYTHON = "python"
@@ -156,6 +158,7 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=30),
+    "on_failure_callback": notify_slack_on_failure,
 }
 
 

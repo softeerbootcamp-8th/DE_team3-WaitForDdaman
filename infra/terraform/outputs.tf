@@ -48,3 +48,11 @@ output "serving_sync_dlq_arn" {
   description = "ARN of serving_sync Dead Letter Queue (SQS)"
   value       = aws_sqs_queue.serving_sync_dlq.arn
 }
+
+output "notify_slack_lambda_arn" {
+  description = "ARN of notify_slack Lambda (null when slack_webhook_url is not set)"
+  # local.slack_notifications_enabled는 sensitive 변수(slack_webhook_url)에서 파생돼
+  # 조건식에 쓰면 이 output 전체가 sensitive로 오염된다 (terraform validate 확인).
+  # 대신 count로 실제로 생성된 리소스 개수를 봐서 오염을 피한다.
+  value = length(aws_lambda_function.notify_slack) > 0 ? aws_lambda_function.notify_slack[0].arn : null
+}

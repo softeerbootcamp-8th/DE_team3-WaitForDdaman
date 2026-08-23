@@ -55,6 +55,9 @@ except ImportError:  # 2.x 호환
     from airflow.decorators import dag, task
     from airflow.models.param import Param
 
+from dag_common import notify_slack_on_failure
+
+
 def _params() -> dict:
     """TaskFlow 안에서 DAG params 를 읽는다."""
     try:
@@ -70,6 +73,7 @@ DEFAULT_ARGS = {
     "retry_delay": timedelta(minutes=2),
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=10),
+    "on_failure_callback": notify_slack_on_failure,
 }
 
 

@@ -24,6 +24,8 @@ import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag
 
+from dag_common import notify_slack_on_failure
+
 COLLECTION_PRIORITY_DIR = "/opt/airflow/pipeline/collection_priority"
 INGESTION_DIR = "/opt/airflow/ingestion"
 PYTHON = "python"
@@ -31,6 +33,7 @@ PYTHON = "python"
 default_args = {
     "retries": 1,
     "retry_delay": timedelta(minutes=10),
+    "on_failure_callback": notify_slack_on_failure,
 }
 
 
