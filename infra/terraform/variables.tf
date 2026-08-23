@@ -1,5 +1,5 @@
 variable "aws_region" {
-  description = "AWS region for deployment"
+  description = "AWS region for deployment (config.SETTINGS.s3_region과 동일해야 함)"
   type        = string
   default     = "ap-northeast-2"
 }
@@ -11,7 +11,7 @@ variable "app_env" {
 }
 
 variable "raw_bucket" {
-  description = "S3 bucket name for raw layer storage"
+  description = "S3 bucket name for raw layer storage (config.SETTINGS.raw_bucket과 동일해야 함)"
   type        = string
   default     = "ttareungyi-raw"
 }
@@ -23,7 +23,7 @@ variable "seoul_api_key" {
 }
 
 variable "seoul_api_base_url" {
-  description = "Base URL for Seoul Open Data Plaza API"
+  description = "Base URL for Seoul Open Data Plaza API (config.SETTINGS.seoul_api_base_url과 동일해야 함)"
   type        = string
   default     = "http://openapi.seoul.go.kr:8088"
 }
@@ -65,7 +65,7 @@ variable "serving_db_secret_arn" {
 }
 
 variable "warehouse_bucket" {
-  description = "S3 bucket name for Iceberg warehouse storage"
+  description = "S3 bucket name for Iceberg warehouse storage (config.SETTINGS.warehouse_bucket과 동일해야 함)"
   type        = string
   default     = "ttareungyi-warehouse"
 }
