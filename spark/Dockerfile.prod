@@ -48,5 +48,12 @@ ENV PYTHONPATH="/opt/app:/opt/app/ingestion:/opt/app/pipeline/risk_model"
 # spark.jars.packages(Ivy 런타임 다운로드)를 설정하지 않도록 끈다.
 ENV SPARK_JARS_ALREADY_BAKED="true"
 
+# pipeline/train_risk_model/settings.py의 DEFAULT_CONFIG는 Airflow compose 전용
+# 마운트 경로(/opt/airflow/pylib/config/risk_model.yaml)라 이 컨테이너엔 없다.
+# load_config()를 인자 없이 부르는 잡(build_bike_features_daily,
+# run_risk_scoring_model 경유 build_fact_bike_risk)이 시작 즉시
+# FileNotFoundError로 죽지 않도록 위 COPY로 들어온 실제 경로를 가리킨다.
+ENV RISK_MODEL_CONFIG="/opt/app/config/risk_model.yaml"
+
 # EMR Serverless는 이 이미지를 hadoop 유저로 실행한다.
 USER hadoop:hadoop

@@ -63,4 +63,20 @@ spark.stop()
 print('SPARK_SESSION_OK')
 "
 
+echo "== RISK_MODEL_CONFIG 기본값으로 load_config() 동작 확인 =="
+docker run --rm --entrypoint /usr/bin/python3 \
+  -e PYTHONPATH="/usr/lib/spark/python:/usr/lib/spark/python/lib/pyspark.zip:/usr/lib/spark/python/lib/py4j-0.10.9.7-src.zip:/opt/app:/opt/app/ingestion:/opt/app/pipeline/risk_model" \
+  "$IMAGE" -c "
+import os
+from pipeline.train_risk_model.settings import load_config
+
+# 잡(build_bike_features_daily / build_fact_bike_risk)은 인자 없이 load_config()를
+# 부른다 - 컨테이너에 RISK_MODEL_CONFIG가 없으면 Airflow 전용 기본 경로를 보고
+# FileNotFoundError로 죽는다. 그 경로를 그대로 재현한다.
+print('RISK_MODEL_CONFIG =', os.environ.get('RISK_MODEL_CONFIG'))
+cfg = load_config()
+assert cfg, 'risk_model.yaml 이 비어 있습니다'
+print('LOAD_CONFIG_OK')
+"
+
 echo "모든 검증 통과"
