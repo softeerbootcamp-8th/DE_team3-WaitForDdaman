@@ -14,6 +14,9 @@ API 응답 계층의 별도 매핑으로 처리한다(app 연동 작업에서 �
 DetailPanel.tsx의 "정상자전거 비율 {healthyRatio}% -> {stationUrgency} (70% 기준)"
 문구 그대로: healthy_ratio(Normal 비율) 70% 이상이면 "여유있음", 미만이면 "부족함".
 
+### Spark 제거 (#172)
+읽기/쓰기는 pyiceberg, 조인은 DuckDB SQL로 옮긴다.
+
 사용법:
     python -m jobs.build_mart_station_daily
 """
@@ -21,11 +24,19 @@ import logging
 import os
 from datetime import date
 
-from pyspark.sql import functions as F
+import duckdb
+import pyarrow as pa
+from pyiceberg.exceptions import NoSuchTableError
+from pyiceberg.schema import Schema
+from pyiceberg.partitioning import PartitionField, PartitionSpec
+from pyiceberg.transforms import IdentityTransform
+from pyiceberg.types import DateType, DoubleType, IntegerType, NestedField, StringType
 
 import config
+from common.duckdb_io import query_arrow
+from common.iceberg_catalog import build_iceberg_catalog
+from common.iceberg_io import overwrite_partition
 from common.s3_utils import ensure_bucket
-from common.spark_session import build_spark_session
 from station_risk_shared import read_station_risk_agg
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -33,82 +44,88 @@ logger = logging.getLogger(__name__)
 
 HEALTHY_RATIO_THRESHOLD = 70.0
 
+STATION_ACTIVE_TABLE = "gold.station_active"
+FACT_STATION_INVENTORY_TABLE = "gold.fact_station_inventory"
+GOLD_TABLE = "gold.mart_station_daily"
+PARTITION_COLUMN = "snapshot_date"
+
 MART_COLUMNS = [
     "snapshot_date", "station_id", "station_name", "region", "district",
     "latitude", "longitude", "hold_num", "bike_cnt", "risk_cnt", "healthy_ratio", "urgency",
 ]
 
+GOLD_SCHEMA = Schema(
+    NestedField(1, "snapshot_date", DateType(), required=False),
+    NestedField(2, "station_id", StringType(), required=False),
+    NestedField(3, "station_name", StringType(), required=False),
+    NestedField(4, "region", StringType(), required=False),
+    NestedField(5, "district", StringType(), required=False),
+    NestedField(6, "latitude", DoubleType(), required=False),
+    NestedField(7, "longitude", DoubleType(), required=False),
+    NestedField(8, "hold_num", IntegerType(), required=False),
+    NestedField(9, "bike_cnt", IntegerType(), required=False),
+    NestedField(10, "risk_cnt", IntegerType(), required=False),
+    NestedField(11, "healthy_ratio", DoubleType(), required=False),
+    NestedField(12, "urgency", StringType(), required=False),
+)
+GOLD_PARTITION_SPEC = PartitionSpec(
+    PartitionField(source_id=1, field_id=1000, transform=IdentityTransform(), name=PARTITION_COLUMN)
+)
 
-def _station_active_table() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.gold.station_active"
-
-
-def _fact_station_inventory_table() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.gold.fact_station_inventory"
-
-
-def _gold_table() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.gold.mart_station_daily"
-
-
-def _ensure_mart_table(spark) -> None:
-    catalog = config.SETTINGS.iceberg_catalog_name
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {catalog}.gold")
-    spark.sql(
-        f"""
-        CREATE TABLE IF NOT EXISTS {_gold_table()} (
-            snapshot_date DATE,
-            station_id STRING,
-            station_name STRING,
-            region STRING,
-            district STRING,
-            latitude DOUBLE,
-            longitude DOUBLE,
-            hold_num INT,
-            bike_cnt INT,
-            risk_cnt INT,
-            healthy_ratio DOUBLE,
-            urgency STRING
-        )
-        USING iceberg
-        PARTITIONED BY (snapshot_date)
-        """
-    )
-
-
-def build_mart_station_daily(station_active_df, inventory_df, station_risk_df, snapshot_date):
-    # inventory_df.bike_cnt(gold.fact_station_inventory) / station_risk_df.risk_cnt
-    # (station_risk_shared) 이름 그대로 조인하고 최종 select까지 그대로 유지한다 -
-    # gold mart와 postgres 서빙 테이블의 컬럼명을 동일하게 맞춘다.
-    joined = (
-        station_active_df.select(
-            "station_id", "station_name", "region", "district", "latitude", "longitude", "hold_num"
-        )
-        .join(inventory_df.select("station_id", "bike_cnt"), on="station_id", how="left")
-        .join(station_risk_df, on="station_id", how="left")
-    )
-
-    joined = (
-        joined.withColumn("bike_cnt", F.coalesce(F.col("bike_cnt"), F.lit(0)))
-        .withColumn("risk_cnt", F.coalesce(F.col("risk_cnt"), F.lit(0)))
-        .withColumn("healthy_ratio", F.coalesce(F.col("healthy_ratio"), F.lit(100.0)))
-        .withColumn(
-            "urgency",
-            F.when(F.col("healthy_ratio") >= HEALTHY_RATIO_THRESHOLD, F.lit("여유있음")).otherwise(F.lit("부족함")),
-        )
-    )
-
-    return joined.withColumn("snapshot_date", F.lit(str(snapshot_date)).cast("date")).select(*MART_COLUMNS)
+# inventory.bike_cnt / station_risk.risk_cnt 이름 그대로 조인하고 최종 select까지
+# 그대로 유지한다 - gold mart와 postgres 서빙 테이블의 컬럼명을 동일하게 맞춘다.
+_MART_SQL = """
+    SELECT
+        sa.station_id,
+        sa.station_name,
+        sa.region,
+        sa.district,
+        sa.latitude,
+        sa.longitude,
+        sa.hold_num,
+        CAST(COALESCE(inv.bike_cnt, 0) AS INT) AS bike_cnt,
+        CAST(COALESCE(sr.risk_cnt, 0) AS INT) AS risk_cnt,
+        COALESCE(sr.healthy_ratio, 100.0) AS healthy_ratio,
+        CASE WHEN COALESCE(sr.healthy_ratio, 100.0) >= ? THEN '여유있음' ELSE '부족함' END AS urgency,
+        CAST(? AS DATE) AS snapshot_date
+    FROM station_active sa
+    LEFT JOIN inventory inv ON sa.station_id = inv.station_id
+    LEFT JOIN station_risk sr ON sa.station_id = sr.station_id
+"""
 
 
-def _read_and_build(spark, snapshot_date: date):
+def build_mart_station_daily(
+    station_active_table: pa.Table,
+    inventory_table: pa.Table,
+    station_risk_table: pa.Table,
+    snapshot_date: str,
+    con: duckdb.DuckDBPyConnection | None = None,
+) -> pa.Table:
+    """카탈로그 없이 세 PyArrow Table만으로 동작하는 순수 로직이라 단위 테스트가 가능하다."""
+    conn = con or duckdb.connect(":memory:")
+    conn.register("station_active", station_active_table)
+    conn.register("inventory", inventory_table)
+    conn.register("station_risk", station_risk_table)
+    return query_arrow(conn, _MART_SQL, [HEALTHY_RATIO_THRESHOLD, snapshot_date]).select(MART_COLUMNS)
+
+
+def _ensure_gold_table(catalog):
+    catalog.create_namespace_if_not_exists("gold")
+    try:
+        return catalog.load_table(GOLD_TABLE)
+    except NoSuchTableError:
+        logger.info("%s 테이블 신규 생성", GOLD_TABLE)
+        return catalog.create_table(GOLD_TABLE, schema=GOLD_SCHEMA, partition_spec=GOLD_PARTITION_SPEC)
+
+
+def _read_and_build(catalog, snapshot_date: date) -> pa.Table:
     date_str = snapshot_date.strftime("%Y-%m-%d")
 
-    station_active_df = spark.read.table(_station_active_table())
-    inventory_df = spark.read.table(_fact_station_inventory_table())
-    station_risk_df = read_station_risk_agg(spark, date_str)
+    station_active_table = catalog.load_table(STATION_ACTIVE_TABLE).scan().to_arrow()
+    inventory_table = catalog.load_table(FACT_STATION_INVENTORY_TABLE).scan().to_arrow()
+    station_risk_table = read_station_risk_agg(catalog, date_str)
 
-    return build_mart_station_daily(station_active_df, inventory_df, station_risk_df, snapshot_date)
+    return build_mart_station_daily(station_active_table, inventory_table, station_risk_table, date_str)
 
 
 def run() -> None:
@@ -118,13 +135,12 @@ def run() -> None:
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
-    spark = build_spark_session("gold-build-mart-station-daily")
-    _ensure_mart_table(spark)
+    catalog = build_iceberg_catalog()
+    gold_table = _ensure_gold_table(catalog)
 
-    out_df = _read_and_build(spark, target_date).cache()
-    row_count = out_df.count()
-    out_df.writeTo(_gold_table()).overwritePartitions()
-    out_df.unpersist()
+    out_table = _read_and_build(catalog, target_date)
+    row_count = len(out_table)
+    overwrite_partition(gold_table, out_table, PARTITION_COLUMN, target_date.strftime("%Y-%m-%d"))
 
     logger.info("%s: gold.mart_station_daily %d행 갱신 완료", target_date, row_count)
 

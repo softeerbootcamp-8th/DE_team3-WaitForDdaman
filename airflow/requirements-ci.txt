@@ -11,3 +11,7 @@ apache-airflow==3.3.0
 # jobs 에서 실제로 쓰는 것들). 늘어나면 여기에 추가한다.
 apache-airflow-providers-standard
 apache-airflow-providers-postgres
+# LambdaInvokeFunctionOperator (gold_to_serving_sync_dag.py, #172) - 이 provider가
+# 실제 배포 컨테이너(apache/airflow 베이스 이미지)에 기본 번들되어 있는지는 확인
+# 못 했다 - 안 되어 있으면 airflow/Dockerfile.local/.prod에도 별도 설치가 필요하다.
+apache-airflow-providers-amazon
