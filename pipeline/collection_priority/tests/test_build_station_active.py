@@ -1,74 +1,59 @@
 """
-gold.station_active 조인 로직 테스트
+gold.station_active 조인 로직 테스트 (#170)
 
-Iceberg 테이블을 직접 읽는 부분(_latest_snapshot)은 카탈로그가 필요해 여기서는
-테스트하지 않는다. 대신 두 DataFrame만으로 동작하는 순수 함수인
-_join_active_stations()만 검증한다 - staging/tests와 동일하게 카탈로그 설정
-없는 최소 SparkSession을 만든다.
+_latest_snapshot()은 Iceberg 카탈로그를 직접 읽으므로 여기서는 테스트하지 않는다.
+대신 두 PyArrow Table만으로 동작하는 순수 함수 _join_active_stations()만
+검증한다 - staging/tests/test_transform_silver_rental_history.py와 동일한 DuckDB
+기반 패턴.
 """
-from datetime import date
-
-import pytest
-from pyspark.sql import types as T
+import pyarrow as pa
 
 from jobs.build_station_active import _join_active_stations
 
-SNAPSHOT_DATE = date(2026, 8, 17)
+SNAPSHOT_DATE = "2026-08-17"
 
-MASTER_SCHEMA = T.StructType([
-    T.StructField("station_id", T.StringType()),
-    T.StructField("station_name", T.StringType()),
-    T.StructField("region", T.StringType()),
-    T.StructField("district", T.StringType()),
-    T.StructField("hold_num", T.IntegerType()),
-    T.StructField("latitude", T.DoubleType()),
-    T.StructField("longitude", T.DoubleType()),
-])
-
-ACTIVE_IDS_SCHEMA = T.StructType([T.StructField("station_id", T.StringType())])
+MASTER_COLUMNS = ["station_id", "station_name", "region", "district", "hold_num", "latitude", "longitude"]
 
 
-@pytest.fixture(scope="module")
-def spark():
-    from pyspark.sql import SparkSession
-
-    session = (
-        SparkSession.builder.appName("test-build-station-active")
-        .master("local[1]")
-        .config("spark.driver.bindAddress", "127.0.0.1")
-        .config("spark.driver.host", "127.0.0.1")
-        .config("spark.sql.shuffle.partitions", "1")
-        .getOrCreate()
+def master_table(rows: list[tuple]) -> pa.Table:
+    return pa.table(
+        {
+            "station_id": pa.array([r[0] for r in rows], type=pa.string()),
+            "station_name": pa.array([r[1] for r in rows], type=pa.string()),
+            "region": pa.array([r[2] for r in rows], type=pa.string()),
+            "district": pa.array([r[3] for r in rows], type=pa.string()),
+            "hold_num": pa.array([r[4] for r in rows], type=pa.int32()),
+            "latitude": pa.array([r[5] for r in rows], type=pa.float64()),
+            "longitude": pa.array([r[6] for r in rows], type=pa.float64()),
+        }
     )
-    session.sparkContext.setLogLevel("ERROR")
-    yield session
-    session.stop()
 
 
-def by_station(df):
-    return {r["station_id"]: r for r in df.collect()}
+def active_ids_table(station_ids: list[str]) -> pa.Table:
+    return pa.table({"station_id": pa.array(station_ids, type=pa.string())})
 
 
-def test_inner_join_keeps_only_active_stations(spark):
-    master = spark.createDataFrame(
+def by_station(table: pa.Table) -> dict:
+    return {r["station_id"]: r for r in table.to_pylist()}
+
+
+def test_inner_join_keeps_only_active_stations():
+    master = master_table(
         [
             ("ST-1", "1번 대여소", "강북", "마포구", 10, 37.5, 126.9),
             ("ST-2", "2번 대여소", "강남", "강남구", 20, 37.4, 127.0),
-        ],
-        MASTER_SCHEMA,
+        ]
     )
-    active_ids = spark.createDataFrame([("ST-1",)], ACTIVE_IDS_SCHEMA)
+    active_ids = active_ids_table(["ST-1"])
 
     result = by_station(_join_active_stations(master, active_ids, SNAPSHOT_DATE))
 
     assert set(result.keys()) == {"ST-1"}
 
 
-def test_description_columns_come_from_master(spark):
-    master = spark.createDataFrame(
-        [("ST-1", "1번 대여소", "강북", "마포구", 10, 37.5, 126.9)], MASTER_SCHEMA
-    )
-    active_ids = spark.createDataFrame([("ST-1",)], ACTIVE_IDS_SCHEMA)
+def test_description_columns_come_from_master():
+    master = master_table([("ST-1", "1번 대여소", "강북", "마포구", 10, 37.5, 126.9)])
+    active_ids = active_ids_table(["ST-1"])
 
     result = by_station(_join_active_stations(master, active_ids, SNAPSHOT_DATE))
 
@@ -76,12 +61,10 @@ def test_description_columns_come_from_master(spark):
     assert result["ST-1"]["hold_num"] == 10
 
 
-def test_snapshot_date_is_set(spark):
-    master = spark.createDataFrame(
-        [("ST-1", "1번 대여소", "강북", "마포구", 10, 37.5, 126.9)], MASTER_SCHEMA
-    )
-    active_ids = spark.createDataFrame([("ST-1",)], ACTIVE_IDS_SCHEMA)
+def test_snapshot_date_is_set():
+    master = master_table([("ST-1", "1번 대여소", "강북", "마포구", 10, 37.5, 126.9)])
+    active_ids = active_ids_table(["ST-1"])
 
     result = by_station(_join_active_stations(master, active_ids, SNAPSHOT_DATE))
 
-    assert result["ST-1"]["snapshot_date"] == SNAPSHOT_DATE
+    assert result["ST-1"]["snapshot_date"].isoformat() == SNAPSHOT_DATE
