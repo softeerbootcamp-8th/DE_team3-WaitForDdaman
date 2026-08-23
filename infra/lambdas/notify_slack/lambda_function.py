@@ -28,7 +28,7 @@ def _build_slack_text(sns_message: str, subject: str) -> str:
     alarm_name = alarm.get("AlarmName", "unknown-alarm")
     new_state = alarm.get("NewStateValue", "UNKNOWN")
     reason = alarm.get("NewStateReason", "")
-    trigger = alarm.get("Trigger", {})
+    trigger = alarm.get("Trigger") or {}
     metric_name = trigger.get("MetricName", "")
     namespace = trigger.get("Namespace", "")
     changed_at = alarm.get("StateChangeTime", "")

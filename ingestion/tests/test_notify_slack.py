@@ -50,6 +50,29 @@ def test_alarm_message_posted_to_webhook(monkeypatch):
     assert "ALARM" in sent_payload["text"]
 
 
+def test_null_trigger_field_does_not_crash(monkeypatch):
+    """Trigger가 명시적 null이면 alarm.get('Trigger', {})는 기본값 대신 None을 반환해
+    trigger.get(...)에서 AttributeError가 났었다 - or {} 로 방어한다."""
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", WEBHOOK_URL)
+    message = json.dumps({
+        "AlarmName": "some-alarm",
+        "NewStateValue": "ALARM",
+        "NewStateReason": "reason",
+        "StateChangeTime": "2026-08-23T01:23:45.000+0000",
+        "Trigger": None,
+    })
+
+    mock_resp = MagicMock()
+    mock_resp.getcode.return_value = 200
+    mock_urlopen = MagicMock()
+    mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+    with patch("infra.lambdas.notify_slack.lambda_function.urllib.request.urlopen", mock_urlopen):
+        result = lambda_handler(_sns_event(message), None)
+
+    assert result == {"statusCode": 200, "notified": 1}
+
+
 def test_non_json_message_falls_back_to_raw_text(monkeypatch):
     monkeypatch.setenv("SLACK_WEBHOOK_URL", WEBHOOK_URL)
 
