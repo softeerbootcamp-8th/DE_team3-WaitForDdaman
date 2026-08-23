@@ -34,6 +34,14 @@ class Settings:
         "SPARK_LOCAL_EXECUTION", "true" if os.getenv("APP_ENV", "local") == "local" else "false"
     ).strip().lower() in ("1", "true", "yes")
 
+    # ---- EMR Serverless 커스텀 이미지 등 jar가 이미 baked-in된 환경인지 ----
+    # true면 spark_session.py가 spark.jars.packages 설정을 생략한다 - 이 설정이
+    # 있으면 Spark가 세션 생성 때마다 Ivy로 해당 좌표를 네트워크에서 재해석하려
+    # 들어서, 인터넷이 없는 EMR Serverless 워커에서 잡이 실패한다.
+    spark_jars_already_baked: bool = os.getenv(
+        "SPARK_JARS_ALREADY_BAKED", "false"
+    ).strip().lower() in ("1", "true", "yes")
+
     # ---- S3 / 객체 스토리지 ----
     # LocalStack 기본 포트는 4566. AWS에서는 이 값이 아예 안 쓰임(get_s3_client가 무시).
     s3_endpoint: str = os.getenv("S3_ENDPOINT", "http://localhost:4566")

@@ -39,6 +39,27 @@ HADOOP_AWS_PACKAGE = "org.apache.hadoop:hadoop-aws:3.3.4"
 POSTGRESQL_JDBC_DRIVER_PACKAGE = "org.postgresql:postgresql:42.7.3"
 
 
+def _jars_packages_config(
+    settings: "config.Settings", extra_packages: list[str] | None
+) -> dict[str, str]:
+    """spark.jars.packages에 넣을 설정을 계산한다 (없으면 빈 dict).
+
+    EMR Serverless 커스텀 이미지처럼 jar가 이미 $SPARK_HOME/jars에 baked-in된
+    환경(settings.spark_jars_already_baked=True)에서는 이 설정 자체를 생략한다 -
+    이 설정이 있으면 Spark가 Ivy로 매 실행마다 해당 좌표를 네트워크에서 재해석
+    하려 들어서, 인터넷이 없는 EMR Serverless 워커에서 잡이 실패한다.
+    """
+    if settings.spark_jars_already_baked:
+        return {}
+
+    packages = [ICEBERG_SPARK_RUNTIME_PACKAGE, ICEBERG_AWS_BUNDLE_PACKAGE, HADOOP_AWS_PACKAGE]
+    if settings.iceberg_catalog_type == "jdbc":
+        packages.append(POSTGRESQL_JDBC_DRIVER_PACKAGE)
+    if extra_packages:
+        packages.extend(extra_packages)
+    return {"spark.jars.packages": ",".join(packages)}
+
+
 def build_spark_session(
     app_name: str,
     extra_packages: list[str] | None = None,
@@ -47,15 +68,12 @@ def build_spark_session(
     settings = config.SETTINGS
     catalog = settings.iceberg_catalog_name
 
-    packages = [ICEBERG_SPARK_RUNTIME_PACKAGE, ICEBERG_AWS_BUNDLE_PACKAGE, HADOOP_AWS_PACKAGE]
-    if settings.iceberg_catalog_type == "jdbc":
-        packages.append(POSTGRESQL_JDBC_DRIVER_PACKAGE)
-    if extra_packages:
-        packages.extend(extra_packages)
+    builder = SparkSession.builder.appName(app_name)
+    for key, value in _jars_packages_config(settings, extra_packages).items():
+        builder = builder.config(key, value)
 
     builder = (
-        SparkSession.builder.appName(app_name)
-        .config("spark.jars.packages", ",".join(packages))
+        builder
         .config(
             "spark.sql.extensions",
             "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
