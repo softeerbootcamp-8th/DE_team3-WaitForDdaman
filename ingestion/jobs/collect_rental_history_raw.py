@@ -42,11 +42,21 @@ class RawCollectionError(Exception):
 
 
 def parse_collection_cutoff(value: str) -> datetime:
-    """Airflow가 전달한 논리적 cutoff를 timezone-aware KST 시각으로 정규화한다."""
+    """Airflow가 전달한 논리적 cutoff를 timezone-aware KST 시각으로 정규화한다.
+
+    마이크로초는 버린다 - 이 값에서 파생되는 observed_at 키(snapshot_keys()의
+    strftime("%Y%m%dT%H%M%S%z"), 초 단위)와 manifest에 저장하는 isoformat() 값이
+    같은 인스턴트를 가리켜야 한다. 안 자르면 마이크로초가 있는 cutoff에서
+    key와 manifest 값이 어긋나 selector의 완전 일치 비교(rental_history_
+    snapshot_policy.py)가 항상 실패한다. 수동 트리거의 dag_run.conf나 실행
+    환경의 data_interval_end는 마이크로초를 포함할 수 있다. 이 함수가
+    select_rental_history_snapshot/promote_rental_history_raw/update_rental_
+    history_confirmed_watermark의 공통 진입점이라 여기서 한 번만 자르면 된다.
+    """
     cutoff = datetime.fromisoformat(value)
     if cutoff.tzinfo is None or cutoff.utcoffset() is None:
         raise ValueError("collection_cutoff_at must include timezone")
-    return cutoff.astimezone(KST)
+    return cutoff.astimezone(KST).replace(microsecond=0)
 
 
 def build_collection_windows(cutoff: datetime) -> list[tuple[date, list[int]]]:
