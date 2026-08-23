@@ -28,7 +28,7 @@ def _build_slack_text(sns_message: str, subject: str) -> str:
     alarm_name = alarm.get("AlarmName", "unknown-alarm")
     new_state = alarm.get("NewStateValue", "UNKNOWN")
     reason = alarm.get("NewStateReason", "")
-    trigger = alarm.get("Trigger", {})
+    trigger = alarm.get("Trigger") or {}
     metric_name = trigger.get("MetricName", "")
     namespace = trigger.get("Namespace", "")
     changed_at = alarm.get("StateChangeTime", "")
@@ -51,10 +51,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         logger.warning("SNS Records가 비어있는 이벤트를 받음: %s", event)
         return {"statusCode": 200, "notified": 0}
 
-    notified = 0
+    failures = []
     for record in records:
         sns = record.get("Sns", {})
-        text = _build_slack_text(sns.get("Message", ""), sns.get("Subject", ""))
+        subject = sns.get("Subject", "")
+        text = _build_slack_text(sns.get("Message", ""), subject)
         payload = json.dumps({"text": text}).encode("utf-8")
 
         req = urllib.request.Request(
@@ -67,11 +68,18 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 if resp.getcode() >= 300:
                     raise RuntimeError(f"Slack webhook returned HTTP {resp.getcode()}")
-        except urllib.error.URLError as e:
-            # 재시도는 SNS/Lambda 자체 재시도 정책에 맡기고 여기서는 실패를 그대로 올린다.
-            raise RuntimeError(f"Slack webhook 호출 실패: {e}") from e
+        except (urllib.error.URLError, RuntimeError) as e:
+            # 한 레코드가 실패해도 같은 호출 안의 나머지 레코드는 계속 시도한다 - 여기서
+            # 바로 raise하면 Lambda 재시도가 이 호출의 전체 이벤트를 재전달해서, 이미
+            # 성공한 앞선 레코드의 알림까지 중복 발송된다.
+            logger.error("Slack 알림 전송 실패 (subject=%s): %s", subject, e)
+            failures.append(subject)
+            continue
 
-        notified += 1
-        logger.info("Slack 알림 전송 완료 (subject=%s)", sns.get("Subject", ""))
+        logger.info("Slack 알림 전송 완료 (subject=%s)", subject)
+
+    notified = len(records) - len(failures)
+    if failures:
+        raise RuntimeError(f"Slack webhook 호출 실패 ({len(failures)}/{len(records)}건): {failures}")
 
     return {"statusCode": 200, "notified": notified}
