@@ -13,8 +13,12 @@ Iceberg의 기본 동작). 그래서 매일 "오늘 것만 보이는" 전체 사
 
 bronze.rental_history / silver.rental_history는 이유가 다르다 - 초기 적재가
 파일 하나(최대 700MB)를 여러 CSV/파티션으로 쪼개 쓰면서 작은 파일을 대량
-생성한다(#173). 이쪽은 TEMP가 아니라 누적 테이블이라 스냅샷 만료 대상은
-아니고 컴팩션(rewrite_data_files) 대상이다.
+생성한다(#173). 이쪽은 TEMP가 아니라 누적(append) 테이블이지만, 세 프로시저
+모두 동일하게 적용한다 - expire_snapshots 없이 rewrite_data_files만 하면
+컴팩션 이전의 작은 파일들을 예전 스냅샷이 계속 붙잡고 있어 스토리지가 실제로는
+안 줄어든다(조회 성능만 개선). 누적 테이블이라 "현재 조회되는 행"은 스냅샷
+만료와 무관하게 그대로 남고, 잃는 건 SNAPSHOT_RETENTION_DAYS(7일)보다 이전
+시점으로 타임트래블/롤백하는 능력뿐이다.
 
 이 세 문제를 서로 다른 유지보수 프로시저가 각각 다룬다:
 
@@ -38,8 +42,10 @@ bronze.rental_history / silver.rental_history는 이유가 다르다 - 초기 �
 ### 보존 정책
 SNAPSHOT_RETENTION_DAYS(기본 7일)보다 오래된 스냅샷을 만료 대상으로 하되,
 MIN_SNAPSHOTS_TO_RETAIN(기본 3개)은 나이와 무관하게 항상 남겨서 문제 발생 시
-최근 며칠로 롤백할 여지를 남긴다. remove_orphan_files는 Iceberg 기본값
-(3일 이내 생성 파일 보호)을 그대로 쓴다 - 별도로 완화할 이유가 없다.
+최근 며칠로 롤백할 여지를 남긴다. TABLES_TO_COMPACT의 6개 테이블 전부 예외
+없이 이 정책을 쓴다 - bronze/silver.rental_history도 동일(위 참고).
+remove_orphan_files는 Iceberg 기본값(3일 이내 생성 파일 보호)을 그대로 쓴다 -
+별도로 완화할 이유가 없다.
 
 ### 왜 gold_dim_fact가 아니라 별도 DAG인가
 daily 배치마다 매번 돌리면(파일/스냅샷이 하루에 1개씩만 늘어나는데) 배보다
