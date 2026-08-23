@@ -22,6 +22,8 @@ env와 spark_local_execution을 분리했다 - 합쳐져 있던 시절에는 실
 NOTE: spark.jars.packages로 지정한 Iceberg/Hadoop-AWS 패키지는 최초 실행 시
       Maven Central에서 다운로드된다 (인터넷 접속 필요, 이후에는 로컬 캐시 사용).
 """
+from __future__ import annotations
+
 import logging
 import os
 
