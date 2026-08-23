@@ -218,3 +218,20 @@ resource "aws_iam_role_policy_attachment" "emr_spark_execution_attach" {
   role       = aws_iam_role.emr_spark_execution_role.name
   policy_arn = aws_iam_policy.emr_spark_execution_policy.arn
 }
+
+# ---- EMR Serverless Application ----
+resource "aws_emrserverless_application" "emr_spark" {
+  name          = "emr-spark-prod"
+  release_label = "emr-7.2.0"
+  type          = "SPARK"
+  architecture  = "X86_64"
+
+  image_configuration {
+    image_uri = local.emr_spark_image_uri
+  }
+
+  network_configuration {
+    subnet_ids         = var.subnet_ids
+    security_group_ids = [aws_security_group.emr_serverless_worker.id]
+  }
+}
