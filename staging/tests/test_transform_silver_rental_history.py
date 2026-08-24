@@ -604,3 +604,107 @@ def test_process_range_aborts_when_quarantine_ratio_exceeds_threshold(monkeypatc
     con = tsr._connect()
     clean, quarantine = _split_return_dt_violations(silver, con)
     assert len(quarantine) / len(silver) == pytest.approx(2 / 3)  # 1% 훨씬 초과
+
+
+# ---------------------------------------------------------------- _process_range quarantine 분기 테스트
+
+
+def test_process_range_raises_when_quarantine_ratio_exceeds_threshold(monkeypatch):
+    """
+    _process_range가 quarantine 비율이 임계치를 초과하면 SilverValidationError를 던지고,
+    append()나 _ensure_quarantine_table()을 호출하지 않는다.
+    """
+    monkeypatch.setenv("MAX_QUARANTINE_RATIO", "0.01")
+
+    # 위반행 2개 + 정상행 1개 -> 비율 2/3 = 66.67% (1% 훨씬 초과)
+    rows = [
+        {"bike_id": f"SPB-{i}", "rent_dt": "2026-08-21 12:00:00", "return_dt": "2026-08-21 11:00:00"}
+        for i in range(2)
+    ] + [
+        {"bike_id": "SPB-clean", "rent_dt": "2026-08-21 10:00:00", "return_dt": "2026-08-21 11:00:00"}
+    ]
+
+    mock_catalog = mock.MagicMock()
+    mock_silver_table = mock.MagicMock()
+
+    # _read_bronze 모킹: 위반행을 포함한 bronze 데이터 반환
+    bronze_data = bronze_table(*rows)
+    monkeypatch.setattr(tsr, "_read_bronze", lambda catalog, start, end: bronze_data)
+
+    # _ensure_quarantine_table과 append는 호출되면 안 됨
+    mock_ensure_quarantine = mock.MagicMock(name="_ensure_quarantine_table")
+    mock_append = mock.MagicMock(name="append")
+    monkeypatch.setattr(tsr, "_ensure_quarantine_table", mock_ensure_quarantine)
+    monkeypatch.setattr(tsr, "append", mock_append)
+
+    # validate는 호출되지 않아야 함 (append 전에 exception이 나기 때문)
+    mock_validate = mock.MagicMock(name="validate")
+    monkeypatch.setattr(tsr, "validate", mock_validate)
+
+    start_date = date(2026, 8, 21)
+    end_date = date(2026, 8, 21)
+
+    # SilverValidationError가 던져져야 함
+    with pytest.raises(SilverValidationError, match="return_dt < rent_dt 비율.*임계치"):
+        tsr._process_range(mock_catalog, mock_silver_table, start_date, end_date)
+
+    # append와 _ensure_quarantine_table이 호출되지 않았는지 확인
+    mock_append.assert_not_called()
+    mock_ensure_quarantine.assert_not_called()
+
+
+def test_process_range_appends_when_quarantine_ratio_within_threshold(monkeypatch):
+    """
+    _process_range가 quarantine 비율이 임계치 이내면 SilverValidationError를 던지지 않고,
+    _ensure_quarantine_table()과 append()를 호출한다.
+    """
+    monkeypatch.setenv("MAX_QUARANTINE_RATIO", "0.10")  # 10%
+
+    # 위반행 1개 + 정상행 99개 -> 비율 1/100 = 1% (10% 이내)
+    violation_row = {
+        "bike_id": "SPB-violation",
+        "rent_dt": "2026-08-21 12:00:00",
+        "return_dt": "2026-08-21 11:00:00"
+    }
+    clean_rows = [
+        {"bike_id": f"SPB-{i}", "rent_dt": "2026-08-21 10:00:00", "return_dt": "2026-08-21 11:00:00"}
+        for i in range(99)
+    ]
+    rows = [violation_row] + clean_rows
+
+    mock_catalog = mock.MagicMock()
+    mock_silver_table = mock.MagicMock()
+
+    # _read_bronze 모킹: 위반행을 포함한 bronze 데이터 반환
+    bronze_data = bronze_table(*rows)
+    monkeypatch.setattr(tsr, "_read_bronze", lambda catalog, start, end: bronze_data)
+
+    # _ensure_quarantine_table과 append 모킹
+    mock_quarantine_table = mock.MagicMock()
+    mock_ensure_quarantine = mock.MagicMock(name="_ensure_quarantine_table", return_value=mock_quarantine_table)
+    mock_append = mock.MagicMock(name="append")
+    monkeypatch.setattr(tsr, "_ensure_quarantine_table", mock_ensure_quarantine)
+    monkeypatch.setattr(tsr, "append", mock_append)
+
+    # validate와 overwrite_partition은 정상 동작하도록 모킹
+    monkeypatch.setattr(tsr, "validate", mock.MagicMock())
+    monkeypatch.setattr(tsr, "overwrite_partition", mock.MagicMock())
+
+    start_date = date(2026, 8, 21)
+    end_date = date(2026, 8, 21)
+
+    # SilverValidationError가 던져지지 않아야 함
+    row_count = tsr._process_range(mock_catalog, mock_silver_table, start_date, end_date)
+
+    # _ensure_quarantine_table이 호출되었는지 확인
+    mock_ensure_quarantine.assert_called_once_with(mock_catalog)
+
+    # append가 호출되었는지 확인 - (quarantine_table, quarantine_arrow, catalog=...)
+    mock_append.assert_called_once()
+    call_args = mock_append.call_args
+    assert call_args[0][0] is mock_quarantine_table  # 첫 번째 인자는 quarantine table
+    assert isinstance(call_args[0][1], pa.Table)  # 두 번째 인자는 PyArrow Table
+    assert call_args[1] == {"catalog": mock_catalog}  # keyword arg로 catalog 전달
+
+    # 반환된 행 수는 정상행만
+    assert row_count == 99
