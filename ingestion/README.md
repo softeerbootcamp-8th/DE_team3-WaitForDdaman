@@ -115,6 +115,29 @@ docker compose -f docker-compose.local.yml config --quiet
 
 Airflow UI에서 DAG를 unpause한 뒤 실행한다.
 
+### 0. Iceberg 테이블 Bootstrap (신규 환경에서 최초 1회 필수)
+
+DAG ID:
+
+```text
+bootstrap_iceberg_tables
+```
+
+실행 시점: **인프라 배포 직후, Bronze 초기 적재/일 배치를 실행하기 전**. 신규
+LocalStack/AWS 환경은 Iceberg warehouse와 JDBC 카탈로그가 완전히 비어 있어, 이 DAG를
+먼저 실행하지 않으면 아래 Bronze 초기 적재/일 배치가 `load_table()` 단계에서
+"테이블 없음"으로 실패한다. 특히 `bronze.station_active`는 별도 Initial Load
+경로가 없어(Daily Batch만 있음) 이 DAG가 유일한 테이블 생성 경로다.
+
+파라미터 입력 없이 `Trigger DAG`만 실행하면 된다. 태스크는 멱등하게 동작해 반복
+실행해도 중복 테이블/데이터가 생기지 않고, 기존 데이터를 훼손하지 않는다:
+
+| 태스크 | 잡 | 역할 |
+|---|---|---|
+| `create_bronze_tables` | `jobs/bootstrap_iceberg_tables.py` | 필수 Bronze 테이블(`rental_history`, `failure_report`, `station_master`, `station_active`, `bikeman_event`, `bikeman_event_quarantine`)이 없으면 새로 생성 |
+
+새로운 환경에서는 `create_bronze_tables`가 필요한 테이블을 전부 새로 만든다.
+
 ### Bronze 초기 적재
 
 DAG ID:
@@ -242,6 +265,12 @@ Airflow 없이 ingestion 잡만 직접 실행할 수도 있다.
 cd ingestion
 export $(grep -v '^#' .env | xargs)
 export PYTHONPATH=..:$PYTHONPATH  # ingestion/staging/pipeline이 공유하는 최상위 config/ 패키지를 찾기 위함
+```
+
+Bootstrap (신규 환경에서 아래 초기 적재/일 배치보다 먼저 1회 실행):
+
+```bash
+python -m jobs.bootstrap_iceberg_tables
 ```
 
 초기 적재 (각 디렉터리에 파일이 없으면 열린데이터광장에서 자동으로 받는다. 대여소정보는

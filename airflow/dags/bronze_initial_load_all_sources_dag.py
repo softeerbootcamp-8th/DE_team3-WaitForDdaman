@@ -12,6 +12,10 @@ jobs/initial_load_*.py 참고) - 사람이 미리 내려받아 둘 필요가 없
 대여소정보 적재는 bronze_daily_batch_all_sources DAG가 매일 스냅샷으로 담당한다.
 
 ### 태스크 의존성 설계
+모든 초기 적재 파일 탐색보다 먼저 `create_bronze_tables`가 멱등적으로 필수 Bronze
+테이블을 생성한다. 따라서 신규 환경에서 별도 Bootstrap DAG를 먼저 실행하지 않아도
+이 DAG를 트리거하면 테이블 준비가 보장된다.
+
 대여이력과 고장신고는 서로 의존관계가 없어서 병렬로 둔다. 각 소스는 초기 적재 성공
 직후 자기 워터마크를 찍고, 그 뒤에 Silver까지 이어서 승격한다 - 초기 적재 시점에
 Silver를 채워두지 않으면 daily_batch/backfill을 별도로 한 번 더 돌려야 한다.
@@ -119,6 +123,14 @@ default_args = {
     doc_md=__doc__,
 )
 def bronze_initial_load_all_sources():
+    # 신규 환경에서도 초기 적재 태스크가 테이블 없음으로 실패하지 않도록
+    # 모든 파일 탐색/적재보다 먼저 Bronze Iceberg 테이블을 멱등 생성한다.
+    create_bronze_tables = BashOperator(
+        task_id="create_bronze_tables",
+        bash_command=bash_job("bootstrap_iceberg_tables"),
+        pool=BRONZE_POOL,
+    )
+
     # 대여이력: 반기 파일이 최대 700MB대라, 폴더 전체를 세션 하나로 순회하면 임시 파일과
     # 힙이 누적돼 OOM이 났다(#94). 그래서 "목록 나열(다운로드 포함) -> 파일별로 별도
     # 프로세스(=새 JVM) 실행"으로 나눈다. list_input_files는 Spark를 안 띄우는 순수
@@ -350,6 +362,7 @@ done
     [set_bronze_ingestion_watermark_rental_history, bootstrap_silver_watermark_rental_history] >> load_silver_rental_history
     failure_report >> check_watermark_date_failure_report >> set_bronze_ingestion_watermark_failure_report
     set_bronze_ingestion_watermark_failure_report >> load_silver_failure_report
+    create_bronze_tables >> [list_rental_history_files, list_failure_report_files]
 
 
 bronze_initial_load_all_sources()

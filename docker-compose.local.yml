@@ -36,7 +36,7 @@ x-airflow-common:
     RISK_MODEL_CONFIG: ${RISK_MODEL_CONFIG:-/opt/airflow/pylib/config/risk_model.local.yaml}
     PYTHONPATH: /opt/airflow/pylib
   volumes:
-    - ./.env:/opt/airflow/.env:ro
+    - ./${PROJECT_ENV_FILE:-.env}:/opt/airflow/.env:ro
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs
     - ./airflow/plugins:/opt/airflow/plugins
