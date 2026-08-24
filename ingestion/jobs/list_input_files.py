@@ -28,6 +28,7 @@ set_watermark.py와 동일하게 DATASET 환경변수로 대상을 분기한다 
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -65,7 +66,16 @@ def run(dataset: str, input_dir: str, file_pattern: str) -> list[str]:
         ensure_bucket(config.SETTINGS.raw_bucket)
         uris = []
         for path in input_files:
-            key = f"raw/{dataset}/_initial_load_staging/{path.name}"
+            # 원본 파일명(한글/공백 포함 가능 - 서울 열린데이터광장 반기 파일 등)을 그대로
+            # 쓰면, 이 URI가 나중에 EMR Serverless의 sparkSubmitParameters(--conf
+            # ...INPUT_FILE=<uri>)로 전달될 때 문제가 된다. dag_common.py가 shlex.quote()로
+            # 감싸지만, EMR Serverless의 파서는 셸이 아니라서 그 따옴표 규칙을 지키지 않고
+            # 공백에서 토큰을 잘라먹는다(실측: 2026-08-24, "서울시 공공자전거 고장신고
+            # 내역_2015_2020.10.xlsx" 파일에서 INPUT_FILE이 드라이버에 전달되지 않음).
+            # 스테이징 업로드 시점에 ASCII로 안전한 이름으로 바꿔서 이 문제 자체를 없앤다 -
+            # 파일 내용은 이름과 무관하므로 안전하다.
+            safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", path.name)
+            key = f"raw/{dataset}/_initial_load_staging/{safe_name}"
             upload_file(path, config.SETTINGS.raw_bucket, key)
             uris.append(f"s3://{config.SETTINGS.raw_bucket}/{key}")
         return uris

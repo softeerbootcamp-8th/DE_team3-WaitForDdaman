@@ -75,10 +75,12 @@ resource "aws_secretsmanager_secret_version" "iceberg_catalog" {
 
 # ---- 보안그룹: EMR Serverless 워커 -> iceberg_catalog RDS + AWS API ----
 # 인바운드 불필요(워커는 outbound만 발생). RDS(5432)는 iceberg-catalog-sg로만
-# 좁히지만, 443(S3/Secrets Manager/CloudWatch Logs)은 이 리포에 그 서비스들의
-# 인터페이스 VPC 엔드포인트가 없어(S3는 Gateway 엔드포인트뿐 - serving_sync.tf
-# 참고) 전체 허용해야 한다 - 안 그러면 실행 Role의 S3/Secrets/Logs 권한이 전부
-# 무용지물이 된다(실측: 리뷰에서 발견, 2026-08-23).
+# 좁힌다. 443은 CIDR 0.0.0.0/0으로 열어두지만 실제로 나갈 수 있는 건 S3(Gateway
+# Endpoint - serving_sync.tf), Secrets Manager/CloudWatch Logs(Interface Endpoint -
+# 각각 lambda_shared.tf/아래 aws_vpc_endpoint.logs)뿐이다. 이 VPC엔 NAT가 없어서
+# 그 외 인터넷 목적지로는 SG가 허용해도 라우팅 경로 자체가 없다 - 인터페이스
+# 엔드포인트를 깜빡하면 SG는 정상인데 Connect timeout으로 잡이 죽는다(실측:
+# 2026-08-23 S3/Secrets, 2026-08-24 CloudWatch Logs 각각 별도로 겪음).
 resource "aws_security_group" "emr_serverless_worker" {
   name = "emr-serverless-worker-sg"
   # 한글 원문: "EMR Serverless 워커 아웃바운드 전용 보안그룹 (인바운드 불필요)"
@@ -108,6 +110,39 @@ resource "aws_security_group" "emr_serverless_worker" {
 # SG 자체는 이 리포에서 import/통째로 관리하지 않는다 - 다른 인바운드 규칙은
 # 건드리지 않고 이 규칙만 추가한다 (serving_sync.tf가 기존 RDS 보안그룹을
 # 다루는 방식과 동일 원칙).
+# ---- CloudWatch Logs Interface VPC Endpoint (EMR job 로그 전송용) ----
+# 이 VPC는 NAT 게이트웨이가 없다(#172가 S3는 Gateway Endpoint로 우회했으나
+# CloudWatch Logs/Secrets Manager는 Interface 타입만 지원해 별도 처리 필요 -
+# lambda_shared.tf 참고). emr_serverless_worker SG가 443을 0.0.0.0/0으로 허용해도
+# 그건 SG(방화벽) 레벨일 뿐 실제 라우팅 경로가 아니라서, 이 엔드포인트 없이는
+# EMR 워커가 CloudWatch Logs에 도달할 방법이 없다 (실측: 2026-08-24,
+# initial_load_failure_report_file_emr 태스크가 "Unable to push logs ... Connect
+# timeout on endpoint URL: https://logs.<region>.amazonaws.com/"로 FAILED 처리됨 -
+# Spark job 자체는 RUNNING까지 정상 도달했었음). Secrets Manager는 lambda_shared.tf의
+# 기존 엔드포인트를 그대로 공유한다(중복 생성 방지 - 그 SG 인바운드에 이 워커 SG만 추가).
+resource "aws_security_group" "logs_vpc_endpoint_sg" {
+  name        = "logs-vpce-sg"
+  description = "Allows the EMR Serverless worker to reach the CloudWatch Logs VPC endpoint"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    description     = "HTTPS from EMR Serverless workers"
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.emr_serverless_worker.id]
+  }
+}
+
+resource "aws_vpc_endpoint" "logs" {
+  vpc_id              = var.vpc_id
+  service_name        = "com.amazonaws.${var.aws_region}.logs"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = var.subnet_ids
+  security_group_ids  = [aws_security_group.logs_vpc_endpoint_sg.id]
+  private_dns_enabled = true
+}
+
 resource "aws_security_group_rule" "iceberg_catalog_allow_emr_serverless" {
   type                     = "ingress"
   from_port                = 5432
@@ -296,6 +331,18 @@ data "aws_iam_policy_document" "emr_spark_execution_policy_doc" {
       "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/emr-serverless/*",
       "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/aws/emr-serverless*",
     ]
+  }
+
+  # 위 CloudWatchLogs statement가 누락했던 액션 - EMR Serverless의 로그 전달
+  # 에이전트가 로그 스트림에 쓰기 전에 로그 그룹 존재 여부를 DescribeLogGroups로
+  # 먼저 확인한다. 이게 없으면 CreateLogGroup/PutLogEvents 권한이 다 있어도
+  # AccessDeniedException으로 잡이 FAILED 처리된다(실측: 2026-08-24). Describe류
+  # API라 리소스를 log-group ARN으로 좁혀도 실질적 제한 효과가 없어 "*"로 둔다.
+  statement {
+    sid       = "CloudWatchLogsDescribe"
+    effect    = "Allow"
+    actions   = ["logs:DescribeLogGroups"]
+    resources = ["*"]
   }
 }
 
