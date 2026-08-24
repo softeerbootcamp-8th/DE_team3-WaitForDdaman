@@ -21,6 +21,9 @@ import pytest
 import jobs.transform_silver_rental_history as tsr
 from jobs.transform_silver_rental_history import (
     PARTITION_COLUMN,
+    QUARANTINE_ARROW_SCHEMA,
+    QUARANTINE_SCHEMA,
+    QUARANTINE_TABLE,
     SILVER_COLUMNS,
     SILVER_PARTITION_SPEC,
     SILVER_PROMOTION_PREFIX,
@@ -28,10 +31,12 @@ from jobs.transform_silver_rental_history import (
     SilverValidationError,
     _build_silver_promotion_document,
     _derive_mode,
+    _ensure_quarantine_table,
     _find_current_day_entry,
     _load_bronze_promotion_metadata,
     _parse_bool_env,
     _silver_promotion_key,
+    _split_quarantine_violations,
     _validate_bronze_marker,
     run,
     transform,
@@ -245,19 +250,6 @@ def test_output_columns_and_partition_spec_unchanged():
 
 def test_validate_passes_on_clean_rows():
     validate(transform(bronze_table()), "2026-08-21")  # 예외가 없으면 통과
-
-
-def test_validate_rejects_negative_distance():
-    with pytest.raises(SilverValidationError, match="isNonNegative"):
-        validate(transform(bronze_table({"use_distance_m": "-1.0"})), "2026-08-21")
-
-
-def test_validate_rejects_return_before_rent():
-    with pytest.raises(SilverValidationError, match="satisfies"):
-        validate(
-            transform(bronze_table({"rent_dt": "2026-08-21 12:00:00", "return_dt": "2026-08-21 11:00:00"})),
-            "2026-08-21",
-        )
 
 
 # ---------------------------------------------------------------- #137 당일 promotion 처리
@@ -526,6 +518,47 @@ def test_run_skips_current_day_and_still_advances_watermark_without_promotion_me
     assert [step[0] for step in order] == ["process_range", "write_watermark"]
 
 
+# ---------------------------------------------------------------- 백필 명시적 범위 오버라이드 (#232)
+
+
+def test_run_uses_explicit_range_when_both_env_set(monkeypatch):
+    monkeypatch.setenv("BACKFILL_RANGE_START", "2017-03-01")
+    monkeypatch.setenv("BACKFILL_RANGE_END", "2017-03-05")
+    monkeypatch.delenv("MAX_DAYS_PER_RUN", raising=False)
+
+    calls = []
+
+    def fake_process_range(catalog, silver_table, start_date, end_date):
+        calls.append((start_date, end_date))
+        return 0
+
+    with mock.patch.object(tsr, "build_iceberg_catalog", return_value=mock.Mock()), \
+         mock.patch.object(tsr, "_ensure_silver_table", return_value=mock.Mock()), \
+         mock.patch.object(tsr, "_process_range", side_effect=fake_process_range), \
+         mock.patch.object(tsr, "read_watermark") as mock_read_wm, \
+         mock.patch.object(tsr, "write_watermark") as mock_write_wm, \
+         mock.patch.object(tsr, "ensure_bucket"):
+        run()
+
+    assert calls == [(date(2017, 3, 1), date(2017, 3, 5))]
+    mock_read_wm.assert_not_called()
+    mock_write_wm.assert_not_called()
+
+
+def test_run_ignores_partial_range_env(monkeypatch):
+    """BACKFILL_RANGE_START만 있고 END가 없으면 기존 워터마크 경로를 그대로 탄다."""
+    monkeypatch.setenv("BACKFILL_RANGE_START", "2017-03-01")
+    monkeypatch.delenv("BACKFILL_RANGE_END", raising=False)
+
+    with mock.patch.object(tsr, "build_iceberg_catalog", return_value=mock.Mock()), \
+         mock.patch.object(tsr, "_ensure_silver_table", return_value=mock.Mock()), \
+         mock.patch.object(tsr, "read_watermark", return_value=date(2017, 3, 1)) as mock_read_wm, \
+         mock.patch.object(tsr, "ensure_bucket"):
+        run()
+
+    assert mock_read_wm.called
+
+
 def test_build_silver_promotion_document_inherits_degraded_bronze_mode_on_mixed_promotion():
     """확정 backlog가 PRELIMINARY라 Bronze marker.mode=DEGRADED인 채로 당일 entry가
     FINAL이면, 당일 entry만 보고 NORMAL로 기록하지 않고 DEGRADED를 계승해야 한다."""
@@ -541,3 +574,207 @@ def test_build_silver_promotion_document_inherits_degraded_bronze_mode_on_mixed_
     )
     assert document["mode"] == "DEGRADED"
     assert document["source_snapshot_type"] == "FINAL"
+
+
+# ---------------------------------------------------------------- quarantine 테이블 정의
+
+
+def test_quarantine_table_schema_matches_silver_plus_reason():
+    assert [f.name for f in QUARANTINE_SCHEMA.fields] == SILVER_COLUMNS + [
+        "quarantine_reason", "quarantined_at",
+    ]
+    assert QUARANTINE_TABLE == "silver.rental_history_quarantine"
+
+
+# ---------------------------------------------------------------- 행 단위 이상치 quarantine 분리
+
+
+def test_split_quarantine_violations_separates_return_before_rent():
+    silver = transform(bronze_table(
+        {"bike_id": "SPB-1", "rent_dt": "2026-08-21 10:00:00", "return_dt": "2026-08-21 11:00:00"},
+        {"bike_id": "SPB-2", "rent_dt": "2026-08-21 12:00:00", "return_dt": "2026-08-21 11:00:00"},
+    ))
+    con = tsr._connect()
+    clean, quarantine = _split_quarantine_violations(silver, con)
+
+    assert clean.to_pylist()[0]["bike_id"] == "SPB-1"
+    assert len(clean) == 1
+    assert len(quarantine) == 1
+    q_row = quarantine.to_pylist()[0]
+    assert q_row["bike_id"] == "SPB-2"
+    assert q_row["quarantine_reason"] == "return_dt < rent_dt"
+    assert q_row["quarantined_at"] is not None
+
+
+def test_split_quarantine_violations_separates_negative_distance():
+    silver = transform(bronze_table(
+        {"bike_id": "SPB-1", "use_distance_m": "664.90"},
+        {"bike_id": "SPB-2", "use_distance_m": "-1.0"},
+    ))
+    con = tsr._connect()
+    clean, quarantine = _split_quarantine_violations(silver, con)
+
+    assert clean.to_pylist()[0]["bike_id"] == "SPB-1"
+    assert len(clean) == 1
+    assert len(quarantine) == 1
+    q_row = quarantine.to_pylist()[0]
+    assert q_row["bike_id"] == "SPB-2"
+    assert q_row["quarantine_reason"] == "use_distance_m < 0"
+    assert q_row["quarantined_at"] is not None
+
+
+def test_split_quarantine_violations_combines_reasons_for_both_conditions():
+    """한 행이 두 조건 모두 위반하면 사유가 콤마로 이어붙는다."""
+    silver = transform(bronze_table(
+        {
+            "bike_id": "SPB-both",
+            "rent_dt": "2026-08-21 12:00:00",
+            "return_dt": "2026-08-21 11:00:00",
+            "use_distance_m": "-1.0",
+        },
+    ))
+    con = tsr._connect()
+    _, quarantine = _split_quarantine_violations(silver, con)
+    assert len(quarantine) == 1
+    assert quarantine.to_pylist()[0]["quarantine_reason"] == "return_dt < rent_dt, use_distance_m < 0"
+
+
+def test_split_quarantine_violations_keeps_null_return_dt_clean():
+    silver = transform(bronze_table({"return_dt": ""}))
+    con = tsr._connect()
+    clean, quarantine = _split_quarantine_violations(silver, con)
+    assert len(clean) == 1
+    assert len(quarantine) == 0
+
+
+def test_validate_no_longer_hard_fails_on_return_before_rent():
+    """이제 이 조건은 validate()가 아니라 _split_quarantine_violations가 처리한다."""
+    silver = transform(bronze_table(
+        {"rent_dt": "2026-08-21 12:00:00", "return_dt": "2026-08-21 11:00:00"},
+    ))
+    validate(silver, "2026-08-21")  # 예외 없이 통과해야 함 (quarantine은 별도 단계)
+
+
+def test_validate_no_longer_hard_fails_on_negative_distance():
+    """이제 이 조건도 validate()가 아니라 _split_quarantine_violations가 처리한다."""
+    silver = transform(bronze_table({"use_distance_m": "-1.0"}))
+    validate(silver, "2026-08-21")  # 예외 없이 통과해야 함 (quarantine은 별도 단계)
+
+
+def test_process_range_aborts_when_quarantine_ratio_exceeds_threshold(monkeypatch):
+    """0.01(1%) 넘는 위반은 quarantine이 아니라 여전히 배치를 막아야 한다."""
+    monkeypatch.setenv("MAX_QUARANTINE_RATIO", "0.01")
+    rows = [
+        {"bike_id": f"SPB-{i}", "rent_dt": "2026-08-21 12:00:00", "return_dt": "2026-08-21 11:00:00"}
+        for i in range(2)
+    ] + [
+        {"bike_id": "SPB-clean", "rent_dt": "2026-08-21 10:00:00", "return_dt": "2026-08-21 11:00:00"}
+    ]
+    silver = transform(bronze_table(*rows))
+    con = tsr._connect()
+    clean, quarantine = _split_quarantine_violations(silver, con)
+    assert len(quarantine) / len(silver) == pytest.approx(2 / 3)  # 1% 훨씬 초과
+
+
+# ---------------------------------------------------------------- _process_range quarantine 분기 테스트
+
+
+def test_process_range_raises_when_quarantine_ratio_exceeds_threshold(monkeypatch):
+    """
+    _process_range가 quarantine 비율이 임계치를 초과하면 SilverValidationError를 던지고,
+    append()나 _ensure_quarantine_table()을 호출하지 않는다.
+    """
+    monkeypatch.setenv("MAX_QUARANTINE_RATIO", "0.01")
+
+    # 위반행 2개 + 정상행 1개 -> 비율 2/3 = 66.67% (1% 훨씬 초과)
+    rows = [
+        {"bike_id": f"SPB-{i}", "rent_dt": "2026-08-21 12:00:00", "return_dt": "2026-08-21 11:00:00"}
+        for i in range(2)
+    ] + [
+        {"bike_id": "SPB-clean", "rent_dt": "2026-08-21 10:00:00", "return_dt": "2026-08-21 11:00:00"}
+    ]
+
+    mock_catalog = mock.MagicMock()
+    mock_silver_table = mock.MagicMock()
+
+    # _read_bronze 모킹: 위반행을 포함한 bronze 데이터 반환
+    bronze_data = bronze_table(*rows)
+    monkeypatch.setattr(tsr, "_read_bronze", lambda catalog, start, end: bronze_data)
+
+    # _ensure_quarantine_table과 append는 호출되면 안 됨
+    mock_ensure_quarantine = mock.MagicMock(name="_ensure_quarantine_table")
+    mock_append = mock.MagicMock(name="append")
+    monkeypatch.setattr(tsr, "_ensure_quarantine_table", mock_ensure_quarantine)
+    monkeypatch.setattr(tsr, "append", mock_append)
+
+    # validate는 호출되지 않아야 함 (append 전에 exception이 나기 때문)
+    mock_validate = mock.MagicMock(name="validate")
+    monkeypatch.setattr(tsr, "validate", mock_validate)
+
+    start_date = date(2026, 8, 21)
+    end_date = date(2026, 8, 21)
+
+    # SilverValidationError가 던져져야 함
+    with pytest.raises(SilverValidationError, match="행 단위 이상치 비율.*임계치"):
+        tsr._process_range(mock_catalog, mock_silver_table, start_date, end_date)
+
+    # append와 _ensure_quarantine_table이 호출되지 않았는지 확인
+    mock_append.assert_not_called()
+    mock_ensure_quarantine.assert_not_called()
+
+
+def test_process_range_appends_when_quarantine_ratio_within_threshold(monkeypatch):
+    """
+    _process_range가 quarantine 비율이 임계치 이내면 SilverValidationError를 던지지 않고,
+    _ensure_quarantine_table()과 append()를 호출한다.
+    """
+    monkeypatch.setenv("MAX_QUARANTINE_RATIO", "0.10")  # 10%
+
+    # 위반행 1개 + 정상행 99개 -> 비율 1/100 = 1% (10% 이내)
+    violation_row = {
+        "bike_id": "SPB-violation",
+        "rent_dt": "2026-08-21 12:00:00",
+        "return_dt": "2026-08-21 11:00:00"
+    }
+    clean_rows = [
+        {"bike_id": f"SPB-{i}", "rent_dt": "2026-08-21 10:00:00", "return_dt": "2026-08-21 11:00:00"}
+        for i in range(99)
+    ]
+    rows = [violation_row] + clean_rows
+
+    mock_catalog = mock.MagicMock()
+    mock_silver_table = mock.MagicMock()
+
+    # _read_bronze 모킹: 위반행을 포함한 bronze 데이터 반환
+    bronze_data = bronze_table(*rows)
+    monkeypatch.setattr(tsr, "_read_bronze", lambda catalog, start, end: bronze_data)
+
+    # _ensure_quarantine_table과 append 모킹
+    mock_quarantine_table = mock.MagicMock()
+    mock_ensure_quarantine = mock.MagicMock(name="_ensure_quarantine_table", return_value=mock_quarantine_table)
+    mock_append = mock.MagicMock(name="append")
+    monkeypatch.setattr(tsr, "_ensure_quarantine_table", mock_ensure_quarantine)
+    monkeypatch.setattr(tsr, "append", mock_append)
+
+    # validate와 overwrite_partition은 정상 동작하도록 모킹
+    monkeypatch.setattr(tsr, "validate", mock.MagicMock())
+    monkeypatch.setattr(tsr, "overwrite_partition", mock.MagicMock())
+
+    start_date = date(2026, 8, 21)
+    end_date = date(2026, 8, 21)
+
+    # SilverValidationError가 던져지지 않아야 함
+    row_count = tsr._process_range(mock_catalog, mock_silver_table, start_date, end_date)
+
+    # _ensure_quarantine_table이 호출되었는지 확인
+    mock_ensure_quarantine.assert_called_once_with(mock_catalog)
+
+    # append가 호출되었는지 확인 - (quarantine_table, quarantine_arrow, catalog=...)
+    mock_append.assert_called_once()
+    call_args = mock_append.call_args
+    assert call_args[0][0] is mock_quarantine_table  # 첫 번째 인자는 quarantine table
+    assert isinstance(call_args[0][1], pa.Table)  # 두 번째 인자는 PyArrow Table
+    assert call_args[1] == {"catalog": mock_catalog}  # keyword arg로 catalog 전달
+
+    # 반환된 행 수는 정상행만
+    assert row_count == 99
