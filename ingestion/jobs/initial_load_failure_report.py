@@ -23,11 +23,12 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
 from pyspark.sql import functions as F
 
 import config
 from common.encoding_utils import EncodingMismatchError, convert_euckr_file_to_utf8
-from common.file_utils import NotThisDatasetError, convert_xlsx_to_utf8_csv, is_xlsx, unzip_if_needed
+from common.file_utils import NotThisDatasetError, is_xlsx, unzip_if_needed
 from common.s3_utils import download_file, ensure_bucket, split_s3_uri, upload_file
 from common.spark_session import build_spark_session
 from schema.failure_report_schema import (
@@ -79,26 +80,47 @@ def _derive_date_partition(df, source_col: str):
     )
 
 
-def _stage_as_utf8_csv(raw_path: Path, workdir: Path) -> Path:
+def _read_xlsx_as_spark_df(spark, path: Path):
     """
-    원본 파일(csv/zip 안의 csv/xlsx)을 UTF-8 CSV로 통일해서 스테이징한다.
-    - .xlsx: pandas로 읽어 바로 UTF-8 CSV로 변환 (이미 텍스트라 EUC-KR 변환 불필요)
-    - .csv(EUC-KR): iconv -c와 동일한 방식으로 UTF-8 변환
-    """
-    if is_xlsx(raw_path):
-        return convert_xlsx_to_utf8_csv(raw_path, workdir)
+    xlsx를 pandas로 읽어 driver 메모리에서 바로 Spark DataFrame으로 변환한다 - 로컬이든
+    S3든 중간 CSV 파일을 전혀 거치지 않는다. "pandas로 CSV 변환 -> (로컬 또는 S3에)
+    스테이징 -> spark.read.csv()로 재읽기" 경로를 여러 번 시도했으나, EMR Serverless
+    에서 원인 불명의 [UNABLE_TO_INFER_SCHEMA]로 계속 실패했다(실측: 2026-08-24 - 파일
+    내용/인코딩/버킷 리전 전부 정상 확인됐음에도 재현, Issue #223 후속). 파일시스템을
+    아예 안 거치면 이 문제 자체가 성립하지 않는다.
 
-    utf8_path = workdir / f"{raw_path.stem}.utf8.csv"
-    convert_result = convert_euckr_file_to_utf8(raw_path, utf8_path)
-    if convert_result["dropped_bytes"] > 0:
-        logger.warning("파일 %s: 손상 바이트 %d개 폐기", raw_path.name, convert_result["dropped_bytes"])
-    return utf8_path
+    NaN은 이전 경로(pandas.to_csv가 빈 문자열로 씀 -> Spark가 그 빈 문자열을 그대로
+    읽음)와 동일한 결과가 되도록 fillna("")로 맞춘다.
+
+    engine을 명시하지 않으면 pandas가 확장자로 엔진을 추론하는데, .csv로 위장된 xlsx는
+    확장자만으로 엔진을 못 정해서 에러가 난다 - 내용은 항상 xlsx이므로 고정한다
+    (is_xlsx()가 확장자가 아니라 내용으로 이미 판별한 뒤 호출됨).
+    """
+    df = pd.read_excel(path, dtype=str, engine="openpyxl").fillna("")
+    return spark.createDataFrame(df)
+
+
+def _read_csv_as_spark_df(spark, path: Path):
+    """
+    변환된 UTF-8 CSV를 pandas로 읽어 driver 메모리에서 바로 Spark DataFrame으로
+    변환한다 - _read_xlsx_as_spark_df와 동일한 이유(위 문단 참고). S3 스테이징 후
+    spark.read.csv()로 재읽기(#224)가 일반 EUC-KR 변환 CSV에서도 동일하게 재현돼
+    (실측: 2026-08-24, 대여이력 22,966행 정상 파일에서도 재현), 이 파일도 통일한다.
+    """
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    return spark.createDataFrame(df)
 
 
 def _process_one_file(spark, raw_path: Path, workdir: Path):
-    utf8_path = _stage_as_utf8_csv(raw_path, workdir)
+    if is_xlsx(raw_path):
+        raw_df = _read_xlsx_as_spark_df(spark, raw_path)
+    else:
+        utf8_path = workdir / f"{raw_path.stem}.utf8.csv"
+        convert_result = convert_euckr_file_to_utf8(raw_path, utf8_path)
+        if convert_result["dropped_bytes"] > 0:
+            logger.warning("파일 %s: 손상 바이트 %d개 폐기", raw_path.name, convert_result["dropped_bytes"])
 
-    raw_df = spark.read.option("header", "true").csv(str(utf8_path))
+        raw_df = _read_csv_as_spark_df(spark, utf8_path)
     actual_columns = raw_df.columns
 
     if not is_failure_report_file(actual_columns):

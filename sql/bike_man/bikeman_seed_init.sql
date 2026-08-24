@@ -56,6 +56,13 @@ GRANT USAGE ON SCHEMA bikeman TO airflow_reader;
 GRANT SELECT ON ALL TABLES IN SCHEMA bikeman TO airflow_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA bikeman GRANT SELECT ON TABLES TO airflow_reader;
 
+-- services/api가 airflow_reader로 serving.station_daily/bike_risk_daily/dim_district를
+-- 읽는다 (search_path=serving,public) - 이 GRANT가 빠지면 비밀번호가 맞아도
+-- "permission denied for schema serving"으로 조회가 전부 막힌다(실측: 2026-08-24).
+GRANT USAGE ON SCHEMA serving TO airflow_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA serving TO airflow_reader;
+ALTER DEFAULT PRIVILEGES IN SCHEMA serving GRANT SELECT ON TABLES TO airflow_reader;
+
 -- bikeman_event_generator DAG 전용 최소권한 쓰기 롤.
 -- airflow_reader(읽기 전용)로는 이 DAG가 요구하는 INSERT를 할 수 없어 별도로 만든다.
 DO $$

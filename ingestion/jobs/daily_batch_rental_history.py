@@ -72,7 +72,10 @@ ARROW_SCHEMA = pa.schema([
 
 
 def _build_arrow_table(rows: List[Dict[str, Any]], date_str: str, source_file: str) -> pa.Table:
-    ingested_at = datetime.now(timezone.utc)
+    # bootstrap_iceberg_tables.py의 ingested_at은 TimestamptzType이라 문자열이 아니라
+    # timezone-aware datetime을 그대로 넣어야 pyarrow가 timestamp[tz]로 추론한다
+    # (문자열을 넣으면 스키마 불일치로 overwrite_partition이 실패한다).
+    now = datetime.now(timezone.utc)
 
     # 모든 표준 컬럼 리스트 초기화
     cols: Dict[str, list] = {
@@ -114,7 +117,7 @@ def _build_arrow_table(rows: List[Dict[str, Any]], date_str: str, source_file: s
 
         cols["rent_date_partition"].append(date_str)
         cols["source_file"].append(source_file)
-        cols["ingested_at"].append(ingested_at)
+        cols["ingested_at"].append(now)
 
     return pa.table(cols, schema=ARROW_SCHEMA)
 

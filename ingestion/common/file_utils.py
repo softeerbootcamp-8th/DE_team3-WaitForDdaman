@@ -41,7 +41,7 @@ def unzip_if_needed(path: Path, workdir: Path) -> list[Path]:
     """
     확장자가 아니라 매직바이트로 압축 여부를 판별해 내부 csv를 추출한다.
     xlsx(확장자가 .xlsx든, .csv로 위장했든)는 여기서 추출하지 않고 그대로 반환한다
-    (csv가 아니라 xml 구조라 추출 대상이 아님 - convert_xlsx_to_utf8_csv로 별도 처리).
+    (csv가 아니라 xml 구조라 추출 대상이 아님 - 호출부가 pandas로 별도 처리).
 
     csv/xlsx/zip(csv 포함) 중 하나도 아니면 빈 리스트를 반환한다 - 호출부가 그 결과로
     for 루프를 그냥 스킵해버리면 파일 하나가 통째로 조용히 유실될 수 있어서, 그 두
@@ -92,17 +92,3 @@ def expand_archives(paths: list[Path], workdir: Path) -> list[Path]:
         expanded.extend(unzip_if_needed(path, workdir))
     return expanded
 
-
-def convert_xlsx_to_utf8_csv(path: Path, workdir: Path, skiprows: int = 0, header=0) -> Path:
-    """
-    pandas+openpyxl로 xlsx를 읽어 UTF-8 CSV로 변환한다 (Spark는 xlsx를 직접 못 읽음).
-    skiprows/header는 파일마다 헤더 구조가 다를 수 있어(병합 셀 등) 호출부에서 조정한다.
-    """
-    import pandas as pd
-
-    # engine을 명시하지 않으면 pandas가 확장자로 엔진을 추론하는데, .csv로 위장된
-    # xlsx는 확장자만으로 엔진을 못 정해서 에러가 난다. 내용은 항상 xlsx이므로 고정.
-    df = pd.read_excel(path, skiprows=skiprows, header=header, dtype=str, engine="openpyxl")
-    out_path = workdir / f"{path.stem}.from_xlsx.csv"
-    df.to_csv(out_path, index=False, encoding="utf-8")
-    return out_path

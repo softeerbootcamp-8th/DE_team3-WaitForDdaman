@@ -25,6 +25,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
 from pyspark.sql import functions as F
 
 import config
@@ -103,13 +104,33 @@ def _derive_date_partition(df, source_col: str = "rent_dt"):
     )
 
 
+def _read_csv_as_spark_df(spark, path: Path):
+    """
+    변환된 UTF-8 CSV를 pandas로 읽어 driver 메모리에서 바로 Spark DataFrame으로
+    변환한다 - 로컬/S3 어디에도 다시 스테이징하지 않는다.
+
+    "로컬/S3에 스테이징 후 spark.read.csv()로 재읽기"를 두 번(#223 로컬, #224 S3)
+    시도했으나, EMR Serverless에서 ttareungyi-raw 버킷을 spark.read.csv()로 읽는
+    것 자체가 원인 불명으로 계속 실패했다(실측: 2026-08-24 - 업로드된 CSV 내용이
+    22,966행 전부 정상인데도 [UNABLE_TO_INFER_SCHEMA] 재현, 고장신고 xlsx 변환
+    CSV에서도 동일 재현 - Issue #223 후속). 파일시스템 경유 읽기 자체를 없앤다.
+
+    ⚠️ 반기 CSV가 최대 700MB급이라(모듈 docstring 참고), pandas 전체 로드가 Spark의
+    스트리밍 읽기보다 driver 메모리를 더 씀 - spark.read.csv() 자체가 이 환경에서
+    작동하지 않아 현재로선 대안이 없다. EMR Serverless 애플리케이션의 driver 메모리
+    설정을 이 볼륨에 맞게 넉넉히 잡아야 한다.
+    """
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    return spark.createDataFrame(df)
+
+
 def _process_one_csv(spark, csv_path: Path, staging_dir: Path):
     utf8_path = staging_dir / f"{csv_path.stem}.utf8.csv"
     convert_result = convert_euckr_file_to_utf8(csv_path, utf8_path)
     if convert_result["dropped_bytes"] > 0:
         logger.warning("파일 %s: 손상 바이트 %d개 폐기", csv_path.name, convert_result["dropped_bytes"])
 
-    raw_df = spark.read.option("header", "true").csv(str(utf8_path))
+    raw_df = _read_csv_as_spark_df(spark, utf8_path)
     actual_columns = raw_df.columns
 
     if not is_rental_history_file(actual_columns):

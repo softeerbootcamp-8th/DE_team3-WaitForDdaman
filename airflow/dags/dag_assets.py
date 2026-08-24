@@ -22,6 +22,13 @@ STATION_MASTER_BRONZE = Asset("station_master_bronze")
 # (historical reconciliation의 날짜별 복구 task는 자동 복구 전용이라 Asset을 직접 발행하지 않는다).
 RENTAL_HISTORY_BRONZE = Asset("rental_history_bronze")
 
+# rental_history Silver 승격이 성공적으로 끝났음을 나타내는 Asset.
+# silver_rental_history_dag.py의 transform_silver_rental_history 태스크가 outlets로
+# 이 Asset을 갱신하고, dq_rental_history_dag.py(#217)가 DQ 어써션 파이프라인의
+# 트리거로 쓴다 - Silver 테이블(silver.rental_history)이 갱신된 뒤에 그 테이블을
+# 대상으로 어써션을 돌려야 하므로 Bronze Asset이 아니라 이 Asset을 구독해야 한다.
+RENTAL_HISTORY_SILVER = Asset("rental_history_silver")
+
 # failure_report Bronze 적재가 성공적으로 끝났음을 나타내는 Asset.
 # bronze_daily_batch_all_sources_dag.py의 daily_batch_failure_report 태스크가
 # outlets로 이 Asset을 갱신하고, silver_failure_report_dag.py가
