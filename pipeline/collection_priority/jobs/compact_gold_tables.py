@@ -132,6 +132,7 @@ TABLES_TO_COMPACT = [
     "bronze.bikeman_event",
     "bronze.bikeman_event_quarantine",
     "silver.bikeman_action_quarantine",
+    "silver.rental_history_quarantine",
     "silver.dq_check_result",
 ]
 
