@@ -54,6 +54,13 @@ BRONZE_POOL = "bronze_ingest"
 # failure_report는 키 4를 사용하므로 최대 4개 날짜 Task만 동시에 API를 호출한다.
 SEOUL_API_POOL = "seoul_api"
 
+# rental_history 날짜별 backfill/reconciliation의 promote(Bronze Iceberg commit) 전용 풀.
+# prepare(수집/선택) 단계는 SEOUL_API_POOL로 최대 3개 날짜가 동시에 도는 게 정상이지만,
+# 같은 bronze.rental_history 테이블에 여러 날짜가 동시에 PyIceberg overwrite commit을
+# 시도하면 snapshot 충돌(CommitFailedException)이 난다. slot=1로 고정해 Bronze commit
+# 순서만 직렬화하고, API 호출 병렬성은 그대로 유지한다.
+BRONZE_RENTAL_HISTORY_COMMIT_POOL = "bronze_rental_history_commit"
+
 # Silver DAG 5개(station_master/rental_history/failure_report/station_active/
 # bikeman_action)는 전부 Bronze Asset 트리거라 언제 몇 개가 동시에 도는지
 # 서로 모른다. DuckDB 윈도우/조인 연산의 동시 메모리 점유를 제어하기 위해

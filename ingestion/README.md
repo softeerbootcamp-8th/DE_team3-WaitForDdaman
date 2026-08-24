@@ -192,14 +192,21 @@ D-2까지 공백을 확인하고 날짜별 Dynamic Task Mapping으로 복구한�
 
 ```text
 check_*_gap
-  → catchup_*_date (날짜별 mapped task)
+  → catchup_failure_report_date (날짜별 mapped task)
+  → prepare_rental_history_date (날짜별 mapped task: 수집+선택)
+      → promote_rental_history_date (날짜별 mapped task: 승격+completion marker)
   → completion 확인
   → 원천별 Bronze 워터마크 전진
 ```
 
 대여이력은 `SEOUL_API_KEY1~3`, 고장신고는 `SEOUL_API_KEY4`를 사용하며 `seoul_api`
-Pool은 전체 4개 Task까지만 허용한다. 날짜 Task는 워터마크를 변경하지 않고 결과만
-completion marker에 기록한다.
+Pool은 전체 4개 Task까지만 허용한다. 대여이력은 prepare/promote 두 단계로 나뉜다 -
+prepare(API 수집 + Raw snapshot 선택)는 `seoul_api` Pool에서 날짜별로 최대 3개까지
+병렬 실행되지만, promote(Bronze 승격 + completion marker)는 같은 `bronze.rental_history`
+Iceberg 테이블에 동시에 commit하면 충돌하므로 전용 `bronze_rental_history_commit`
+Pool(slot=1)에서 날짜 순서 상관없이 1개씩만 실행된다. promote는 prepare 성공 여부와
+무관하게 항상 실행되어(all_done) 실패한 날짜도 completion marker에 FAILED로 남기고,
+날짜 Task는 워터마크를 변경하지 않고 결과만 completion marker에 기록한다.
 
 ```text
 _meta/completion/bronze_rental_history/target_date=YYYY-MM-DD/completion.json

@@ -201,6 +201,51 @@ def test_preliminary_current_range_uses_its_own_observed_hour():
     assert rejection.code == policy.REASON_RANGE_MISMATCH
 
 
+def test_expected_hours_confirmed_role_is_full_day_even_when_target_equals_run_date():
+    """#195 회귀: 날짜 backfill/catchup은 target_date == cutoff.date()이면서도
+
+    role=CONFIRMED로 하루 전체(0~23시)를 기대해야 한다. role을 무시하고 날짜
+    비교만 하면 실행 시각 직전까지로 좁혀져 정상적으로 수집된 24시간 manifest가
+    RANGE_MISMATCH로 거부된다.
+    """
+    cutoff = _cutoff("2026-08-22T06:00:00+09:00")
+
+    assert (
+        policy.expected_hours(
+            date(2026, 8, 22), cutoff.date(), cutoff, policy.ROLE_CONFIRMED
+        )
+        == VALID_HOURS_FULL_DAY
+    )
+    # role을 넘기지 않으면 기존 날짜 비교 동작을 그대로 유지한다.
+    assert policy.expected_hours(date(2026, 8, 22), cutoff.date(), cutoff) == [
+        0, 1, 2, 3, 4, 5,
+    ]
+
+
+def test_select_snapshots_accepts_full_day_backfill_targeting_run_date():
+    """#195 회귀: 날짜 backfill의 cutoff.date()가 target_date와 같아도
+
+    FINAL manifest가 요청한 24시간 전체가 그대로 승격 대상으로 선택돼야 한다.
+    """
+    cutoff = _cutoff("2026-08-22T06:00:00+09:00")
+    target_date = date(2026, 8, 22)
+    windows = policy.build_date_backfill_windows(target_date)
+    final = _manifest(
+        "2026-08-22", "2026-08-22T06:00:00+09:00", "FINAL", VALID_HOURS_FULL_DAY
+    )
+
+    selection = policy.select_snapshots(
+        cutoff=cutoff,
+        windows=windows,
+        candidates=[_candidate(final)],
+        fallback_enabled=False,
+    )
+
+    assert selection.missing == []
+    assert [s["target_date"] for s in selection.selected] == ["2026-08-22"]
+    assert selection.selected[0]["snapshot_type"] == "FINAL"
+
+
 def test_manifest_from_microsecond_cutoff_is_not_rejected_as_schema_invalid():
     """#182 회귀: collect_rental_history_raw.parse_collection_cutoff()가 마이크로초를
     자르므로, snapshot_keys()가 만든 key와 manifest에 저장된 observed_at이 실제

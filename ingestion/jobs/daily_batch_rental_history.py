@@ -47,8 +47,32 @@ def bronze_table_name() -> str:
     return "bronze.rental_history"
 
 
+ARROW_SCHEMA = pa.schema([
+    pa.field("bike_id", pa.string()),
+    pa.field("rent_dt", pa.string()),
+    pa.field("rent_station_no", pa.string()),
+    pa.field("rent_station_name", pa.string()),
+    pa.field("rent_hold", pa.string()),
+    pa.field("return_dt", pa.string()),
+    pa.field("return_station_no", pa.string()),
+    pa.field("return_station_name", pa.string()),
+    pa.field("return_hold", pa.string()),
+    pa.field("use_min", pa.string()),
+    pa.field("use_distance_m", pa.string()),
+    pa.field("user_class_cd", pa.string()),
+    pa.field("sex_cd", pa.string()),
+    pa.field("birth_year", pa.string()),
+    pa.field("rent_station_id", pa.string()),
+    pa.field("return_station_id", pa.string()),
+    pa.field("bike_se_cd", pa.string()),
+    pa.field("rent_date_partition", pa.string()),
+    pa.field("source_file", pa.string()),
+    pa.field("ingested_at", pa.timestamp("us", tz="UTC")),
+])
+
+
 def _build_arrow_table(rows: List[Dict[str, Any]], date_str: str, source_file: str) -> pa.Table:
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    ingested_at = datetime.now(timezone.utc)
 
     # 모든 표준 컬럼 리스트 초기화
     cols: Dict[str, list] = {
@@ -90,9 +114,9 @@ def _build_arrow_table(rows: List[Dict[str, Any]], date_str: str, source_file: s
 
         cols["rent_date_partition"].append(date_str)
         cols["source_file"].append(source_file)
-        cols["ingested_at"].append(now_iso)
+        cols["ingested_at"].append(ingested_at)
 
-    return pa.table(cols)
+    return pa.table(cols, schema=ARROW_SCHEMA)
 
 
 def _process_one_day(target_date: date) -> int:

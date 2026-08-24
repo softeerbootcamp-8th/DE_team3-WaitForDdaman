@@ -201,9 +201,20 @@ def build_date_backfill_windows(target_date: date) -> list[CollectionWindow]:
 
 
 def expected_hours(
-    target_date: date, run_date: date, reference_at: datetime
+    target_date: date,
+    run_date: date,
+    reference_at: datetime,
+    role: str | None = None,
 ) -> list[int]:
-    """실행일 이전 날짜는 하루 전체, 실행일 당일은 기준 시각 직전 완료 시간대까지."""
+    """확정(CONFIRMED) 대상은 언제나 하루 전체, 당일 관측(CURRENT)만 기준 시각 직전까지.
+
+    role을 넘기지 않으면 기존처럼 날짜 비교로 판정한다(일반 daily 실행에서는 CONFIRMED
+    window의 target_date가 항상 run_date보다 과거라 결과가 같다). 다만 날짜 단위
+    backfill/catchup은 target_date == run_date(cutoff.date())인 채로 role=CONFIRMED가
+    들어오므로, role을 명시적으로 우선시해야 하루 전체(0~23시)를 기대한다.
+    """
+    if role == ROLE_CONFIRMED:
+        return list(range(24))
     if target_date < run_date:
         return list(range(24))
     return list(range(reference_at.astimezone(KST).hour))
@@ -488,7 +499,7 @@ def _pick_final(
     rejection = validate_manifest(
         manifest=candidate.manifest,
         manifest_key=candidate.manifest_key,
-        expected_hours=expected_hours(window.target_date, run_date, cutoff),
+        expected_hours=expected_hours(window.target_date, run_date, cutoff, window.role),
         payload_exists=candidate.payload_exists,
     )
     if rejection is not None:
@@ -515,7 +526,7 @@ def _pick_preliminary(
         if freshness is not None:
             _count(rejections, freshness.code)
             continue
-        hours = expected_hours(window.target_date, run_date, observed_at)
+        hours = expected_hours(window.target_date, run_date, observed_at, window.role)
         if not hours:
             _count(rejections, REASON_RANGE_MISMATCH)
             continue
