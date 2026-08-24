@@ -47,6 +47,30 @@ def bronze_table_name() -> str:
     return "bronze.rental_history"
 
 
+ARROW_SCHEMA = pa.schema([
+    pa.field("bike_id", pa.string()),
+    pa.field("rent_dt", pa.string()),
+    pa.field("rent_station_no", pa.string()),
+    pa.field("rent_station_name", pa.string()),
+    pa.field("rent_hold", pa.string()),
+    pa.field("return_dt", pa.string()),
+    pa.field("return_station_no", pa.string()),
+    pa.field("return_station_name", pa.string()),
+    pa.field("return_hold", pa.string()),
+    pa.field("use_min", pa.string()),
+    pa.field("use_distance_m", pa.string()),
+    pa.field("user_class_cd", pa.string()),
+    pa.field("sex_cd", pa.string()),
+    pa.field("birth_year", pa.string()),
+    pa.field("rent_station_id", pa.string()),
+    pa.field("return_station_id", pa.string()),
+    pa.field("bike_se_cd", pa.string()),
+    pa.field("rent_date_partition", pa.string()),
+    pa.field("source_file", pa.string()),
+    pa.field("ingested_at", pa.timestamp("us", tz="UTC")),
+])
+
+
 def _build_arrow_table(rows: List[Dict[str, Any]], date_str: str, source_file: str) -> pa.Table:
     # bootstrap_iceberg_tables.py의 ingested_at은 TimestamptzType이라 문자열이 아니라
     # timezone-aware datetime을 그대로 넣어야 pyarrow가 timestamp[tz]로 추론한다
@@ -95,7 +119,7 @@ def _build_arrow_table(rows: List[Dict[str, Any]], date_str: str, source_file: s
         cols["source_file"].append(source_file)
         cols["ingested_at"].append(now)
 
-    return pa.table(cols)
+    return pa.table(cols, schema=ARROW_SCHEMA)
 
 
 def _process_one_day(target_date: date) -> int:

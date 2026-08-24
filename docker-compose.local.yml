@@ -168,7 +168,7 @@ services:
     command:
       - bash
       - -c
-      - airflow version && airflow pools set bronze_ingest 2 'Bronze 적재 워커 메모리 가드 (PyArrow 동시 실행 제한)' && airflow pools set silver_process 2 'Silver 변환 워커 메모리 가드 (DuckDB 동시 실행 제한)'
+      - airflow version && airflow pools set bronze_ingest 2 'Bronze 적재 워커 메모리 가드 (PyArrow 동시 실행 제한)' && airflow pools set silver_process 2 'Silver 변환 워커 메모리 가드 (DuckDB 동시 실행 제한)' && airflow pools set seoul_api 4 '서울시 API 키별 동시성 제한 (rental_history 1~3, failure_report 4)' && airflow pools set bronze_rental_history_commit 1 'bronze.rental_history 날짜별 backfill promote(Iceberg commit) 직렬화'
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'

@@ -179,6 +179,43 @@ Airflow UI에서 `Trigger DAG w/ config`를 사용할 경우 예시:
 }
 ```
 
+### Bronze 공백 자동 복구
+
+DAG ID:
+
+```text
+bronze_historical_reconciliation
+```
+
+매일 00:30에 `rental_history`와 `failure_report`의 Bronze 워터마크 다음 날짜부터
+D-2까지 공백을 확인하고 날짜별 Dynamic Task Mapping으로 복구한다.
+
+```text
+check_*_gap
+  → catchup_failure_report_date (날짜별 mapped task)
+  → prepare_rental_history_date (날짜별 mapped task: 수집+선택)
+      → promote_rental_history_date (날짜별 mapped task: 승격+completion marker)
+  → completion 확인
+  → 원천별 Bronze 워터마크 전진
+```
+
+대여이력은 `SEOUL_API_KEY1~3`, 고장신고는 `SEOUL_API_KEY4`를 사용하며 `seoul_api`
+Pool은 전체 4개 Task까지만 허용한다. 대여이력은 prepare/promote 두 단계로 나뉜다 -
+prepare(API 수집 + Raw snapshot 선택)는 `seoul_api` Pool에서 날짜별로 최대 3개까지
+병렬 실행되지만, promote(Bronze 승격 + completion marker)는 같은 `bronze.rental_history`
+Iceberg 테이블에 동시에 commit하면 충돌하므로 전용 `bronze_rental_history_commit`
+Pool(slot=1)에서 날짜 순서 상관없이 1개씩만 실행된다. promote는 prepare 성공 여부와
+무관하게 항상 실행되어(all_done) 실패한 날짜도 completion marker에 FAILED로 남기고,
+날짜 Task는 워터마크를 변경하지 않고 결과만 completion marker에 기록한다.
+
+```text
+_meta/completion/bronze_rental_history/target_date=YYYY-MM-DD/completion.json
+_meta/completion/bronze_failure_report/target_date=YYYY-MM-DD/completion.json
+```
+
+`COMPLETE_EMPTY` 또는 실패 결과도 marker로 남기며, 연속 구간이 끊기면 해당 원천의
+워터마크는 전진하지 않는다. 대여이력의 0행은 기존 수동 확인 규칙을 따른다.
+
 ### 워터마크 수동 설정
 
 DAG ID:

@@ -528,6 +528,27 @@ def test_final_run_reads_confirmed_watermark_and_collects_oldest_capped_backlog(
     assert {snapshot_type for _, _, _, snapshot_type in calls} == {"FINAL"}
 
 
+def test_date_backfill_run_does_not_read_global_watermark(monkeypatch):
+    calls = []
+
+    monkeypatch.setenv("COLLECTION_CUTOFF_AT", "2026-08-22T23:59:59+09:00")
+    monkeypatch.setenv("BACKFILL_TARGET_DATE", "2026-08-22")
+    monkeypatch.setenv("SNAPSHOT_TYPE", "FINAL")
+    monkeypatch.setattr(raw_job, "ensure_bucket", lambda bucket: None)
+    monkeypatch.setattr(
+        raw_job,
+        "read_watermark",
+        lambda: (_ for _ in ()).throw(AssertionError("날짜 Backfill은 전역 워터마크를 읽으면 안 된다")),
+    )
+    monkeypatch.setattr(raw_job, "collect_snapshot", _fake_collect(calls))
+
+    raw_job.run()
+
+    assert [(target_date, hours) for target_date, hours, _, _ in calls] == [
+        (date(2026, 8, 22), list(range(24)))
+    ]
+
+
 def test_final_current_failure_is_optional_when_t0_false(monkeypatch):
     calls = []
 

@@ -41,13 +41,22 @@ logger = logging.getLogger(__name__)
 
 WATERMARK_KEY = BRONZE_FAILURE_REPORT
 
+ARROW_SCHEMA = pa.schema([
+    pa.field("bike_no", pa.string()),
+    pa.field("reg_dttm", pa.string()),
+    pa.field("failure_type", pa.string()),
+    pa.field("reg_date_partition", pa.string()),
+    pa.field("source_file", pa.string()),
+    pa.field("ingested_at", pa.timestamp("us", tz="UTC")),
+])
+
 
 def _table_name() -> str:
     return "bronze.failure_report"
 
 
 def _build_arrow_table(rows: List[Dict[str, Any]], date_str: str) -> pa.Table:
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    ingested_at = datetime.now(timezone.utc)
     source_file_val = f"api:{date_str}"
 
     cols: Dict[str, list] = {
@@ -74,9 +83,9 @@ def _build_arrow_table(rows: List[Dict[str, Any]], date_str: str) -> pa.Table:
 
         cols["reg_date_partition"].append(date_str)
         cols["source_file"].append(source_file_val)
-        cols["ingested_at"].append(now_iso)
+        cols["ingested_at"].append(ingested_at)
 
-    return pa.table(cols)
+    return pa.table(cols, schema=ARROW_SCHEMA)
 
 
 def _process_one_day(target_date: date) -> int:
