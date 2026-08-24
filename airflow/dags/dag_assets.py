@@ -19,7 +19,7 @@ STATION_MASTER_BRONZE = Asset("station_master_bronze")
 # publish_bronze_asset 태스크만 outlets로 이 Asset을 갱신하고,
 # silver_rental_history_dag.py가 이 Asset의 갱신을 스케줄 트리거로 사용한다.
 # 승격/확정 워터마크가 모두 끝난 뒤에만 발행돼야 하므로 앞 단계 태스크에는 절대 걸지 않는다
-# (수동 catch-up DAG의 catchup_rental_history는 legacy 경로라 예외로 직접 발행한다).
+# (historical reconciliation의 날짜별 복구 task는 자동 복구 전용이라 Asset을 직접 발행하지 않는다).
 RENTAL_HISTORY_BRONZE = Asset("rental_history_bronze")
 
 # failure_report Bronze 적재가 성공적으로 끝났음을 나타내는 Asset.

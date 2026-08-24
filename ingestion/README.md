@@ -179,35 +179,35 @@ Airflow UI에서 `Trigger DAG w/ config`를 사용할 경우 예시:
 }
 ```
 
-### 대여이력 날짜 단위 Backfill
+### Bronze 공백 자동 복구
 
 DAG ID:
 
 ```text
-bronze_rental_history_backfill
+bronze_historical_reconciliation
 ```
 
-대여이력 공백을 날짜별 독립 DagRun으로 복구한다. DAG를 unpause하는 것만으로 과거
-실행이 자동 생성되지는 않으며, 필요한 구간을 Airflow Backfill로 명시한다.
+매일 00:30에 `rental_history`와 `failure_report`의 Bronze 워터마크 다음 날짜부터
+D-2까지 공백을 확인하고 날짜별 Dynamic Task Mapping으로 복구한다.
 
-```bash
-airflow backfill create --dag-id bronze_rental_history_backfill \
-  --from-date 2026-07-01 --to-date 2026-07-03 \
-  --max-active-runs 2
+```text
+check_*_gap
+  → catchup_*_date (날짜별 mapped task)
+  → completion 확인
+  → 원천별 Bronze 워터마크 전진
 ```
 
-각 날짜는 `collect_final_raw_for_date → select_final_raw_for_date →
-promote_date_to_bronze → write_completion_marker` 순서로 처리한다. 날짜별 Raw와
-Bronze 파티션은 재실행해도 같은 키를 덮어쓰며, 이 경로는 전역 Bronze 워터마크를 읽거나
-갱신하지 않는다. 결과는 다음 marker에 기록된다.
+대여이력은 `SEOUL_API_KEY1~3`, 고장신고는 `SEOUL_API_KEY4`를 사용하며 `seoul_api`
+Pool은 전체 4개 Task까지만 허용한다. 날짜 Task는 워터마크를 변경하지 않고 결과만
+completion marker에 기록한다.
 
 ```text
 _meta/completion/bronze_rental_history/target_date=YYYY-MM-DD/completion.json
+_meta/completion/bronze_failure_report/target_date=YYYY-MM-DD/completion.json
 ```
 
-`COMPLETE_EMPTY` 또는 실패 결과도 marker로 남지만 Backfill DagRun은 실패로 종료된다.
-원천 0행이 정상적인 휴일인지 장애인지 운영자가 확인한 뒤 `confirm_rental_history_empty`
-등의 수동 절차로 후속 확정을 진행한다.
+`COMPLETE_EMPTY` 또는 실패 결과도 marker로 남기며, 연속 구간이 끊기면 해당 원천의
+워터마크는 전진하지 않는다. 대여이력의 0행은 기존 수동 확인 규칙을 따른다.
 
 ### 워터마크 수동 설정
 

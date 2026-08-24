@@ -2,8 +2,8 @@
 Bronze 고장신고 Catchup DAG - 수동 복구 전용
 
 ### 왜 필요한가
-대여이력은 `bronze_rental_history_backfill`이 logical date별로 처리하므로 이 legacy
-Catchup DAG에서는 제거했다. 이 DAG은 failure_report의 수동 복구만 유지한다.
+대여이력과 고장신고의 자동 gap 복구는 `bronze_historical_reconciliation`이 담당한다.
+이 legacy Catchup DAG은 호환성을 위해 failure_report의 수동 복구만 유지한다.
 
 ### bronze_initial_load_all_sources와의 관계
 초기 적재나 일 배치와 독립적인 수동 DAG이다. failure_report 누락 구간을

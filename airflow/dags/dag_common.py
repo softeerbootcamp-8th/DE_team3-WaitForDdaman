@@ -50,6 +50,10 @@ load_env_file()
 # 풀이 없으면 이 풀을 지정한 태스크는 스케줄되지 못하고 대기 상태에 머문다.
 BRONZE_POOL = "bronze_ingest"
 
+# 서울시 Open API 키별 동시성을 제어하는 전역 풀. rental_history는 키 1~3,
+# failure_report는 키 4를 사용하므로 최대 4개 날짜 Task만 동시에 API를 호출한다.
+SEOUL_API_POOL = "seoul_api"
+
 # Silver DAG 5개(station_master/rental_history/failure_report/station_active/
 # bikeman_action)는 전부 Bronze Asset 트리거라 언제 몇 개가 동시에 도는지
 # 서로 모른다. DuckDB 윈도우/조인 연산의 동시 메모리 점유를 제어하기 위해
