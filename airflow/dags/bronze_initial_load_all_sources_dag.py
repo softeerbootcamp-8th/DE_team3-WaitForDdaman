@@ -393,8 +393,6 @@ fi
         execution_timeout=timedelta(minutes=5),
     )
 
-    load_silver_rental_history = load_silver_rental_history_chunk
-
     # failure_report: silver_failure_report.py는 워터마크로 구간을 자르지 않고 매번 Bronze
     # 전체를 재처리한다(#76 문서 참고) - bootstrap 대상이 아니다. set_bronze_ingestion_watermark_*
     # 이후에 실행해, 처리 후 기록되는 Silver 워터마크(Bronze 워터마크의 미러)가 이번 초기
