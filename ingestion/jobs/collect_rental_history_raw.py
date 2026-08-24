@@ -21,6 +21,7 @@ from jobs.rental_history_snapshot_policy import (
     ROLE_CONFIRMED,
     ROLE_CURRENT,
     CollectionWindow,
+    build_date_backfill_windows,
     build_final_windows,
     parse_bool,
     parse_max_days,
@@ -97,6 +98,15 @@ def build_run_windows(cutoff: datetime, snapshot_type: str) -> list[CollectionWi
             )
             for target_date, hours in build_collection_windows(cutoff)
         ]
+
+    backfill_target = os.getenv("BACKFILL_TARGET_DATE")
+    if backfill_target:
+        target_date = date.fromisoformat(backfill_target)
+        if target_date != cutoff.date():
+            raise RawCollectionError(
+                "BACKFILL_TARGET_DATE must equal COLLECTION_CUTOFF_AT date"
+            )
+        return build_date_backfill_windows(target_date)
 
     t0_enabled = parse_bool(os.getenv("RENTAL_HISTORY_T0_ENABLED"))
     max_days = parse_max_days(os.getenv("MAX_DAYS_PER_RUN"))

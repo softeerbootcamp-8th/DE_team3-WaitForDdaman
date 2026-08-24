@@ -91,6 +91,19 @@ def test_build_final_windows_caps_oldest_contiguous_backlog_at_three_days():
     assert all(w.required for w in confirmed)
 
 
+def test_build_date_backfill_windows_is_one_required_full_day_without_watermark():
+    windows = policy.build_date_backfill_windows(date(2026, 8, 22))
+
+    assert windows == [
+        policy.CollectionWindow(
+            target_date=date(2026, 8, 22),
+            hours=VALID_HOURS_FULL_DAY,
+            required=True,
+            role=policy.ROLE_CONFIRMED,
+        )
+    ]
+
+
 def test_build_final_windows_without_cap_covers_backlog_up_to_yesterday():
     windows = policy.build_final_windows(
         cutoff=_cutoff("2026-08-22T06:00:00+09:00"),

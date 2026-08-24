@@ -47,7 +47,8 @@ bikeman은 워터마크로 며칠 밀려도 따라잡는다).
   전파되는 걸 막기 위함이다. 앞 단계에 outlet이 있으면 부분 상태가 그대로 하류에 흘러간다.
 - 기본값은 RENTAL_HISTORY_FALLBACK_ENABLED=false, RENTAL_HISTORY_T0_ENABLED=false다.
   이 상태의 처리 범위·실패 의미는 기존 단일 태스크와 같고, 예비 관측본은 쓰지 않는다.
-- 대규모 수동 gap 메우기는 기존대로 bronze_catchup_all_sources의 legacy 잡이 담당한다.
+- 대여이력의 대규모 gap은 bronze_rental_history_backfill에서 날짜별로 처리한다.
+  고장신고의 수동 gap만 bronze_catchup_all_sources의 legacy 잡이 담당한다.
 
 ### 원천별 성격
 | 소스 | 조회 방식 | 증분 기준 | 재처리 |

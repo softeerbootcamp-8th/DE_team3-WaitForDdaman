@@ -184,6 +184,22 @@ def build_final_windows(
     return windows
 
 
+def build_date_backfill_windows(target_date: date) -> list[CollectionWindow]:
+    """날짜 단위 Backfill이 처리할 단 하루의 확정 window를 만든다.
+
+    전역 confirmed watermark를 읽지 않는다. Airflow logical date가 곧 대상 날짜이며,
+    이 함수의 결과는 날짜별 DagRun 사이에 공유 상태가 없도록 항상 동일하다.
+    """
+    return [
+        CollectionWindow(
+            target_date=target_date,
+            hours=list(range(24)),
+            required=True,
+            role=ROLE_CONFIRMED,
+        )
+    ]
+
+
 def expected_hours(
     target_date: date, run_date: date, reference_at: datetime
 ) -> list[int]:
