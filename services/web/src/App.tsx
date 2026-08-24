@@ -7,10 +7,13 @@ import { useClassifiedPool } from "./hooks/useClassifiedPool";
 import { DetailPage } from "./pages/DetailPage";
 import { ConfirmedPage } from "./pages/ConfirmedPage";
 import { MainPage } from "./pages/MainPage";
+import { FieldPage } from "./pages/FieldPage";
 import type { Bike, BikeLists, MapData, RegionFilter, SnapshotMeta } from "./types";
 import { ALL_FILTER, buildGuSideMap, totalBikeCount } from "./utils/regions";
 
-type View = "main" | "detail" | "confirmed";
+type View = "main" | "detail" | "confirmed" | "field";
+const VIEW_ORDER: View[] = ["main", "detail", "confirmed", "field"];
+const VIEW_LABEL: Record<View, string> = { main: "메인", detail: "상세", confirmed: "확정 내역", field: "기사님 화면" };
 
 function useSnapshotData() {
   const [meta, setMeta] = useState<SnapshotMeta | null>(null);
@@ -70,6 +73,9 @@ function Dashboard({ meta, mapData, pool }: DashboardProps) {
   const { dest, source } = useClassifiedPool(pool, ALL_FILTER, capacity);
   const totalBikes = useMemo(() => totalBikeCount(mapData.stations, ALL_FILTER), [mapData]);
 
+  const viewIndex = VIEW_ORDER.indexOf(view);
+  const nextView = VIEW_ORDER[viewIndex + 1];
+
   return (
     <>
       <div className="summary-row">
@@ -77,15 +83,11 @@ function Dashboard({ meta, mapData, pool }: DashboardProps) {
       </div>
 
       <div className="tab-bar">
-        <button className={`tab-btn${view === "main" ? " active" : ""}`} onClick={() => setView("main")}>
-          메인
-        </button>
-        <button className={`tab-btn${view === "detail" ? " active" : ""}`} onClick={() => setView("detail")}>
-          상세
-        </button>
-        <button className={`tab-btn${view === "confirmed" ? " active" : ""}`} onClick={() => setView("confirmed")}>
-          확정 내역
-        </button>
+        {VIEW_ORDER.map((v) => (
+          <button key={v} className={`tab-btn${view === v ? " active" : ""}`} onClick={() => setView(v)}>
+            {VIEW_LABEL[v]}
+          </button>
+        ))}
       </div>
 
       {view === "main" && (
@@ -112,6 +114,15 @@ function Dashboard({ meta, mapData, pool }: DashboardProps) {
         />
       )}
       {view === "confirmed" && <ConfirmedPage />}
+      {view === "field" && <FieldPage />}
+
+      {nextView && (
+        <button className="next-step-btn" onClick={() => setView(nextView)}>
+          <img className="next-step-mascot" src="/img/hamster-badge.png" alt="" />
+          <span className="next-step-tag">시연</span>
+          다음 단계로: {VIEW_LABEL[nextView]} →
+        </button>
+      )}
     </>
   );
 }
