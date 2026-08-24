@@ -612,6 +612,23 @@ def run() -> None:
     catalog = build_iceberg_catalog()
     silver_table = _ensure_silver_table(catalog)
 
+    # #232: 백필 DAG가 청크를 dynamic task mapping으로 독립 실행할 때 쓰는 경로.
+    # 워터마크를 읽지도 쓰지도 않는다 - 병렬로 도는 청크들이 서로 다른 시점의
+    # 워터마크를 읽어 겹치거나, 워터마크를 여러 번 잘못된 순서로 쓰는 걸 막기 위함.
+    # 워터마크 전진은 airflow/dags/bronze_initial_load_all_sources_dag.py의 마무리
+    # 태스크가 모든 청크 성공 후 한 번만 담당한다.
+    range_start = os.getenv("BACKFILL_RANGE_START")
+    range_end = os.getenv("BACKFILL_RANGE_END")
+    if range_start and range_end:
+        start_date = datetime.strptime(range_start, "%Y-%m-%d").date()
+        end_date = datetime.strptime(range_end, "%Y-%m-%d").date()
+        try:
+            _process_range(catalog, silver_table, start_date, end_date)
+        except SilverValidationError as e:
+            logger.error("%s~%s 처리 실패, 배치 중단: %s", start_date, end_date, e)
+            sys.exit(1)
+        return
+
     # 상한선: Bronze가 확정 커밋한 날짜 (rental_history 기본 워터마크 키)
     bronze_watermark = read_watermark()
     # 하한선: Silver 전용 워터마크

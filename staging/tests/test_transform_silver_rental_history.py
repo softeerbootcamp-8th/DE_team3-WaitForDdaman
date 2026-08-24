@@ -523,6 +523,47 @@ def test_run_skips_current_day_and_still_advances_watermark_without_promotion_me
     assert [step[0] for step in order] == ["process_range", "write_watermark"]
 
 
+# ---------------------------------------------------------------- 백필 명시적 범위 오버라이드 (#232)
+
+
+def test_run_uses_explicit_range_when_both_env_set(monkeypatch):
+    monkeypatch.setenv("BACKFILL_RANGE_START", "2017-03-01")
+    monkeypatch.setenv("BACKFILL_RANGE_END", "2017-03-05")
+    monkeypatch.delenv("MAX_DAYS_PER_RUN", raising=False)
+
+    calls = []
+
+    def fake_process_range(catalog, silver_table, start_date, end_date):
+        calls.append((start_date, end_date))
+        return 0
+
+    with mock.patch.object(tsr, "build_iceberg_catalog", return_value=mock.Mock()), \
+         mock.patch.object(tsr, "_ensure_silver_table", return_value=mock.Mock()), \
+         mock.patch.object(tsr, "_process_range", side_effect=fake_process_range), \
+         mock.patch.object(tsr, "read_watermark") as mock_read_wm, \
+         mock.patch.object(tsr, "write_watermark") as mock_write_wm, \
+         mock.patch.object(tsr, "ensure_bucket"):
+        run()
+
+    assert calls == [(date(2017, 3, 1), date(2017, 3, 5))]
+    mock_read_wm.assert_not_called()
+    mock_write_wm.assert_not_called()
+
+
+def test_run_ignores_partial_range_env(monkeypatch):
+    """BACKFILL_RANGE_START만 있고 END가 없으면 기존 워터마크 경로를 그대로 탄다."""
+    monkeypatch.setenv("BACKFILL_RANGE_START", "2017-03-01")
+    monkeypatch.delenv("BACKFILL_RANGE_END", raising=False)
+
+    with mock.patch.object(tsr, "build_iceberg_catalog", return_value=mock.Mock()), \
+         mock.patch.object(tsr, "_ensure_silver_table", return_value=mock.Mock()), \
+         mock.patch.object(tsr, "read_watermark", return_value=date(2017, 3, 1)) as mock_read_wm, \
+         mock.patch.object(tsr, "ensure_bucket"):
+        run()
+
+    assert mock_read_wm.called
+
+
 def test_build_silver_promotion_document_inherits_degraded_bronze_mode_on_mixed_promotion():
     """확정 backlog가 PRELIMINARY라 Bronze marker.mode=DEGRADED인 채로 당일 entry가
     FINAL이면, 당일 entry만 보고 NORMAL로 기록하지 않고 DEGRADED를 계승해야 한다."""
