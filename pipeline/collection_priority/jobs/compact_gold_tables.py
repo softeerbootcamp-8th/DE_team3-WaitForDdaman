@@ -42,10 +42,32 @@ bronze.rental_history / silver.rental_history는 이유가 다르다 - 초기 �
 ### 보존 정책
 SNAPSHOT_RETENTION_DAYS(기본 7일)보다 오래된 스냅샷을 만료 대상으로 하되,
 MIN_SNAPSHOTS_TO_RETAIN(기본 3개)은 나이와 무관하게 항상 남겨서 문제 발생 시
-최근 며칠로 롤백할 여지를 남긴다. TABLES_TO_COMPACT의 6개 테이블 전부 예외
-없이 이 정책을 쓴다 - bronze/silver.rental_history도 동일(위 참고).
+최근 며칠로 롤백할 여지를 남긴다. TABLES_TO_COMPACT의 테이블 전부 예외 없이
+이 정책을 쓴다 - bronze/silver.rental_history도 동일(위 참고).
 remove_orphan_files는 Iceberg 기본값(3일 이내 생성 파일 보호)을 그대로 쓴다 -
 별도로 완화할 이유가 없다.
+
+### #205 - 컴팩션 대상 최종 확정 (TEMP류/초기적재 이외 테이블도 포함)
+처음엔 "TEMP 전체 덮어쓰기"와 "초기 적재 스몰파일" 두 케이스만 컴팩션이
+필요하다고 봤지만, 세 프로시저가 다루는 문제를 다시 보면 write 패턴과
+무관하게 거의 모든 활성 테이블에 적용된다:
+
+    - expire_snapshots: 커밋 방식(overwrite_partition이든 append든)과
+      무관하게 커밋마다 새 스냅샷 + 매니페스트가 쌓인다. 데이터가 안
+      겹쳐도 메타데이터는 계속 늘어나고, 같은 파티션을 재실행/백필하면
+      그 파티션의 이전 버전 파일이 orphan처럼 남는데 이것도 expire_snapshots
+      로만 정리된다.
+    - rewrite_data_files: 초기 대량적재의 스몰파일뿐 아니라, 매일 소량만
+      append하는 테이블(quarantine, dq_check_result 등)은 하루에 파일
+      하나씩 쌓이는 것 자체가 스몰파일 누적이다. 정상 볼륨 테이블도 쓰기
+      병렬도 때문에 파티션당 여러 파일로 쪼개질 수 있다.
+    - remove_orphan_files: write 패턴과 무관하게 pyiceberg 커밋 중간 실패
+      가능성은 동일하므로 전 테이블에 안전하게 적용 가능.
+
+그래서 포함 여부를 가르는 실질적 기준은 write 패턴의 종류가 아니라
+"지금도 정기적으로 쓰기가 일어나는가"다. 활성 파이프라인 테이블은 전부
+포함하고, 더 이상 쓰기가 없는 마이그레이션 산출물만 명시적으로 제외한다
+(EXCLUDED_TABLES 참고).
 
 ### 왜 gold_dim_fact가 아니라 별도 DAG인가
 daily 배치마다 매번 돌리면(파일/스냅샷이 하루에 1개씩만 늘어나는데) 배보다
@@ -70,16 +92,59 @@ from common.spark_session import build_spark_session
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# gold.* 4개(TEMP류 - 스냅샷 만료가 핵심) + bronze/silver.rental_history(누적 -
-# 초기 적재의 작은 파일이 컴팩션 대상). "namespace.table" 전체 식별자로 적는다 -
-# gold 밖의 테이블이 섞여 있어 더 이상 namespace를 고정할 수 없다(#173).
+# "namespace.table" 전체 식별자로 적는다 - gold 밖의 테이블이 섞여 있어 더
+# 이상 namespace를 고정할 수 없다(#173). #205로 활성 파이프라인 테이블 전체로
+# 대상을 확장 - 카테고리는 위 "#205" 절 참고.
 TABLES_TO_COMPACT = [
+    # TEMP류 - 파티션 없이 매일 전체를 새로 쓰는 테이블 (스냅샷 만료가 핵심)
     "gold.bike_location",
     "gold.station_active",
     "gold.fact_station_inventory",
     "gold.bike_last_action",
+
+    # 초기 적재 스몰파일 - 누적(append) 테이블이지만 초기 적재가 작은 파일을
+    # 대량 생성 (#173)
     "bronze.rental_history",
     "silver.rental_history",
+
+    # #205 - 전체 덮어쓰기 (silver_failure_report.py: overwrite_all(), 매번
+    # 브론즈 전체 재처리)
+    "silver.failure_report",
+
+    # #205 - 매일 파티션 덮어쓰기 (overwrite_partition, 오늘 파티션만 갱신하지만
+    # 커밋마다 스냅샷/매니페스트가 쌓이고 파티션당 여러 파일로 쪼개질 수 있음)
+    "silver.station_master",
+    "silver.station_active",
+    "gold.dim_bike",
+    "gold.mart_bike_risk_daily",
+    "gold.mart_station_daily",
+
+    # #205 - #171(PR #190)로 Spark에서 DuckDB+pyiceberg로 전환된 gold 테이블
+    "gold.bike_features_daily",
+    "gold.fact_bike_risk",
+    "gold.fact_bike_decision",
+
+    # #205 - Append-only (정규 파이프라인 테이블 + 저볼륨 append로 스몰파일이
+    # 쌓이는 quarantine/dq_check_result)
+    "bronze.station_master",
+    "bronze.station_active",
+    "bronze.failure_report",
+    "bronze.bikeman_event",
+    "bronze.bikeman_event_quarantine",
+    "silver.bikeman_action_quarantine",
+    "silver.dq_check_result",
+]
+
+# #205 - 제외 확정: 둘 다 PR #166 T4(파티션 컬럼명 변경) 마이그레이션의
+# 일회성 산출물이고, 정상 운영 중에는 다시 쓰이지 않는다
+# (ingestion/jobs/silver_bikeman_action.py 참고).
+#   - silver.bikeman_action_hidden_partition_backup: 구 hidden-partition
+#     테이블을 rename으로 보존한 백업, 의도적으로 유지
+#   - silver.bikeman_action_identity_rebuild: identity 파티션 재구축용
+#     스크래치 테이블, 재구축 완료 후 idle 상태
+EXCLUDED_TABLES = [
+    "silver.bikeman_action_hidden_partition_backup",
+    "silver.bikeman_action_identity_rebuild",
 ]
 
 SNAPSHOT_RETENTION_DAYS = 7
