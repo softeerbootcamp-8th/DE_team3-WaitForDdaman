@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sys
+from datetime import date
 
 import config
 from common.s3_utils import ensure_bucket, get_json, list_keys, put_json
@@ -18,6 +19,7 @@ from jobs.rental_history_snapshot_policy import (
     DEFAULT_PRELIMINARY_MAX_AGE_MINUTES,
     Candidate,
     Selection,
+    build_date_backfill_windows,
     build_final_windows,
     build_promotion_id,
     parse_bool,
@@ -100,13 +102,23 @@ def run() -> dict:
     bucket = config.SETTINGS.raw_bucket
     ensure_bucket(bucket)
 
-    confirmed_through = read_watermark()
-    windows = build_final_windows(
-        cutoff=cutoff,
-        confirmed_through=confirmed_through,
-        max_days=max_days,
-        t0_enabled=t0_enabled,
-    )
+    backfill_target = os.getenv("BACKFILL_TARGET_DATE")
+    if backfill_target:
+        target_date = date.fromisoformat(backfill_target)
+        if target_date != cutoff.date():
+            raise SnapshotSelectionError(
+                "BACKFILL_TARGET_DATE must equal COLLECTION_CUTOFF_AT date"
+            )
+        confirmed_through = None
+        windows = build_date_backfill_windows(target_date)
+    else:
+        confirmed_through = read_watermark()
+        windows = build_final_windows(
+            cutoff=cutoff,
+            confirmed_through=confirmed_through,
+            max_days=max_days,
+            t0_enabled=t0_enabled,
+        )
     required_dates = [w.target_date for w in windows if w.required]
     candidates = load_candidates(bucket, required_dates)
 

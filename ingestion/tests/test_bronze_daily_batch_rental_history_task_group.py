@@ -193,7 +193,7 @@ def test_every_rental_task_receives_the_same_logical_cutoff(dag):
     assert len(cutoffs) == 1
 
 
-def test_catchup_dag_still_runs_the_legacy_rental_history_job():
+def test_legacy_catchup_dag_no_longer_runs_rental_history():
     import sys
 
     from airflow.dag_processing.dagbag import DagBag
@@ -202,7 +202,5 @@ def test_catchup_dag_still_runs_the_legacy_rental_history_job():
     if folder not in sys.path:
         sys.path.insert(0, folder)
     catchup = DagBag(folder).dags["bronze_catchup_all_sources"]
-    task = catchup.get_task("catchup_rental_history")
-
-    assert "python -m jobs.daily_batch_rental_history" in task.bash_command
-    assert [outlet.name for outlet in task.outlets] == ["rental_history_bronze"]
+    assert "catchup_rental_history" not in catchup.task_ids
+    assert "catchup_failure_report" in catchup.task_ids
