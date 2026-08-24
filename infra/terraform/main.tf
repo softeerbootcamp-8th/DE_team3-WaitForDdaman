@@ -233,3 +233,66 @@ resource "aws_cloudwatch_metric_alarm" "dlq_messages_visible" {
     QueueName = aws_sqs_queue.raw_fetch_dlq.name
   }
 }
+
+# ------------------------------------------------------------------------------
+# Slack Notification (SNS -> Lambda -> Slack Incoming Webhook) - Issue #180
+# ------------------------------------------------------------------------------
+# slack_webhook_url이 비어있는 환경(로컬/dev)에서는 이 리소스들을 전부 스킵한다 -
+# 웹훅이 없는데 리소스를 만들면 알림이 항상 실패하기만 하고, terraform apply
+# 자체를 막을 이유는 없다.
+locals {
+  slack_notifications_enabled = var.slack_webhook_url != ""
+}
+
+data "archive_file" "notify_slack_zip" {
+  type        = "zip"
+  source_file = "${path.module}/../lambdas/notify_slack/lambda_function.py"
+  output_path = "${path.module}/build/notify_slack.zip"
+}
+
+resource "aws_iam_role" "notify_slack_lambda_role" {
+  count              = local.slack_notifications_enabled ? 1 : 0
+  name               = "notify-slack-lambda-exec-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+}
+
+resource "aws_iam_role_policy_attachment" "notify_slack_basic_execution" {
+  count      = local.slack_notifications_enabled ? 1 : 0
+  role       = aws_iam_role.notify_slack_lambda_role[0].name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_lambda_function" "notify_slack" {
+  count            = local.slack_notifications_enabled ? 1 : 0
+  function_name    = "notify_slack"
+  role             = aws_iam_role.notify_slack_lambda_role[0].arn
+  handler          = "lambda_function.lambda_handler"
+  runtime          = "python3.12"
+  timeout          = 10
+  memory_size      = 128
+
+  filename         = data.archive_file.notify_slack_zip.output_path
+  source_code_hash = data.archive_file.notify_slack_zip.output_base64sha256
+
+  environment {
+    variables = {
+      SLACK_WEBHOOK_URL = var.slack_webhook_url
+    }
+  }
+}
+
+resource "aws_sns_topic_subscription" "raw_fetch_alerts_to_slack" {
+  count     = local.slack_notifications_enabled ? 1 : 0
+  topic_arn = aws_sns_topic.raw_fetch_alerts.arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.notify_slack[0].arn
+}
+
+resource "aws_lambda_permission" "allow_sns_notify_slack" {
+  count         = local.slack_notifications_enabled ? 1 : 0
+  statement_id  = "AllowExecutionFromSNSRawFetchAlerts"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.notify_slack[0].function_name
+  principal     = "sns.amazonaws.com"
+  source_arn    = aws_sns_topic.raw_fetch_alerts.arn
+}

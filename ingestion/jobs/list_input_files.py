@@ -34,6 +34,7 @@ from pathlib import Path
 import config
 from common.file_downloader import ensure_backfill_files
 from common.file_utils import expand_archives
+from common.s3_utils import ensure_bucket, upload_file
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -55,11 +56,21 @@ def run(dataset: str, input_dir: str, file_pattern: str) -> list[str]:
     ensure_backfill_files(_DATASET_IDS[dataset](), input_path, file_pattern)
 
     raw_files = sorted(input_path.glob(file_pattern))
-    input_files = sorted(str(p) for p in expand_archives(raw_files, input_path))
+    input_files = sorted(expand_archives(raw_files, input_path))
     if not input_files:
         logger.error("입력 디렉토리에 파일이 없습니다: %s (패턴: %s)", input_dir, file_pattern)
         sys.exit(1)
-    return input_files
+
+    if config.SETTINGS.env == "aws":
+        ensure_bucket(config.SETTINGS.raw_bucket)
+        uris = []
+        for path in input_files:
+            key = f"raw/{dataset}/_initial_load_staging/{path.name}"
+            upload_file(path, config.SETTINGS.raw_bucket, key)
+            uris.append(f"s3://{config.SETTINGS.raw_bucket}/{key}")
+        return uris
+
+    return [str(p) for p in input_files]
 
 
 if __name__ == "__main__":

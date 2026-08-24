@@ -29,6 +29,7 @@ from common.api_client import (
 from common.iceberg_io import overwrite_partition
 from common.s3_utils import ensure_bucket, put_json
 from common.watermark import read_watermark, write_watermark
+from config.watermark_keys import BRONZE_FAILURE_REPORT
 from schema.failure_report_schema import (
     COLUMN_ALIAS_MAP,
     SchemaValidationError,
@@ -38,7 +39,7 @@ from schema.failure_report_schema import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-WATERMARK_KEY = "_meta/watermark/failure_report.json"
+WATERMARK_KEY = BRONZE_FAILURE_REPORT
 
 
 def _table_name() -> str:

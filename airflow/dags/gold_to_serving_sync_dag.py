@@ -26,11 +26,12 @@ import sys
 from datetime import timedelta
 
 import pendulum
-import requests
 from airflow.providers.amazon.aws.operators.lambda_function import LambdaInvokeFunctionOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.sdk import dag
+
+from dag_common import notify_slack_on_failure
 
 SERVING_SYNC_DIR = "/opt/airflow/pipeline/serving_sync"
 INGESTION_DIR = "/opt/airflow/ingestion"
@@ -88,25 +89,8 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
     "retry_exponential_backoff": True,
     "max_retry_delay": timedelta(minutes=30),
+    "on_failure_callback": notify_slack_on_failure,
 }
-
-
-def _notify_slack_on_failure(context: dict) -> None:
-    import os
-
-    webhook_url = os.getenv("SLACK_WEBHOOK_URL")
-    if not webhook_url:
-        return
-
-    ti = context["task_instance"]
-    message = f":x: *{ti.dag_id}.{ti.task_id}* 실패\n실행일: {context['ds']}\n로그: {ti.log_url}"
-    try:
-        requests.post(webhook_url, json={"text": message}, timeout=10)
-    except requests.RequestException:
-        pass
-
-
-default_args["on_failure_callback"] = _notify_slack_on_failure
 
 
 def _lambda_payload(**extra: str) -> str:

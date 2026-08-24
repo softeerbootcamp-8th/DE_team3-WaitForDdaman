@@ -12,7 +12,7 @@ from moto import mock_aws
 
 from pipeline.train_risk_model.evaluate import apply_gate, select_best
 from pipeline.train_risk_model.features import FEATURE_COLS
-from pipeline.train_risk_model.samples import resolve_anchors
+from pipeline.train_risk_model.samples import load_anchor_plan, resolve_anchors
 from pipeline.train_risk_model.settings import Config
 
 CFG = Config(
@@ -85,6 +85,17 @@ def test_anchors_are_deterministic():
     b = resolve_anchors(CFG, "2026-05-01", date(2026, 6, 16))
     assert a == b
     assert a["run_key"] == "20260501"
+
+
+def test_load_anchor_plan_from_inline_json():
+    assert load_anchor_plan(anchor_plan_json='{"run_key":"20260501"}') == {"run_key": "20260501"}
+
+
+def test_load_anchor_plan_keeps_file_path_mode(tmp_path):
+    path = tmp_path / "anchor-plan.json"
+    path.write_text('{"run_key":"20260501"}', encoding="utf-8")
+
+    assert load_anchor_plan(anchor_plan=str(path)) == {"run_key": "20260501"}
 
 
 def test_reject_unconfirmed_labels():

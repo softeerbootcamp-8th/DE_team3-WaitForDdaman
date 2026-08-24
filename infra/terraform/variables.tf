@@ -1,5 +1,5 @@
 variable "aws_region" {
-  description = "AWS region for deployment"
+  description = "AWS region for deployment (config.SETTINGS.s3_region과 동일해야 함)"
   type        = string
   default     = "ap-northeast-2"
 }
@@ -11,7 +11,7 @@ variable "app_env" {
 }
 
 variable "raw_bucket" {
-  description = "S3 bucket name for raw layer storage"
+  description = "S3 bucket name for raw layer storage (config.SETTINGS.raw_bucket과 동일해야 함)"
   type        = string
   default     = "ttareungyi-raw"
 }
@@ -23,7 +23,7 @@ variable "seoul_api_key" {
 }
 
 variable "seoul_api_base_url" {
-  description = "Base URL for Seoul Open Data Plaza API"
+  description = "Base URL for Seoul Open Data Plaza API (config.SETTINGS.seoul_api_base_url과 동일해야 함)"
   type        = string
   default     = "http://openapi.seoul.go.kr:8088"
 }
@@ -65,7 +65,7 @@ variable "serving_db_secret_arn" {
 }
 
 variable "warehouse_bucket" {
-  description = "S3 bucket name for Iceberg warehouse storage"
+  description = "S3 bucket name for Iceberg warehouse storage (config.SETTINGS.warehouse_bucket과 동일해야 함)"
   type        = string
   default     = "ttareungyi-warehouse"
 }
@@ -91,4 +91,72 @@ variable "serving_sync_reserved_concurrency" {
   description = "write_bike_risk_daily / write_station_daily 함수당 예약 동시성 (RDS 커넥션 수 제한). verify_serving_sync는 이 값의 2배를 쓴다."
   type        = number
   default     = 2
+}
+
+# ------------------------------------------------------------------------------
+# EMR Serverless prod Spark 인프라 (#183) - iceberg_catalog RDS는 신규 생성이지만
+# VPC/서브넷그룹/iceberg-catalog-sg는 기존 자원을 참조한다(신규 생성 아님).
+# ------------------------------------------------------------------------------
+variable "iceberg_catalog_sg_id" {
+  description = "기존 iceberg-catalog-sg 보안그룹 ID (콘솔에서 이미 생성됨, sg-0ff85e9c8d00a6c6b)"
+  type        = string
+}
+
+variable "iceberg_catalog_db_subnet_group_name" {
+  description = "iceberg_catalog RDS가 속할 기존 DB 서브넷 그룹 이름"
+  type        = string
+  default     = "waitforddaman-subnet"
+}
+
+variable "iceberg_catalog_master_username" {
+  description = "iceberg_catalog RDS 마스터 유저명"
+  type        = string
+  default     = "iceberg_admin"
+}
+
+variable "iceberg_catalog_master_password" {
+  description = "iceberg_catalog RDS 마스터 비밀번호 - tfvars로만 채움, 커밋 금지"
+  type        = string
+  sensitive   = true
+}
+
+variable "emr_spark_image_tag" {
+  description = "waitforddaman-emr-spark-prod ECR 리포의 이미지 태그"
+  type        = string
+  default     = "latest"
+}
+
+# ------------------------------------------------------------------------------
+# bikeman_event_generator Lambda (#186) - serving_sync(#172)와 같은 VPC/RDS를
+# 재사용한다(같은 domain-db 인스턴스, docs/RDS 적재 및 세팅 설계.md 2절 참고).
+# ------------------------------------------------------------------------------
+variable "bikeman_db_secret_arn" {
+  description = "bikeman_writer 역할(BIKEMAN_WRITER_DB_HOST/PORT/NAME/USER/PASSWORD)을 담은 기존 Secrets Manager 시크릿 ARN"
+  type        = string
+}
+
+variable "bikeman_event_generator_image_tag" {
+  description = "infra/lambdas/bikeman_event_generator 이미지의 ECR 태그"
+  type        = string
+  default     = "latest"
+}
+
+variable "bikeman_event_generator_reserved_concurrency" {
+  description = "generate_collect_events / deploy_returned_bikes 함수당 예약 동시성 (RDS 커넥션 수 제한)"
+  type        = number
+  default     = 2
+}
+
+# ------------------------------------------------------------------------------
+# Airflow 워커 -> Lambda 호출 권한 (기존 gap - serving_sync 3개 + bikeman_event_
+# generator 2개 전부에 필요했는데 지금까지 빠져있었다)
+# ------------------------------------------------------------------------------
+variable "airflow_worker_role_name" {
+  description = "Airflow 워커(EC2)가 쓰는 기존 IAM 롤 이름 - lambda:InvokeFunction 정책을 여기 붙인다. EC2 인스턴스 롤은 Terraform 밖에서 수동 생성됨(#109)"
+  type        = string
+}
+
+variable "airflow_ec2_sg_id" {
+  description = "Airflow 워커(EC2)가 쓰는 기존 보안그룹 ID - iceberg_catalog RDS 인바운드 허용에 쓴다. EC2 인스턴스는 Terraform 밖에서 수동 생성됨(#109)"
+  type        = string
 }

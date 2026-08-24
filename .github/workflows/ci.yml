@@ -44,9 +44,7 @@ jobs:
           fi
 
           has_prod=false
-          if [ -f airflow/Dockerfile.prod ] \
-             && [ -f services/api/Dockerfile.prod ] \
-             && [ -f services/web/Dockerfile.prod ]; then
+          if find . -path ./.git -prune -o -name Dockerfile.prod -print -quit | grep -q .; then
             has_prod=true
           fi
 
@@ -134,7 +132,7 @@ jobs:
           (cd staging && PYTHONPATH="$ROOT:$ROOT/ingestion:$ROOT/staging" pytest tests -q)
           echo "::endgroup::"
 
-          for mod in bikeman_event_generator serving_sync collection_priority; do
+          for mod in bikeman_event_generator serving_sync collection_priority risk_model; do
             echo "::group::pipeline/$mod"
             (cd "pipeline/$mod" && PYTHONPATH="$ROOT/pipeline/$mod:$ROOT/pipeline/$mod/jobs:$ROOT:$ROOT/ingestion" pytest tests -q)
             echo "::endgroup::"
@@ -201,11 +199,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build airflow prod image (no push)
-        run: docker build -f airflow/Dockerfile.prod -t ci-check-airflow .
+      - name: Build prod images (no push)
+        run: |
+          set -e
 
-      - name: Build api prod image (no push)
-        run: docker build -f services/api/Dockerfile.prod -t ci-check-api .
+          if [ -f airflow/Dockerfile.prod ]; then
+            docker build -f airflow/Dockerfile.prod -t ci-check-airflow .
+          fi
 
-      - name: Build web prod image (no push)
-        run: docker build -f services/web/Dockerfile.prod -t ci-check-web services/web
+          if [ -f services/api/Dockerfile.prod ]; then
+            docker build -f services/api/Dockerfile.prod -t ci-check-api .
+          fi
+
+          if [ -f services/web/Dockerfile.prod ]; then
+            docker build -f services/web/Dockerfile.prod -t ci-check-web services/web
+          fi
+
+          if [ -f spark/Dockerfile.prod ]; then
+            docker build -f spark/Dockerfile.prod -t ci-check-emr-spark .
+            bash spark/verify_emr_image.sh ci-check-emr-spark
+          fi

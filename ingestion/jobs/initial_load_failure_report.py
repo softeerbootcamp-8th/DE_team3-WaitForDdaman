@@ -28,7 +28,7 @@ from pyspark.sql import functions as F
 import config
 from common.encoding_utils import EncodingMismatchError, convert_euckr_file_to_utf8
 from common.file_utils import NotThisDatasetError, convert_xlsx_to_utf8_csv, is_xlsx, unzip_if_needed
-from common.s3_utils import ensure_bucket, upload_file
+from common.s3_utils import download_file, ensure_bucket, split_s3_uri, upload_file
 from common.spark_session import build_spark_session
 from schema.failure_report_schema import (
     SchemaValidationError,
@@ -128,17 +128,22 @@ def run(input_file: str) -> None:
     spark = build_spark_session("bronze-initial-load-failure-report")
     _ensure_bronze_table(spark)
 
-    raw_path = Path(input_file)
-    if not raw_path.exists():
-        logger.error("입력 파일이 없습니다: %s", input_file)
-        sys.exit(1)
-
     total_rows, failed, skipped = 0, False, False
 
     # 파일 1개 처리 범위로 한정된 TemporaryDirectory. 프로세스도 파일 1개만 처리하고
     # 종료하므로, 정상/OOM 종료 여부와 무관하게 이 파일 하나 분량만 디스크에 남을 수 있다.
     with tempfile.TemporaryDirectory() as tmpdir:
         workdir = Path(tmpdir)
+        if input_file.startswith("s3://"):
+            bucket, key = split_s3_uri(input_file)
+            raw_path = workdir / Path(key).name
+            download_file(bucket, key, raw_path)
+        else:
+            raw_path = Path(input_file)
+            if not raw_path.exists():
+                logger.error("입력 파일이 없습니다: %s", input_file)
+                sys.exit(1)
+
         for target_path in unzip_if_needed(raw_path, workdir):
             try:
                 bronze_df = _process_one_file(spark, target_path, workdir).cache()

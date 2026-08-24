@@ -56,11 +56,17 @@ data "aws_iam_policy_document" "serving_sync_secrets_policy_doc" {
     actions   = ["secretsmanager:GetSecretValue"]
     resources = [var.serving_db_secret_arn]
   }
+
+  statement {
+    effect    = "Allow"
+    actions   = ["sqs:SendMessage"]
+    resources = [aws_sqs_queue.serving_sync_dlq.arn]
+  }
 }
 
 resource "aws_iam_policy" "serving_sync_secrets_policy" {
   name        = "serving-sync-lambda-secrets-policy"
-  description = "Allows reading the serving DB / iceberg catalog credentials secret"
+  description = "Allows reading the serving DB / iceberg catalog credentials secret and sending failed events to DLQ"
   policy      = data.aws_iam_policy_document.serving_sync_secrets_policy_doc.json
 }
 
@@ -69,16 +75,45 @@ resource "aws_iam_role_policy_attachment" "serving_sync_secrets_attach" {
   policy_arn = aws_iam_policy.serving_sync_secrets_policy.arn
 }
 
+# write_bike_risk_daily.py / write_station_daily.py / verify_serving_sync.py가
+# pyiceberg로 warehouse_bucket의 Iceberg 데이터 파일을 직접 스캔한다 (#207) -
+# 카탈로그(JDBC)는 위 Secrets Manager 자격증명으로 붙지만, 실제 Parquet 데이터
+# 읽기는 S3 권한이 별도로 필요하다. warehouse_bucket 하위로만 범위를 한정한다.
+data "aws_iam_policy_document" "serving_sync_s3_read_policy_doc" {
+  statement {
+    effect  = "Allow"
+    actions = ["s3:GetObject", "s3:ListBucket"]
+    resources = [
+      "arn:aws:s3:::${var.warehouse_bucket}",
+      "arn:aws:s3:::${var.warehouse_bucket}/*",
+    ]
+  }
+}
+
+resource "aws_iam_policy" "serving_sync_s3_read_policy" {
+  name        = "serving-sync-lambda-s3-read-policy"
+  description = "Allows serving_sync Lambda to read Iceberg data files from the warehouse bucket"
+  policy      = data.aws_iam_policy_document.serving_sync_s3_read_policy_doc.json
+}
+
+resource "aws_iam_role_policy_attachment" "serving_sync_s3_read_attach" {
+  role       = aws_iam_role.serving_sync_lambda_role.name
+  policy_arn = aws_iam_policy.serving_sync_s3_read_policy.arn
+}
+
 # ---- 보안그룹: Lambda -> RDS ----
 # 기존 RDS 보안그룹(var.rds_security_group_id)의 다른 인바운드 규칙은 건드리지
 # 않고, 이 Lambda 전용 보안그룹에서의 5432 인바운드만 새로 추가한다.
 resource "aws_security_group" "serving_sync_lambda_sg" {
   name        = "serving-sync-lambda-sg"
-  description = "serving_sync Lambda(write/verify) 아웃바운드 전용 보안그룹"
+  # AWS 보안그룹/규칙 description은 ASCII만 허용한다 (Issue #188) - 한글 원문:
+  # "serving_sync Lambda(write/verify) 아웃바운드 전용 보안그룹"
+  description = "Outbound-only security group for serving_sync Lambda (write/verify)"
   vpc_id      = var.vpc_id
 
   egress {
-    description = "전체 아웃바운드 허용 (RDS, Secrets Manager/S3는 VPC 엔드포인트로 나감)"
+    # 한글 원문: "전체 아웃바운드 허용 (RDS, Secrets Manager/S3는 VPC 엔드포인트로 나감)"
+    description = "Allow all outbound (RDS, Secrets Manager/S3 egress via VPC endpoints)"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -93,7 +128,8 @@ resource "aws_security_group_rule" "rds_allow_serving_sync_lambda" {
   protocol                 = "tcp"
   security_group_id        = var.rds_security_group_id
   source_security_group_id = aws_security_group.serving_sync_lambda_sg.id
-  description               = "serving_sync Lambda(#172)의 RDS 접근 허용"
+  # 한글 원문: "serving_sync Lambda(#172)의 RDS 접근 허용"
+  description = "Allow RDS access from serving_sync Lambda (#172)"
 }
 
 # ---- S3 Gateway VPC Endpoint ----
@@ -114,7 +150,6 @@ resource "aws_vpc_endpoint" "serving_sync_s3_gateway" {
 locals {
   serving_sync_common_env = {
     APP_ENV                  = "aws"
-    AWS_DEFAULT_REGION       = var.aws_region
     RAW_BUCKET               = var.raw_bucket
     WAREHOUSE_BUCKET         = var.warehouse_bucket
     ICEBERG_CATALOG_TYPE     = "jdbc"
