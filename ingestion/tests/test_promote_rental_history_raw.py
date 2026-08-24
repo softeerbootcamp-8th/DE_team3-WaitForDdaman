@@ -1,15 +1,14 @@
-"""Bronze 승격 잡의 매핑/멱등성 테스트.
-
-Spark/Iceberg 통합 테스트는 Maven에서 Iceberg 런타임을 받아야 해서 기본 실행에서는
-건너뛴다. jar가 준비된 컨테이너에서 RENTAL_HISTORY_SPARK_IT=1로 명시적으로 켠다.
-"""
+"""Bronze 승격 잡의 매핑/멱등성/PyIceberg 다중 파티션 승격 테스트 (#194 - Spark 제거)."""
 import json
-import os
 from datetime import date, datetime
+from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
+import pyarrow as pa
 import pytest
 from moto import mock_aws
+from pyiceberg.exceptions import NoSuchTableError
+from pyiceberg.expressions import EqualTo, Or
 
 import config as config_module
 from jobs import promote_rental_history_raw as promoter
@@ -17,11 +16,6 @@ from jobs import promote_rental_history_raw as promoter
 KST = ZoneInfo("Asia/Seoul")
 BUCKET = "test-promotion-bucket"
 CUTOFF = "2026-08-22T06:00:00+09:00"
-
-SPARK_IT = pytest.mark.skipif(
-    os.getenv("RENTAL_HISTORY_SPARK_IT") != "1",
-    reason="Iceberg 런타임 jar가 준비된 환경에서만 실행 (RENTAL_HISTORY_SPARK_IT=1)",
-)
 
 VALID_ROW = {
     "BIKE_ID": "SPB-1",
@@ -242,103 +236,126 @@ def test_payload_row_count_must_match_the_manifest(s3_env):
         promoter.load_payloads(BUCKET, plan)
 
 
-# ------------------------------------------------------- Spark 통합 (opt-in)
+# ---------------------------------------------------------- PyArrow 매핑
 
 
-@pytest.fixture(scope="module")
-def iceberg_spark(tmp_path_factory):
-    from pyspark.sql import SparkSession
-
-    warehouse = tmp_path_factory.mktemp("iceberg_warehouse")
-    spark = (
-        SparkSession.builder.appName("promote-rental-history-test")
-        .master("local[1]")
-        .config(
-            "spark.jars.packages",
-            "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2",
-        )
-        .config(
-            "spark.sql.extensions",
-            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-        )
-        .config(
-            "spark.sql.catalog.test_catalog",
-            "org.apache.iceberg.spark.SparkCatalog",
-        )
-        .config("spark.sql.catalog.test_catalog.type", "hadoop")
-        .config("spark.sql.catalog.test_catalog.warehouse", str(warehouse))
-        .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
-        .config("spark.driver.bindAddress", "127.0.0.1")
-        .config("spark.driver.host", "127.0.0.1")
-        .config("spark.sql.shuffle.partitions", "2")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("WARN")
-    yield spark
-    spark.stop()
-
-
-@SPARK_IT
-def test_repromoting_the_same_selection_keeps_partition_counts_and_checksum(
-    iceberg_spark, monkeypatch
-):
-    from pyspark.sql import functions as F
-
-    monkeypatch.setattr(
-        config_module,
-        "SETTINGS",
-        config_module.Settings(
-            env="aws", raw_bucket=BUCKET, iceberg_catalog_name="test_catalog"
-        ),
+def test_build_bronze_arrow_table_maps_columns_and_nulls_missing_optional():
+    arrow_table = promoter.build_bronze_arrow_table(
+        [VALID_ROW, VALID_ROW], "2026-08-21", "raw/rental_history/api/.../payload.json"
     )
 
-    selected = [
-        _selected("2026-08-20", CUTOFF, "FINAL", list(range(24)), row_count=2),
-        _selected(
-            "2026-08-21",
-            "2026-08-22T05:00:00+09:00",
-            "PRELIMINARY",
-            list(range(24)),
-            row_count=3,
-            fallback_reason="FINAL_INCOMPLETE",
-        ),
+    assert arrow_table.schema == promoter.ARROW_SCHEMA
+    assert arrow_table.column("bike_id").to_pylist() == ["SPB-1", "SPB-1"]
+    assert arrow_table.column("rent_station_no").to_pylist() == ["101", "101"]
+    assert arrow_table.column("return_station_no").to_pylist() == ["102", "102"]
+    # BIKE_SE_CD가 VALID_ROW에 없음(선택 컬럼) -> null로 채워지고 실패하지 않아야 함
+    assert arrow_table.column("bike_se_cd").to_pylist() == [None, None]
+    assert arrow_table.column("rent_date_partition").to_pylist() == [
+        "2026-08-21",
+        "2026-08-21",
     ]
-    document = _selection_document(selected, mode="DEGRADED")
-    plan = promoter.plan_promotion(document)
+    assert arrow_table.column("source_file").to_pylist() == [
+        "raw/rental_history/api/.../payload.json",
+    ] * 2
+
+
+def test_build_bronze_arrow_table_rejects_missing_required_columns():
+    incomplete_row = {k: v for k, v in VALID_ROW.items() if k != "RENT_DT"}
+
+    with pytest.raises(Exception, match="필수 컬럼"):
+        promoter.build_bronze_arrow_table([incomplete_row], "2026-08-21", "src")
+
+
+# --------------------------------------------------- Bronze 테이블 선행 조건
+
+
+def test_load_bronze_table_missing_requires_initial_load_first():
+    class MissingTableCatalog:
+        def load_table(self, identifier):
+            raise NoSuchTableError(identifier)
+
+    with pytest.raises(promoter.PromotionError, match="initial_load_rental_history"):
+        promoter.load_bronze_table(catalog=MissingTableCatalog())
+
+
+# --------------------------------------------- 다중 파티션 단일 snapshot 승격
+
+
+def _mock_bronze_table(committed_counts: dict) -> MagicMock:
+    """overwrite() 이후 재조회하면 committed_counts를 반환하는 가짜 Bronze 테이블."""
+    table = MagicMock()
+    table.name.return_value = "bronze.rental_history"
+    table.refresh.return_value = table
+
+    partition_values = [
+        partition for partition, count in committed_counts.items() for _ in range(count)
+    ]
+    committed_arrow = pa.table({"rent_date_partition": partition_values})
+    scan_result = MagicMock()
+    scan_result.to_arrow.return_value = committed_arrow
+    table.scan.return_value = scan_result
+    return table
+
+
+def test_promote_replaces_multiple_partitions_in_a_single_overwrite_call(monkeypatch):
+    table = _mock_bronze_table({"2026-08-20": 2, "2026-08-21": 3})
+    monkeypatch.setattr(promoter, "load_bronze_table", lambda: table)
+
     payloads = [
-        {**item, "rows": [dict(VALID_ROW, BIKE_ID=f"SPB-{item['rent_date_partition']}-{i}")
-                          for i in range(item["row_count"])]}
-        for item in plan
+        {
+            "rent_date_partition": "2026-08-20",
+            "source_file": "s1",
+            "row_count": 2,
+            "rows": [dict(VALID_ROW, BIKE_ID=f"SPB-20-{i}") for i in range(2)],
+        },
+        {
+            "rent_date_partition": "2026-08-21",
+            "source_file": "s2",
+            "row_count": 3,
+            "rows": [dict(VALID_ROW, BIKE_ID=f"SPB-21-{i}") for i in range(3)],
+        },
     ]
 
-    promoter.ensure_bronze_table(iceberg_spark)
+    counts = promoter.promote(payloads)
 
-    first = promoter.promote(iceberg_spark, payloads)
-    second = promoter.promote(iceberg_spark, payloads)
+    assert counts == {"2026-08-20": 2, "2026-08-21": 3}
 
-    assert first == {"2026-08-20": 2, "2026-08-21": 3}
-    assert second == first
+    # 파티션이 2개여도 overwrite()는 정확히 한 번만 호출돼야 한다 - 그래야 한 snapshot
+    # commit이 원자 경계가 되고, 일부 파티션만 먼저 반영되는 중간 상태가 생기지 않는다.
+    table.overwrite.assert_called_once()
+    args, kwargs = table.overwrite.call_args
+    committed_arrow_table = args[0]
+    assert len(committed_arrow_table) == 5
+    assert set(committed_arrow_table.column("source_file").to_pylist()) == {"s1", "s2"}
 
-    table = iceberg_spark.table(promoter.bronze_table_name())
-    assert table.count() == 5
-    source_files = {
-        row["source_file"] for row in table.select("source_file").distinct().collect()
-    }
-    assert source_files == {item["source_file"] for item in plan}
+    # 여러 값을 커버하려면 EqualTo 하나가 아니라 OR(EqualTo(...), EqualTo(...))여야 한다.
+    overwrite_filter = kwargs["overwrite_filter"]
+    assert isinstance(overwrite_filter, Or)
+    assert overwrite_filter == Or(
+        EqualTo("rent_date_partition", "2026-08-20"),
+        EqualTo("rent_date_partition", "2026-08-21"),
+    )
 
-    business_columns = [
-        c for c in table.columns if c not in ("source_file", "ingested_at")
+
+def test_promote_row_count_mismatch_surfaces_in_committed_counts(monkeypatch):
+    """커밋 후 실제 파티션 행 수가 입력과 다르면 build_promotion_document가 이를 잡아낸다."""
+    table = _mock_bronze_table({"2026-08-21": 1})  # 입력은 2행인데 커밋 후 1행만 조회됨
+    monkeypatch.setattr(promoter, "load_bronze_table", lambda: table)
+
+    payloads = [
+        {
+            "rent_date_partition": "2026-08-21",
+            "source_file": "s1",
+            "row_count": 2,
+            "rows": [dict(VALID_ROW, BIKE_ID=f"SPB-{i}") for i in range(2)],
+        },
     ]
-    checksum = (
-        table.select(F.xxhash64(*business_columns).alias("h"))
-        .agg(F.sum("h"))
-        .collect()[0][0]
+
+    counts = promoter.promote(payloads)
+    assert counts == {"2026-08-21": 1}
+
+    document = _selection_document(
+        [_selected("2026-08-21", CUTOFF, "FINAL", list(range(24)), row_count=2)]
     )
-    promoter.promote(iceberg_spark, payloads)
-    recomputed = (
-        iceberg_spark.table(promoter.bronze_table_name())
-        .select(F.xxhash64(*business_columns).alias("h"))
-        .agg(F.sum("h"))
-        .collect()[0][0]
-    )
-    assert recomputed == checksum
+    with pytest.raises(promoter.PromotionError, match="row count"):
+        promoter.build_promotion_document(document, counts)

@@ -37,7 +37,7 @@ bikeman은 워터마크로 며칠 밀려도 따라잡는다).
 
     collect_final_raw
         >> select_final_or_preliminary   (ALL_DONE - 수집이 실패해도 반드시 실행)
-        >> promote_to_bronze             (유일한 Spark/Iceberg 단계, BRONZE_POOL)
+        >> promote_to_bronze             (PyIceberg 단일 snapshot commit, BRONZE_POOL)
         >> update_confirmed_watermark
         >> publish_bronze_asset          (RENTAL_HISTORY_BRONZE의 유일한 producer)
 
@@ -180,13 +180,14 @@ def bronze_daily_batch_all_sources():
             execution_timeout=timedelta(minutes=15),
         )
 
-        # 유일한 Spark/Iceberg 단계라 이 태스크만 BRONZE_POOL을 점유한다.
+        # PyIceberg(SqlCatalog)로 선택된 날짜 파티션들을 한 번의 snapshot commit으로
+        # 승격한다 - Spark/JVM을 쓰지 않는다(#194). BRONZE_POOL은 다른 Bronze 태스크와 공유.
         promote_to_bronze = BashOperator(
             task_id="promote_to_bronze",
             bash_command=bash_job("promote_rental_history_raw"),
             env={"COLLECTION_CUTOFF_AT": COLLECTION_CUTOFF_AT_TEMPLATE},
             append_env=True,
-            execution_timeout=timedelta(hours=2),
+            execution_timeout=timedelta(minutes=30),
             pool=BRONZE_POOL,
         )
 
