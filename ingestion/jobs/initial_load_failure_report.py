@@ -28,7 +28,7 @@ from pyspark.sql import functions as F
 import config
 from common.encoding_utils import EncodingMismatchError, convert_euckr_file_to_utf8
 from common.file_utils import NotThisDatasetError, convert_xlsx_to_utf8_csv, is_xlsx, unzip_if_needed
-from common.s3_utils import download_file, ensure_bucket, split_s3_uri, upload_file
+from common.s3_utils import download_file, ensure_bucket, split_s3_uri, to_spark_readable_path, upload_file
 from common.spark_session import build_spark_session
 from schema.failure_report_schema import (
     SchemaValidationError,
@@ -98,7 +98,10 @@ def _stage_as_utf8_csv(raw_path: Path, workdir: Path) -> Path:
 def _process_one_file(spark, raw_path: Path, workdir: Path):
     utf8_path = _stage_as_utf8_csv(raw_path, workdir)
 
-    raw_df = spark.read.option("header", "true").csv(str(utf8_path))
+    csv_source = to_spark_readable_path(
+        utf8_path, config.SETTINGS.raw_bucket, "raw/failure_report/_utf8_staging"
+    )
+    raw_df = spark.read.option("header", "true").csv(csv_source)
     actual_columns = raw_df.columns
 
     if not is_failure_report_file(actual_columns):
