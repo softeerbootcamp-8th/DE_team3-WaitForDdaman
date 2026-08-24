@@ -36,7 +36,7 @@ from jobs.transform_silver_rental_history import (
     _load_bronze_promotion_metadata,
     _parse_bool_env,
     _silver_promotion_key,
-    _split_return_dt_violations,
+    _split_quarantine_violations,
     _validate_bronze_marker,
     run,
     transform,
@@ -250,11 +250,6 @@ def test_output_columns_and_partition_spec_unchanged():
 
 def test_validate_passes_on_clean_rows():
     validate(transform(bronze_table()), "2026-08-21")  # 예외가 없으면 통과
-
-
-def test_validate_rejects_negative_distance():
-    with pytest.raises(SilverValidationError, match="isNonNegative"):
-        validate(transform(bronze_table({"use_distance_m": "-1.0"})), "2026-08-21")
 
 
 # ---------------------------------------------------------------- #137 당일 promotion 처리
@@ -591,16 +586,16 @@ def test_quarantine_table_schema_matches_silver_plus_reason():
     assert QUARANTINE_TABLE == "silver.rental_history_quarantine"
 
 
-# ---------------------------------------------------------------- return_dt quarantine 분리
+# ---------------------------------------------------------------- 행 단위 이상치 quarantine 분리
 
 
-def test_split_return_dt_violations_separates_bad_rows():
+def test_split_quarantine_violations_separates_return_before_rent():
     silver = transform(bronze_table(
         {"bike_id": "SPB-1", "rent_dt": "2026-08-21 10:00:00", "return_dt": "2026-08-21 11:00:00"},
         {"bike_id": "SPB-2", "rent_dt": "2026-08-21 12:00:00", "return_dt": "2026-08-21 11:00:00"},
     ))
     con = tsr._connect()
-    clean, quarantine = _split_return_dt_violations(silver, con)
+    clean, quarantine = _split_quarantine_violations(silver, con)
 
     assert clean.to_pylist()[0]["bike_id"] == "SPB-1"
     assert len(clean) == 1
@@ -611,25 +606,59 @@ def test_split_return_dt_violations_separates_bad_rows():
     assert q_row["quarantined_at"] is not None
 
 
-def test_split_return_dt_violations_keeps_null_return_dt_clean():
+def test_split_quarantine_violations_separates_negative_distance():
+    silver = transform(bronze_table(
+        {"bike_id": "SPB-1", "use_distance_m": "664.90"},
+        {"bike_id": "SPB-2", "use_distance_m": "-1.0"},
+    ))
+    con = tsr._connect()
+    clean, quarantine = _split_quarantine_violations(silver, con)
+
+    assert clean.to_pylist()[0]["bike_id"] == "SPB-1"
+    assert len(clean) == 1
+    assert len(quarantine) == 1
+    q_row = quarantine.to_pylist()[0]
+    assert q_row["bike_id"] == "SPB-2"
+    assert q_row["quarantine_reason"] == "use_distance_m < 0"
+    assert q_row["quarantined_at"] is not None
+
+
+def test_split_quarantine_violations_combines_reasons_for_both_conditions():
+    """한 행이 두 조건 모두 위반하면 사유가 콤마로 이어붙는다."""
+    silver = transform(bronze_table(
+        {
+            "bike_id": "SPB-both",
+            "rent_dt": "2026-08-21 12:00:00",
+            "return_dt": "2026-08-21 11:00:00",
+            "use_distance_m": "-1.0",
+        },
+    ))
+    con = tsr._connect()
+    _, quarantine = _split_quarantine_violations(silver, con)
+    assert len(quarantine) == 1
+    assert quarantine.to_pylist()[0]["quarantine_reason"] == "return_dt < rent_dt, use_distance_m < 0"
+
+
+def test_split_quarantine_violations_keeps_null_return_dt_clean():
     silver = transform(bronze_table({"return_dt": ""}))
     con = tsr._connect()
-    clean, quarantine = _split_return_dt_violations(silver, con)
+    clean, quarantine = _split_quarantine_violations(silver, con)
     assert len(clean) == 1
     assert len(quarantine) == 0
 
 
 def test_validate_no_longer_hard_fails_on_return_before_rent():
-    """이제 이 조건은 validate()가 아니라 _split_return_dt_violations가 처리한다."""
+    """이제 이 조건은 validate()가 아니라 _split_quarantine_violations가 처리한다."""
     silver = transform(bronze_table(
         {"rent_dt": "2026-08-21 12:00:00", "return_dt": "2026-08-21 11:00:00"},
     ))
     validate(silver, "2026-08-21")  # 예외 없이 통과해야 함 (quarantine은 별도 단계)
 
 
-def test_validate_still_rejects_negative_distance():
-    with pytest.raises(SilverValidationError, match="isNonNegative"):
-        validate(transform(bronze_table({"use_distance_m": "-1.0"})), "2026-08-21")
+def test_validate_no_longer_hard_fails_on_negative_distance():
+    """이제 이 조건도 validate()가 아니라 _split_quarantine_violations가 처리한다."""
+    silver = transform(bronze_table({"use_distance_m": "-1.0"}))
+    validate(silver, "2026-08-21")  # 예외 없이 통과해야 함 (quarantine은 별도 단계)
 
 
 def test_process_range_aborts_when_quarantine_ratio_exceeds_threshold(monkeypatch):
@@ -643,7 +672,7 @@ def test_process_range_aborts_when_quarantine_ratio_exceeds_threshold(monkeypatc
     ]
     silver = transform(bronze_table(*rows))
     con = tsr._connect()
-    clean, quarantine = _split_return_dt_violations(silver, con)
+    clean, quarantine = _split_quarantine_violations(silver, con)
     assert len(quarantine) / len(silver) == pytest.approx(2 / 3)  # 1% 훨씬 초과
 
 
@@ -686,7 +715,7 @@ def test_process_range_raises_when_quarantine_ratio_exceeds_threshold(monkeypatc
     end_date = date(2026, 8, 21)
 
     # SilverValidationError가 던져져야 함
-    with pytest.raises(SilverValidationError, match="return_dt < rent_dt 비율.*임계치"):
+    with pytest.raises(SilverValidationError, match="행 단위 이상치 비율.*임계치"):
         tsr._process_range(mock_catalog, mock_silver_table, start_date, end_date)
 
     # append와 _ensure_quarantine_table이 호출되지 않았는지 확인

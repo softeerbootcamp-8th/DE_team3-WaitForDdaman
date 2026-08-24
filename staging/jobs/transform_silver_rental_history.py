@@ -282,11 +282,9 @@ def validate(silver_table: pa.Table, range_label: str) -> None:
         .is_complete("rent_dt")
         # transform()의 중복 제거가 이미 제거했어야 할 중복의 재확인
         .has_uniqueness(["bike_id", "rent_dt"], threshold=0.98)
-        # 이동거리가 음수인 데이터 확인
-        .is_non_negative("use_distance_m")
-        # return_dt < rent_dt는 더 이상 여기서 hard-fail하지 않는다 (#232) -
-        # _process_range가 _split_return_dt_violations로 미리 quarantine 분리한 뒤
-        # 이 validate()에는 이미 걸러진 clean 행만 들어온다.
+        # return_dt < rent_dt, use_distance_m < 0는 더 이상 여기서 hard-fail하지
+        # 않는다 (#232) - _process_range가 _split_quarantine_violations로 미리
+        # quarantine 분리한 뒤 이 validate()에는 이미 걸러진 clean 행만 들어온다.
         .run(silver_table)
     )
 
@@ -339,29 +337,41 @@ def _ensure_quarantine_table(catalog):
             return catalog.load_table(QUARANTINE_TABLE)
 
 
-def _split_return_dt_violations(
+# 행 단위 값 이상치 판정식 - 둘 다 알려진 노이즈 수준이면 quarantine 대상이지,
+# 구조적 오류(파싱 실패, 결측)와 달리 단 1건으로 배치 전체를 막을 이유가 없다 (#232).
+_RETURN_BEFORE_RENT = "(return_dt IS NOT NULL AND return_dt < rent_dt)"
+_NEGATIVE_DISTANCE = "(use_distance_m IS NOT NULL AND use_distance_m < 0)"
+_QUARANTINE_VIOLATION = f"{_RETURN_BEFORE_RENT} OR {_NEGATIVE_DISTANCE}"
+_QUARANTINE_REASON_SQL = f"""
+    concat_ws(', ',
+        CASE WHEN {_RETURN_BEFORE_RENT} THEN 'return_dt < rent_dt' END,
+        CASE WHEN {_NEGATIVE_DISTANCE} THEN 'use_distance_m < 0' END
+    )
+"""
+
+
+def _split_quarantine_violations(
     silver_arrow: pa.Table, con: duckdb.DuckDBPyConnection
 ) -> tuple[pa.Table, pa.Table]:
     """
-    return_dt < rent_dt인 행을 분리한다 (#232). 예전엔 validate()의 hard-fail
-    조건이었지만, 알려진 노이즈 수준(0.006%)까지 배치 전체를 막는 건 과하다 -
-    이제 이 행들은 quarantine으로 옮기고 나머지는 정상 진행한다. 비율이 threshold를
-    넘는 경우의 하드 게이트는 _process_range에서 별도로 건다.
+    return_dt < rent_dt 또는 use_distance_m < 0인 행을 분리한다 (#232). 예전엔
+    validate()의 hard-fail 조건이었지만, 알려진 노이즈 수준까지 배치 전체를 막는
+    건 과하다 - 이제 이 행들은 quarantine으로 옮기고 나머지는 정상 진행한다.
+    비율이 threshold를 넘는 경우의 하드 게이트는 _process_range에서 별도로 건다.
     """
     con.register("split_target", silver_arrow)
     clean = query_arrow(
         con,
-        "SELECT * FROM split_target WHERE NOT (return_dt IS NOT NULL AND return_dt < rent_dt)",
+        f"SELECT * FROM split_target WHERE NOT ({_QUARANTINE_VIOLATION})",
     ).select(SILVER_COLUMNS)
     violations = query_arrow(
         con,
-        "SELECT * FROM split_target WHERE return_dt IS NOT NULL AND return_dt < rent_dt",
-    ).select(SILVER_COLUMNS)
+        f"SELECT *, {_QUARANTINE_REASON_SQL} AS quarantine_reason "
+        f"FROM split_target WHERE {_QUARANTINE_VIOLATION}",
+    )
 
     quarantined_at = datetime.now(timezone.utc)
-    quarantine = violations.append_column(
-        "quarantine_reason", pa.array(["return_dt < rent_dt"] * len(violations), type=pa.string())
-    ).append_column(
+    quarantine = violations.select(SILVER_COLUMNS + ["quarantine_reason"]).append_column(
         "quarantined_at", pa.array([quarantined_at] * len(violations), type=pa.timestamp("us", tz="UTC"))
     )
     return clean, quarantine.cast(QUARANTINE_ARROW_SCHEMA)
@@ -401,18 +411,18 @@ def _process_range(catalog, silver_table, start_date: date, end_date: date) -> i
 
     con = _connect()
     con.register("silver_rental_history_pre_quarantine", silver_arrow)
-    silver_arrow, quarantine_arrow = _split_return_dt_violations(silver_arrow, con)
+    silver_arrow, quarantine_arrow = _split_quarantine_violations(silver_arrow, con)
     quarantine_count = len(quarantine_arrow)
     if quarantine_count:
         ratio = quarantine_count / dedup_count
         max_ratio = float(os.getenv("MAX_QUARANTINE_RATIO") or DEFAULT_MAX_QUARANTINE_RATIO)
         if ratio > max_ratio:
             raise SilverValidationError(
-                f"{range_label}: return_dt < rent_dt 비율 {ratio:.4f}가 임계치 {max_ratio}를 "
+                f"{range_label}: 행 단위 이상치 비율 {ratio:.4f}가 임계치 {max_ratio}를 "
                 f"초과 - 구조적 이상 가능성, quarantine 대신 배치 중단 (위반 {quarantine_count}/{dedup_count}행)"
             )
         logger.warning(
-            "%s: return_dt < rent_dt %d행(%.4f%%) quarantine 처리 - silver.rental_history_quarantine 확인 필요",
+            "%s: 행 단위 이상치 %d행(%.4f%%) quarantine 처리 - silver.rental_history_quarantine 확인 필요",
             range_label, quarantine_count, ratio * 100,
         )
         append(_ensure_quarantine_table(catalog), quarantine_arrow, catalog=catalog)
