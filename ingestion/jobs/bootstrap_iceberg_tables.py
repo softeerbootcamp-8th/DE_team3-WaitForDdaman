@@ -6,22 +6,14 @@ Iceberg 신규 테이블 Bootstrap (Issue #216)
 `bronze.station_active`는 initial_load_*.py 같은 별도 초기 적재 경로가 없어(daily_batch만
 있음) 테이블 생성이 보장되지 않는다.
 
-이 잡과 register_tables_in_jdbc_catalog.py의 역할 분리:
-    - register_tables_in_jdbc_catalog.py: 이미 Hadoop Catalog(S3 warehouse)에 존재하는
-      테이블의 최신 metadata.json 위치를 JDBC 카탈로그에 포인터로만 등록한다
-      (1회성 마이그레이션, 기존 데이터/메타데이터 그대로 재사용).
-    - 이 잡(bootstrap_iceberg_tables.py): 아직 어디에도 존재하지 않는 테이블을
-      JDBC 카탈로그 + S3 warehouse에 새로 만든다 (신규 환경 초기화용).
-
-두 잡은 서로 겹치지 않는다 - register는 "이미 있는 걸 등록"하고, 이 잡은
-load_table()로 존재을 먼저 확인한 뒤 없을 때만 create_table()을 호출하므로, 이미
-등록/생성된 테이블은 절대 다시 만들지 않는다(스키마도, 데이터도 건드리지 않음).
-그래서 실행 순서와 무관하게 몇 번을 재실행해도 안전하다(멱등).
+이 잡은 새 JDBC 카탈로그와 S3 warehouse를 처음 초기화할 때 사용한다. 각 테이블은
+`load_table()`로 이미 존재하는지 먼저 확인하고, 없을 때만 `create_table()`을 호출한다.
+이미 등록/생성된 테이블은 스키마나 데이터를 건드리지 않고 스킵하므로 반복 실행해도
+안전하다(멱등).
 
 권장 실행 순서(Issue #216):
     인프라 배포
-      -> (기존 Hadoop metadata가 있는 환경) register_tables_in_jdbc_catalog
-      -> bootstrap_iceberg_tables (이 잡)
+      -> bootstrap_iceberg_tables
       -> Initial Load
       -> Daily Batch
 

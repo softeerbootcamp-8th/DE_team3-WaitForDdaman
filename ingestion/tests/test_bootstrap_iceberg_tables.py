@@ -3,7 +3,8 @@ bootstrap_iceberg_tables 단위 테스트 (Issue #216)
 
 실제 pyiceberg SqlCatalog(sqlite + 로컬 파일시스템 warehouse)를 tmp_path에 띄워서
 검증한다 - S3/moto가 필요 없다(create_table/load_table은 카탈로그 DB와 로컬 warehouse
-경로만 건드림). register_tables_in_jdbc_catalog와 달리 이 잡은 S3를 스캔하지 않는다.
+경로만 건드림). 신규 JDBC 카탈로그에 필요한 Bronze 테이블만 생성하며 기존 데이터를
+스캔하거나 마이그레이션하지 않는다.
 """
 import pyarrow as pa
 import pytest

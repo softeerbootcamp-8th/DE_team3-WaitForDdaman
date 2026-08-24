@@ -44,20 +44,11 @@ def test_bootstrap_dag_is_manual_only(dag_bag):
     assert dag.max_active_runs == 1
 
 
-def test_bootstrap_dag_registers_existing_tables_before_creating_new_ones(dag_bag):
+def test_bootstrap_dag_only_creates_new_tables(dag_bag):
     dag = dag_bag.dags[DAG_ID]
 
-    register_task = dag.get_task("register_existing_hadoop_tables")
-    bootstrap_task = dag.get_task("bootstrap_new_tables")
+    assert set(dag.task_ids) == {"create_bronze_tables"}
+    bootstrap_task = dag.get_task("create_bronze_tables")
 
-    assert register_task.downstream_task_ids == {"bootstrap_new_tables"}
-    assert "jobs.register_tables_in_jdbc_catalog" in register_task.bash_command
     assert "jobs.bootstrap_iceberg_tables" in bootstrap_task.bash_command
-
-
-def test_bootstrap_new_tables_runs_even_if_registration_step_is_skipped_or_fails(dag_bag):
-    """신규 환경(등록할 Hadoop metadata가 없는 환경)에서도 새 테이블 생성이 막히면 안 된다."""
-    dag = dag_bag.dags[DAG_ID]
-    bootstrap_task = dag.get_task("bootstrap_new_tables")
-
-    assert bootstrap_task.trigger_rule == "all_done"
+    assert bootstrap_task.trigger_rule == "all_success"

@@ -129,17 +129,14 @@ LocalStack/AWS 환경은 Iceberg warehouse와 JDBC 카탈로그가 완전히 비
 "테이블 없음"으로 실패한다. 특히 `bronze.station_active`는 별도 Initial Load
 경로가 없어(Daily Batch만 있음) 이 DAG가 유일한 테이블 생성 경로다.
 
-파라미터 입력 없이 `Trigger DAG`만 실행하면 된다. 태스크 2개는 각각 멱등하게 동작해
-반복 실행해도 중복 테이블/데이터가 생기지 않고, 기존 데이터를 훼손하지 않는다:
+파라미터 입력 없이 `Trigger DAG`만 실행하면 된다. 태스크는 멱등하게 동작해 반복
+실행해도 중복 테이블/데이터가 생기지 않고, 기존 데이터를 훼손하지 않는다:
 
 | 태스크 | 잡 | 역할 |
 |---|---|---|
-| `register_existing_hadoop_tables` | `jobs/register_tables_in_jdbc_catalog.py` | 기존 Hadoop Catalog(S3)에 이미 있는 테이블을 JDBC 카탈로그에 포인터로만 등록(1회성 마이그레이션) |
-| `bootstrap_new_tables` | `jobs/bootstrap_iceberg_tables.py` | 그래도 아직 없는 필수 Bronze 테이블(`rental_history`, `failure_report`, `station_master`, `station_active`, `bikeman_event`, `bikeman_event_quarantine`)을 새로 생성 |
+| `create_bronze_tables` | `jobs/bootstrap_iceberg_tables.py` | 필수 Bronze 테이블(`rental_history`, `failure_report`, `station_master`, `station_active`, `bikeman_event`, `bikeman_event_quarantine`)이 없으면 새로 생성 |
 
-완전히 새로운 환경(등록할 Hadoop metadata 자체가 없는 환경)에서는
-`register_existing_hadoop_tables`가 0개 등록으로 끝나고, `bootstrap_new_tables`가
-필요한 테이블을 전부 새로 만든다.
+새로운 환경에서는 `create_bronze_tables`가 필요한 테이블을 전부 새로 만든다.
 
 ### Bronze 초기 적재
 
@@ -273,7 +270,6 @@ export PYTHONPATH=..:$PYTHONPATH  # ingestion/staging/pipeline이 공유하는 �
 Bootstrap (신규 환경에서 아래 초기 적재/일 배치보다 먼저 1회 실행):
 
 ```bash
-python -m jobs.register_tables_in_jdbc_catalog  # 기존 Hadoop metadata가 있는 환경만
 python -m jobs.bootstrap_iceberg_tables
 ```
 
