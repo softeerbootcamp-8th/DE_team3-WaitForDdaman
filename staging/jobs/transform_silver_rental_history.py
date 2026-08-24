@@ -53,7 +53,7 @@ from pyiceberg.types import DoubleType, NestedField, StringType, TimestamptzType
 import config
 from common.duckdb_io import query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
-from common.iceberg_io import overwrite_partition
+from common.iceberg_io import append, overwrite_partition
 from common.s3_utils import ensure_bucket, get_json, put_json  # 워커/로컬 실행 시 대상 버킷이 없으면 만들어주는 안전장치
 from common.sql_assert import QualityCheck, QualityCheckError
 from common.watermark import read_watermark, write_watermark  # Bronze용 모듈을 키만 바꿔 Silver 전용으로 재사용
@@ -105,6 +105,43 @@ SILVER_PARTITION_SPEC = PartitionSpec(
     PartitionField(source_id=7, field_id=1000, transform=IdentityTransform(), name=PARTITION_COLUMN)
 )
 SILVER_PROPERTIES = {"write.distribution-mode": "hash"}
+
+QUARANTINE_TABLE = "silver.rental_history_quarantine"
+
+# silver.bikeman_action_quarantine과 동일한 convention: 원본 컬럼 + 격리 사유/시각.
+# 언파티션 - quarantine 테이블은 볼륨이 작고 조회가 감사 목적이라 파티션이 필요 없다
+# (#216 조사 근거를 그대로 따름 - bootstrap_iceberg_tables.py 주석 참고).
+QUARANTINE_SCHEMA = Schema(
+    NestedField(1, "bike_id", StringType(), required=False),
+    NestedField(2, "rent_dt", TimestamptzType(), required=False),
+    NestedField(3, "return_dt", TimestamptzType(), required=False),
+    NestedField(4, "use_distance_m", DoubleType(), required=False),
+    NestedField(5, "rent_station_id", StringType(), required=False),
+    NestedField(6, "return_station_id", StringType(), required=False),
+    NestedField(7, "rent_date_partition", StringType(), required=False),
+    NestedField(8, "source_file", StringType(), required=False),
+    NestedField(9, "ingested_at", TimestamptzType(), required=False),
+    NestedField(10, "quarantine_reason", StringType(), required=False),
+    NestedField(11, "quarantined_at", TimestamptzType(), required=False),
+)
+QUARANTINE_ARROW_SCHEMA = pa.schema([
+    pa.field("bike_id", pa.string()),
+    pa.field("rent_dt", pa.timestamp("us", tz="UTC")),
+    pa.field("return_dt", pa.timestamp("us", tz="UTC")),
+    pa.field("use_distance_m", pa.float64()),
+    pa.field("rent_station_id", pa.string()),
+    pa.field("return_station_id", pa.string()),
+    pa.field("rent_date_partition", pa.string()),
+    pa.field("source_file", pa.string()),
+    pa.field("ingested_at", pa.timestamp("us", tz="UTC")),
+    pa.field("quarantine_reason", pa.string()),
+    pa.field("quarantined_at", pa.timestamp("us", tz="UTC")),
+])
+
+# 이 비율을 넘는 quarantine은 구조적 이상으로 보고 배치 전체를 막는다(#232) -
+# 12/185956 ≈ 0.006%처럼 알려진 노이즈 수준은 통과시키되, 대량 위반은 여전히
+# 사람이 봐야 하므로 하드 게이트로 남긴다.
+DEFAULT_MAX_QUARANTINE_RATIO = 0.01
 
 # Bronze는 원본 문자열을 그대로 보존하므로 소스(API/CSV 초기 적재)마다 포맷이 다를 수 있음
 # (rent_date_partition을 만들 때도 같은 이유로 포맷 편차에 대응함 - initial_load_rental_history.py 참고).
@@ -247,8 +284,9 @@ def validate(silver_table: pa.Table, range_label: str) -> None:
         .has_uniqueness(["bike_id", "rent_dt"], threshold=0.98)
         # 이동거리가 음수인 데이터 확인
         .is_non_negative("use_distance_m")
-        # 대여일시 이후에 반납일시가 있어야 함
-        .satisfies("return_dt IS NULL OR return_dt >= rent_dt", "return_dt는 rent_dt 이후여야 함")
+        # return_dt < rent_dt는 더 이상 여기서 hard-fail하지 않는다 (#232) -
+        # _process_range가 _split_return_dt_violations로 미리 quarantine 분리한 뒤
+        # 이 validate()에는 이미 걸러진 clean 행만 들어온다.
         .run(silver_table)
     )
 
@@ -279,6 +317,44 @@ def _ensure_silver_table(catalog):
         )
 
 
+def _ensure_quarantine_table(catalog):
+    """quarantine 테이블이 없으면 만든다 (silver.bikeman_action_quarantine과 동일 패턴)."""
+    catalog.create_namespace_if_not_exists("silver")
+    try:
+        return catalog.load_table(QUARANTINE_TABLE)
+    except NoSuchTableError:
+        logger.info("%s 테이블 신규 생성", QUARANTINE_TABLE)
+        return catalog.create_table(QUARANTINE_TABLE, schema=QUARANTINE_SCHEMA)
+
+
+def _split_return_dt_violations(
+    silver_arrow: pa.Table, con: duckdb.DuckDBPyConnection
+) -> tuple[pa.Table, pa.Table]:
+    """
+    return_dt < rent_dt인 행을 분리한다 (#232). 예전엔 validate()의 hard-fail
+    조건이었지만, 알려진 노이즈 수준(0.006%)까지 배치 전체를 막는 건 과하다 -
+    이제 이 행들은 quarantine으로 옮기고 나머지는 정상 진행한다. 비율이 threshold를
+    넘는 경우의 하드 게이트는 _process_range에서 별도로 건다.
+    """
+    con.register("split_target", silver_arrow)
+    clean = query_arrow(
+        con,
+        "SELECT * FROM split_target WHERE NOT (return_dt IS NOT NULL AND return_dt < rent_dt)",
+    ).select(SILVER_COLUMNS)
+    violations = query_arrow(
+        con,
+        "SELECT * FROM split_target WHERE return_dt IS NOT NULL AND return_dt < rent_dt",
+    ).select(SILVER_COLUMNS)
+
+    quarantined_at = datetime.now(timezone.utc)
+    quarantine = violations.append_column(
+        "quarantine_reason", pa.array(["return_dt < rent_dt"] * len(violations), type=pa.string())
+    ).append_column(
+        "quarantined_at", pa.array([quarantined_at] * len(violations), type=pa.timestamp("us", tz="UTC"))
+    )
+    return clean, quarantine.cast(QUARANTINE_ARROW_SCHEMA)
+
+
 def _read_bronze(catalog, start_str: str, end_str: str) -> pa.Table:
     """rent_date_partition은 identity 파티션이라 이 범위 비교가 그대로 파티션 프루닝이 된다."""
     table = catalog.load_table(BRONZE_TABLE)
@@ -299,26 +375,43 @@ def _process_range(catalog, silver_table, start_date: date, end_date: date) -> i
     bronze_table = _read_bronze(catalog, start_str, end_str)
     row_count = len(bronze_table)
 
-    # 0행이면 Silver로 승격할 데이터가 없으므로 바로 종료
     if row_count == 0:
         logger.info("%s: Bronze에 처리할 데이터 없음", range_label)
         return 0
 
     silver_arrow = transform(bronze_table)
-    silver_count = len(silver_arrow)
-    if silver_count < row_count:
+    dedup_count = len(silver_arrow)
+    if dedup_count < row_count:
         logger.info(
             "%s: bike_id/rent_dt 결측 또는 중복으로 %d행 제외 (Bronze %d행 -> Silver %d행)",
-            range_label, row_count - silver_count, row_count, silver_count,
+            range_label, row_count - dedup_count, row_count, dedup_count,
         )
 
+    con = _connect()
+    con.register("silver_rental_history_pre_quarantine", silver_arrow)
+    silver_arrow, quarantine_arrow = _split_return_dt_violations(silver_arrow, con)
+    quarantine_count = len(quarantine_arrow)
+    if quarantine_count:
+        ratio = quarantine_count / dedup_count
+        max_ratio = float(os.getenv("MAX_QUARANTINE_RATIO") or DEFAULT_MAX_QUARANTINE_RATIO)
+        if ratio > max_ratio:
+            raise SilverValidationError(
+                f"{range_label}: return_dt < rent_dt 비율 {ratio:.4f}가 임계치 {max_ratio}를 "
+                f"초과 - 구조적 이상 가능성, quarantine 대신 배치 중단 (위반 {quarantine_count}/{dedup_count}행)"
+            )
+        logger.warning(
+            "%s: return_dt < rent_dt %d행(%.4f%%) quarantine 처리 - silver.rental_history_quarantine 확인 필요",
+            range_label, quarantine_count, ratio * 100,
+        )
+        append(_ensure_quarantine_table(catalog), quarantine_arrow, catalog=catalog)
+
+    silver_count = len(silver_arrow)
     validate(silver_arrow, range_label)  # 실패 시 SilverValidationError -> 배치 중단
 
     # Spark의 dynamic partition overwrite를 파티션 값별 overwrite로 옮긴 것.
     # 위 docstring의 "중복 제거 윈도우는 하루 안에서 닫힌다"가 이 분해의 근거다 -
     # 한 중복 그룹이 두 파티션에 걸치는 일이 없으므로 파티션별로 따로 써도
     # 한 번에 쓴 것과 결과가 같다. Bronze에 없는 날짜는 손대지 않는 것도 동일.
-    con = _connect()
     con.register("silver_rental_history", silver_arrow)
     partition_values = [
         row[0]

@@ -21,6 +21,9 @@ import pytest
 import jobs.transform_silver_rental_history as tsr
 from jobs.transform_silver_rental_history import (
     PARTITION_COLUMN,
+    QUARANTINE_ARROW_SCHEMA,
+    QUARANTINE_SCHEMA,
+    QUARANTINE_TABLE,
     SILVER_COLUMNS,
     SILVER_PARTITION_SPEC,
     SILVER_PROMOTION_PREFIX,
@@ -28,10 +31,12 @@ from jobs.transform_silver_rental_history import (
     SilverValidationError,
     _build_silver_promotion_document,
     _derive_mode,
+    _ensure_quarantine_table,
     _find_current_day_entry,
     _load_bronze_promotion_metadata,
     _parse_bool_env,
     _silver_promotion_key,
+    _split_return_dt_violations,
     _validate_bronze_marker,
     run,
     transform,
@@ -250,14 +255,6 @@ def test_validate_passes_on_clean_rows():
 def test_validate_rejects_negative_distance():
     with pytest.raises(SilverValidationError, match="isNonNegative"):
         validate(transform(bronze_table({"use_distance_m": "-1.0"})), "2026-08-21")
-
-
-def test_validate_rejects_return_before_rent():
-    with pytest.raises(SilverValidationError, match="satisfies"):
-        validate(
-            transform(bronze_table({"rent_dt": "2026-08-21 12:00:00", "return_dt": "2026-08-21 11:00:00"})),
-            "2026-08-21",
-        )
 
 
 # ---------------------------------------------------------------- #137 당일 promotion 처리
@@ -541,3 +538,69 @@ def test_build_silver_promotion_document_inherits_degraded_bronze_mode_on_mixed_
     )
     assert document["mode"] == "DEGRADED"
     assert document["source_snapshot_type"] == "FINAL"
+
+
+# ---------------------------------------------------------------- quarantine 테이블 정의
+
+
+def test_quarantine_table_schema_matches_silver_plus_reason():
+    assert [f.name for f in QUARANTINE_SCHEMA.fields] == SILVER_COLUMNS + [
+        "quarantine_reason", "quarantined_at",
+    ]
+    assert QUARANTINE_TABLE == "silver.rental_history_quarantine"
+
+
+# ---------------------------------------------------------------- return_dt quarantine 분리
+
+
+def test_split_return_dt_violations_separates_bad_rows():
+    silver = transform(bronze_table(
+        {"bike_id": "SPB-1", "rent_dt": "2026-08-21 10:00:00", "return_dt": "2026-08-21 11:00:00"},
+        {"bike_id": "SPB-2", "rent_dt": "2026-08-21 12:00:00", "return_dt": "2026-08-21 11:00:00"},
+    ))
+    con = tsr._connect()
+    clean, quarantine = _split_return_dt_violations(silver, con)
+
+    assert clean.to_pylist()[0]["bike_id"] == "SPB-1"
+    assert len(clean) == 1
+    assert len(quarantine) == 1
+    q_row = quarantine.to_pylist()[0]
+    assert q_row["bike_id"] == "SPB-2"
+    assert q_row["quarantine_reason"] == "return_dt < rent_dt"
+    assert q_row["quarantined_at"] is not None
+
+
+def test_split_return_dt_violations_keeps_null_return_dt_clean():
+    silver = transform(bronze_table({"return_dt": ""}))
+    con = tsr._connect()
+    clean, quarantine = _split_return_dt_violations(silver, con)
+    assert len(clean) == 1
+    assert len(quarantine) == 0
+
+
+def test_validate_no_longer_hard_fails_on_return_before_rent():
+    """이제 이 조건은 validate()가 아니라 _split_return_dt_violations가 처리한다."""
+    silver = transform(bronze_table(
+        {"rent_dt": "2026-08-21 12:00:00", "return_dt": "2026-08-21 11:00:00"},
+    ))
+    validate(silver, "2026-08-21")  # 예외 없이 통과해야 함 (quarantine은 별도 단계)
+
+
+def test_validate_still_rejects_negative_distance():
+    with pytest.raises(SilverValidationError, match="isNonNegative"):
+        validate(transform(bronze_table({"use_distance_m": "-1.0"})), "2026-08-21")
+
+
+def test_process_range_aborts_when_quarantine_ratio_exceeds_threshold(monkeypatch):
+    """0.01(1%) 넘는 위반은 quarantine이 아니라 여전히 배치를 막아야 한다."""
+    monkeypatch.setenv("MAX_QUARANTINE_RATIO", "0.01")
+    rows = [
+        {"bike_id": f"SPB-{i}", "rent_dt": "2026-08-21 12:00:00", "return_dt": "2026-08-21 11:00:00"}
+        for i in range(2)
+    ] + [
+        {"bike_id": "SPB-clean", "rent_dt": "2026-08-21 10:00:00", "return_dt": "2026-08-21 11:00:00"}
+    ]
+    silver = transform(bronze_table(*rows))
+    con = tsr._connect()
+    clean, quarantine = _split_return_dt_violations(silver, con)
+    assert len(quarantine) / len(silver) == pytest.approx(2 / 3)  # 1% 훨씬 초과
