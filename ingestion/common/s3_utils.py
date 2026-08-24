@@ -78,6 +78,24 @@ def upload_file(local_path: Path, bucket: str, key: str) -> None:
     logger.info("업로드 완료: %s -> s3://%s/%s", local_path, bucket, key)
 
 
+def to_spark_readable_path(local_path: Path, bucket: str, staging_prefix: str) -> str:
+    """
+    로컬에 만든 중간 파일(인코딩 변환된 CSV 등)을 Spark가 실제로 읽을 수 있는 경로로
+    바꾼다. AWS 모드(EMR Serverless)에서는 driver와 executor가 서로 다른 컨테이너라,
+    driver 프로세스가 로컬 디스크(tempfile 등)에 써둔 파일을 executor가 읽을 방법이
+    없다 - spark.read.csv()에 그 로컬 경로를 그대로 넘기면 executor 입장에서는 파일이
+    존재하지 않는 것과 같아서 "UNABLE_TO_INFER_SCHEMA"로 실패한다(실측: 2026-08-24,
+    Bronze 초기 적재 EMR Serverless 태스크 - Issue #223). 그래서 AWS 모드에서는 S3에
+    먼저 올리고 그 s3a:// 경로를 반환한다. 로컬 실행(SPARK_LOCAL_EXECUTION)은 driver/
+    executor가 같은 프로세스라 로컬 경로를 그대로 반환해도 문제없다.
+    """
+    if config.SETTINGS.env != "aws":
+        return str(local_path)
+    key = f"{staging_prefix}/{local_path.name}"
+    upload_file(local_path, bucket, key)
+    return f"s3a://{bucket}/{key}"
+
+
 def download_file(bucket: str, key: str, local_path: Path) -> None:
     s3 = get_s3_client()
     local_path.parent.mkdir(parents=True, exist_ok=True)

@@ -30,7 +30,7 @@ from pyspark.sql import functions as F
 import config
 from common.encoding_utils import EncodingMismatchError, convert_euckr_file_to_utf8
 from common.file_utils import unzip_if_needed
-from common.s3_utils import download_file, ensure_bucket, split_s3_uri, upload_file
+from common.s3_utils import download_file, ensure_bucket, split_s3_uri, to_spark_readable_path, upload_file
 from common.spark_session import build_spark_session
 from schema.rental_history_schema import (
     SchemaValidationError,
@@ -109,7 +109,10 @@ def _process_one_csv(spark, csv_path: Path, staging_dir: Path):
     if convert_result["dropped_bytes"] > 0:
         logger.warning("파일 %s: 손상 바이트 %d개 폐기", csv_path.name, convert_result["dropped_bytes"])
 
-    raw_df = spark.read.option("header", "true").csv(str(utf8_path))
+    csv_source = to_spark_readable_path(
+        utf8_path, config.SETTINGS.raw_bucket, "raw/rental_history/_utf8_staging"
+    )
+    raw_df = spark.read.option("header", "true").csv(csv_source)
     actual_columns = raw_df.columns
 
     if not is_rental_history_file(actual_columns):
