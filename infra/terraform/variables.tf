@@ -121,7 +121,7 @@ variable "iceberg_catalog_master_password" {
 }
 
 variable "emr_spark_image_tag" {
-  description = "emr-spark-prod ECR 리포의 이미지 태그"
+  description = "waitforddaman-emr-spark-prod ECR 리포의 이미지 태그"
   type        = string
   default     = "latest"
 }
@@ -153,5 +153,10 @@ variable "bikeman_event_generator_reserved_concurrency" {
 # ------------------------------------------------------------------------------
 variable "airflow_worker_role_name" {
   description = "Airflow 워커(EC2)가 쓰는 기존 IAM 롤 이름 - lambda:InvokeFunction 정책을 여기 붙인다. EC2 인스턴스 롤은 Terraform 밖에서 수동 생성됨(#109)"
+  type        = string
+}
+
+variable "airflow_ec2_sg_id" {
+  description = "Airflow 워커(EC2)가 쓰는 기존 보안그룹 ID - iceberg_catalog RDS 인바운드 허용에 쓴다. EC2 인스턴스는 Terraform 밖에서 수동 생성됨(#109)"
   type        = string
 }

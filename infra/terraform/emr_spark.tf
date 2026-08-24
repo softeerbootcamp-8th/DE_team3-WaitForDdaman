@@ -134,6 +134,22 @@ resource "aws_security_group_rule" "iceberg_catalog_allow_serving_sync" {
   description = "Allow iceberg_catalog RDS access from serving_sync Lambda"
 }
 
+# Airflow가 SPARK_LOCAL_EXECUTION=true로 EMR Serverless를 거치지 않고 Airflow
+# 워커(EC2)에서 직접 PyIceberg SqlCatalog로 iceberg_catalog RDS에 붙는 경로가
+# 있는데(예: bronze 일 배치/캐치업 잡들), 이 EC2의 SG가 인바운드 허용 목록에
+# 빠져있어 JDBC 연결이 타임아웃으로 실패했다 (실측: 2026-08-23 catchup_failure_report
+# 태스크에서 psycopg2.OperationalError connection timed out 확인).
+resource "aws_security_group_rule" "iceberg_catalog_allow_airflow_ec2" {
+  type                     = "ingress"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  security_group_id        = var.iceberg_catalog_sg_id
+  source_security_group_id = var.airflow_ec2_sg_id
+  # 한글 원문: "Airflow 워커(EC2)의 iceberg_catalog RDS 직접 접근 허용"
+  description = "Allow iceberg_catalog RDS access from the Airflow worker EC2"
+}
+
 # ---- (수동 절차, 이 리포에서 실행 안 함) 콘솔에서 잘못 들어간 CIDR 규칙 제거 ----
 # iceberg-catalog-sg에 콘솔에서 잘못 추가된 인바운드 규칙(121.160.189.177/32,
 # 5432/tcp)이 있다. 이 리포는 SG를 통째로 관리하지 않으므로, 그 규칙 하나만
@@ -157,7 +173,7 @@ resource "aws_security_group_rule" "iceberg_catalog_allow_serving_sync" {
 
 # ---- ECR: prod Spark 커스텀 이미지 (spark/Dockerfile.prod push 대상) ----
 resource "aws_ecr_repository" "emr_spark" {
-  name                 = "emr-spark-prod"
+  name                 = "waitforddaman-emr-spark-prod"
   image_tag_mutability = "MUTABLE"
 }
 
