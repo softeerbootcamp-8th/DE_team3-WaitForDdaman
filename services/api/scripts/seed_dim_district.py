@@ -12,14 +12,13 @@ station의 x/y도 반드시 같은 geo.project()를 써야 대여소 점이 소�
 사용법 (레포 루트를 PYTHONPATH에 둬야 app.geo를 import할 수 있다):
     cd services/api
     PYTHONPATH=../.. DATABASE_URL=postgresql+psycopg2://airflow:airflow@localhost:5433/airflow \
-    SNAPSHOT_DATE=2026-08-18 python3 scripts/seed_dim_district.py
+    python3 scripts/seed_dim_district.py
 """
 from __future__ import annotations
 
 import json
 import os
 import sys
-from datetime import date
 from pathlib import Path
 
 import psycopg2
@@ -65,7 +64,6 @@ def main() -> None:
         "DATABASE_URL", "postgresql+psycopg2://airflow:airflow@localhost:5433/airflow"
     )
     dsn = database_url.replace("postgresql+psycopg2://", "postgresql://")
-    snapshot_date = os.environ.get("SNAPSHOT_DATE") or date.today().isoformat()
 
     rows = build_rows()
 
@@ -73,35 +71,37 @@ def main() -> None:
     try:
         with conn.cursor() as cur:
             cur.execute("CREATE SCHEMA IF NOT EXISTS serving")
+            # 구 경계는 station_daily/bike_risk_daily와 달리 파이프라인이 매일 갱신하는
+            # 데이터가 아니라 고정된 참조 데이터라 snapshot_date로 파티션하지 않는다 -
+            # 파티션했더니 station_daily가 다음 날짜로 넘어갈 때마다 조회 쪽(state.py)의
+            # 날짜 일치 조건과 어긋나 지도가 매번 빈 상태로 돌아갔다(실측: 2026-08-24).
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS serving.dim_district (
-                    snapshot_date  DATE NOT NULL,
-                    name           TEXT NOT NULL,
+                    name           TEXT PRIMARY KEY,
                     path           TEXT NOT NULL,
                     cx             DOUBLE PRECISION NOT NULL,
                     cy             DOUBLE PRECISION NOT NULL,
                     view_box_w     DOUBLE PRECISION NOT NULL,
-                    view_box_h     DOUBLE PRECISION NOT NULL,
-                    PRIMARY KEY (name, snapshot_date)
+                    view_box_h     DOUBLE PRECISION NOT NULL
                 )
                 """
             )
-            cur.execute("DELETE FROM serving.dim_district WHERE snapshot_date = %s", (snapshot_date,))
+            cur.execute("DELETE FROM serving.dim_district")
             for name, path, cx, cy in rows:
                 cur.execute(
                     """
                     INSERT INTO serving.dim_district
-                        (snapshot_date, name, path, cx, cy, view_box_w, view_box_h)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        (name, path, cx, cy, view_box_w, view_box_h)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     """,
-                    (snapshot_date, name, path, cx, cy, VIEW_BOX_W, VIEW_BOX_H),
+                    (name, path, cx, cy, VIEW_BOX_W, VIEW_BOX_H),
                 )
         conn.commit()
     finally:
         conn.close()
 
-    print(f"serving.dim_district: {snapshot_date} 파티션에 {len(rows)}개 구 실제 경계 시드 완료")
+    print(f"serving.dim_district: {len(rows)}개 구 실제 경계 시드 완료")
 
 
 if __name__ == "__main__":
