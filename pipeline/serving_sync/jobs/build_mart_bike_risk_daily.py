@@ -185,11 +185,6 @@ def _ensure_gold_table(catalog):
         logger.info("%s 테이블 신규 생성", GOLD_TABLE)
         return catalog.create_table(GOLD_TABLE, schema=GOLD_SCHEMA, partition_spec=GOLD_PARTITION_SPEC)
 
-    # 레거시 action 컬럼 제거(#93 이전 데이터 잔존분). 없으면 아무 것도 안 함.
-    if "action" in {f.name for f in table.schema().fields}:
-        with table.update_schema() as update:
-            update.delete_column("action")
-        table = catalog.load_table(GOLD_TABLE)
     return table
 
 
