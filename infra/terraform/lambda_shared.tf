@@ -16,13 +16,19 @@ resource "aws_security_group" "secretsmanager_vpc_endpoint_sg" {
   vpc_id      = var.vpc_id
 
   ingress {
-    description = "HTTPS from serving_sync and bikeman_event_generator Lambdas"
+    # EMR Serverless 워커도 이 엔드포인트를 공유한다(emr_spark.tf) - Secrets
+    # Manager용 Interface VPC Endpoint를 중복 생성하지 않기 위함(실측: 2026-08-24,
+    # initial_load_failure_report_file_emr 태스크가 CloudWatch Logs 전송 시
+    # Connect timeout으로 실패한 것과 같은 원인 - NAT가 없는 VPC라 인터페이스
+    # 엔드포인트 없이는 EMR 워커가 이 서비스들에 아예 도달할 라우트가 없음).
+    description = "HTTPS from serving_sync/bikeman_event_generator Lambdas and EMR Serverless workers"
     from_port   = 443
     to_port     = 443
-    protocol    = "tcp"
-    security_groups = [
-      aws_security_group.serving_sync_lambda_sg.id,
-      aws_security_group.bikeman_event_generator_lambda_sg.id,
+      protocol    = "tcp"
+      security_groups = [
+        aws_security_group.serving_sync_lambda_sg.id,
+        aws_security_group.bikeman_event_generator_lambda_sg.id,
+        aws_security_group.emr_serverless_worker.id,
     ]
   }
 }

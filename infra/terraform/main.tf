@@ -92,12 +92,12 @@ data "archive_file" "station_active_zip" {
 # Lambda Functions
 # ------------------------------------------------------------------------------
 resource "aws_lambda_function" "fetch_station_master_raw" {
-  function_name = "fetch_station_master_raw"
-  role          = aws_iam_role.raw_fetch_lambda_role.arn
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.12"
-  timeout       = 180
-  memory_size   = 256
+  function_name    = "fetch_station_master_raw"
+  role             = aws_iam_role.raw_fetch_lambda_role.arn
+  handler          = "lambda_function.lambda_handler"
+  runtime          = "python3.12"
+  timeout          = 180
+  memory_size      = 256
 
   filename         = data.archive_file.station_master_zip.output_path
   source_code_hash = data.archive_file.station_master_zip.output_base64sha256
@@ -116,12 +116,12 @@ resource "aws_lambda_function" "fetch_station_master_raw" {
 }
 
 resource "aws_lambda_function" "fetch_station_active_raw" {
-  function_name = "fetch_station_active_raw"
-  role          = aws_iam_role.raw_fetch_lambda_role.arn
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.12"
-  timeout       = 180
-  memory_size   = 256
+  function_name    = "fetch_station_active_raw"
+  role             = aws_iam_role.raw_fetch_lambda_role.arn
+  handler          = "lambda_function.lambda_handler"
+  runtime          = "python3.12"
+  timeout          = 180
+  memory_size      = 256
 
   filename         = data.archive_file.station_active_zip.output_path
   source_code_hash = data.archive_file.station_active_zip.output_base64sha256
@@ -263,13 +263,13 @@ resource "aws_iam_role_policy_attachment" "notify_slack_basic_execution" {
 }
 
 resource "aws_lambda_function" "notify_slack" {
-  count         = local.slack_notifications_enabled ? 1 : 0
-  function_name = "notify_slack"
-  role          = aws_iam_role.notify_slack_lambda_role[0].arn
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.12"
-  timeout       = 10
-  memory_size   = 128
+  count            = local.slack_notifications_enabled ? 1 : 0
+  function_name    = "notify_slack"
+  role             = aws_iam_role.notify_slack_lambda_role[0].arn
+  handler          = "lambda_function.lambda_handler"
+  runtime          = "python3.12"
+  timeout          = 10
+  memory_size      = 128
 
   filename         = data.archive_file.notify_slack_zip.output_path
   source_code_hash = data.archive_file.notify_slack_zip.output_base64sha256

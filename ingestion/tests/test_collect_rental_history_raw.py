@@ -243,7 +243,8 @@ def test_collect_snapshot_marks_successful_zero_rows_complete_empty():
     assert manifest["completed_hours"] == [0, 1]
     assert manifest["page_count"] == 2
     assert manifest["row_count"] == 0
-    assert manifest["schema_valid"] is False
+    # 빈 응답은 검사할 컬럼 자체가 없으므로 스키마 실패(False)가 아니라 검사 대상 없음(None)이다.
+    assert manifest["schema_valid"] is None
 
 
 def test_collect_snapshot_marks_partial_api_failure_incomplete():
@@ -441,6 +442,43 @@ def test_run_fails_after_all_windows_when_any_snapshot_is_unusable(monkeypatch):
         raw_job.run()
 
     assert processed_dates == [date(2026, 8, 21), date(2026, 8, 22)]
+
+
+def test_required_complete_empty_is_reported_as_empty_result_not_schema_failure(
+    monkeypatch,
+):
+    monkeypatch.setenv("COLLECTION_CUTOFF_AT", "2026-08-22T05:00:00+09:00")
+    monkeypatch.setenv("SNAPSHOT_TYPE", "PRELIMINARY")
+    monkeypatch.setattr(raw_job, "ensure_bucket", lambda bucket: None)
+
+    def fake_collect_snapshot(
+        target_date,
+        hours,
+        observed_at,
+        snapshot_type,
+        fetch_pages,
+        write_json,
+        read_json,
+    ):
+        if target_date == date(2026, 8, 21):
+            return {
+                "target_date": "2026-08-21",
+                "status": "COMPLETE_EMPTY",
+                "schema_valid": None,
+            }
+        return {
+            "target_date": "2026-08-22",
+            "status": "COMPLETE",
+            "schema_valid": True,
+        }
+
+    monkeypatch.setattr(raw_job, "collect_snapshot", fake_collect_snapshot)
+
+    with pytest.raises(raw_job.RawCollectionError) as exc_info:
+        raw_job.run()
+
+    assert "EMPTY_RESULT" in str(exc_info.value)
+    assert "SCHEMA_INVALID" not in str(exc_info.value)
 
 
 def _fake_collect(calls, status_by_date=None):

@@ -1,14 +1,17 @@
 """선택된 Raw 관측본을 Bronze 대여이력 파티션으로 원자적으로 승격하는 잡.
 
-이 파이프라인에서 Spark/Iceberg를 쓰는 유일한 단계다. selection.json에 적힌 payload만
-읽어 한 DataFrame으로 합치고 `overwritePartitions()` 한 번으로 날짜 파티션을 교체한다.
-Iceberg snapshot commit이 날짜 묶음의 원자 경계이므로, 일부 날짜만 먼저 반영되는 중간
-상태가 생기지 않는다.
+selection.json에 적힌 payload만 읽어 하나의 PyArrow Table로 합치고, PyIceberg
+`Table.overwrite(..., overwrite_filter=OR(EqualTo(...)))` 한 번으로 여러 날짜 파티션을
+동시에 교체한다(#194). Iceberg snapshot commit이 날짜 묶음의 원자 경계이므로, 일부
+날짜만 먼저 반영되는 중간 상태가 생기지 않는다.
+
+Spark/JVM을 완전히 제거했다(#194) - 이 잡이 쓰는 유일한 Bronze 테이블은 initial_load_
+rental_history.py(Spark, 파일 백필 전용)가 먼저 만들어 둔다고 가정하며, 테이블이 없으면
+자동 생성하지 않고 초기 적재 선행이 필요하다는 PromotionError를 낸다.
 
 Bronze commit이 끝난 뒤에만 promotion.json(status=COMPLETE)을 쓴다. 이 마커가 없으면
 하류(확정 워터마크, Asset)는 승격이 끝났다고 보지 않는다.
 """
-import functools
 import json
 import logging
 import os
@@ -16,12 +19,15 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from pyspark.sql import functions as F
+import pyarrow as pa
+import pyarrow.compute as pc
+from pyiceberg.exceptions import NoSuchTableError
 
 import config
 from common.api_client import strip_pagination_meta
+from common.iceberg_catalog import build_iceberg_catalog
+from common.iceberg_io import build_partition_filter, overwrite_partitions
 from common.s3_utils import ensure_bucket, get_json, put_json
-from common.spark_session import build_spark_session
 from jobs.collect_rental_history_raw import parse_collection_cutoff, snapshot_keys
 from jobs.rental_history_snapshot_policy import (
     DATASET,
@@ -29,10 +35,50 @@ from jobs.rental_history_snapshot_policy import (
     promotion_key,
     selection_key,
 )
-from schema.rental_history_schema import build_select_exprs, validate_and_report
+from schema.rental_history_schema import COLUMN_ALIAS_MAP, validate_and_report
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+# Bronze 테이블 컬럼 순서 - 기존 bronze.rental_history DDL(initial_load_rental_history.py)과
+# 동일해야 한다. 값은 전부 문자열로 유지한다(Bronze 원칙 - 타입 캐스팅은 Silver 책임).
+BRONZE_BUSINESS_COLUMNS = [
+    "bike_id",
+    "rent_dt",
+    "rent_station_no",
+    "rent_station_name",
+    "rent_hold",
+    "return_dt",
+    "return_station_no",
+    "return_station_name",
+    "return_hold",
+    "use_min",
+    "use_distance_m",
+    "user_class_cd",
+    "sex_cd",
+    "birth_year",
+    "rent_station_id",
+    "return_station_id",
+    "bike_se_cd",
+]
+
+ARROW_SCHEMA = pa.schema(
+    [pa.field(c, pa.string()) for c in BRONZE_BUSINESS_COLUMNS]
+    + [
+        pa.field("rent_date_partition", pa.string()),
+        pa.field("source_file", pa.string()),
+        pa.field("ingested_at", pa.timestamp("us", tz="UTC")),
+    ]
+)
+
+PARTITION_COLUMN = "rent_date_partition"
+
+# 표준 컬럼 -> 그 표준 컬럼에 매핑되는 모든 소스 별칭 목록 (역 인덱스).
+# schema.rental_history_schema.build_select_exprs와 동일한 "컬럼 이름 존재 여부" 기준으로
+# 소스 별칭을 고른다 (Spark Column 표현식이 아니라 PyArrow로 같은 의미를 구현).
+_STANDARD_TO_ALIASES: dict[str, list[str]] = {}
+for _src, _dst in COLUMN_ALIAS_MAP.items():
+    _STANDARD_TO_ALIASES.setdefault(_dst, []).append(_src)
 
 
 class PromotionError(Exception):
@@ -40,73 +86,58 @@ class PromotionError(Exception):
 
 
 def bronze_table_name() -> str:
-    return f"{config.SETTINGS.iceberg_catalog_name}.bronze.rental_history"
+    return "bronze.rental_history"
 
 
-def ensure_bronze_table(spark) -> None:
+def load_bronze_table(catalog=None):
     """
-    initial_load_rental_history.py와 동일한 DDL - 초기 적재 없이 승격만 단독으로
-    먼저 돌리는 경우(신규 환경, 최근 N일치만 받고 싶은 경우 등)에도 테이블이 없어서
-    writeTo().overwritePartitions()가 TABLE_OR_VIEW_NOT_FOUND로 실패하지 않게 한다.
-    이미 초기 적재로 테이블이 있어도 CREATE TABLE IF NOT EXISTS라 안전하다(no-op).
+    Bronze 테이블을 로드한다. 테이블이 없으면 자동 생성하지 않고 initial_load_rental_history
+    선행이 필요하다는 PromotionError를 낸다 - 이 잡은 Spark를 쓰지 않으므로 DDL(CREATE TABLE)을
+    실행할 수단이 없고, 신규 환경에서 승격만 먼저 돌리는 경로를 조용히 허용하면 안 된다(#194).
     """
-    spark.sql(
-        f"CREATE DATABASE IF NOT EXISTS {config.SETTINGS.iceberg_catalog_name}.bronze"
-    )
-    spark.sql(
-        f"""
-        CREATE TABLE IF NOT EXISTS {bronze_table_name()} (
-            bike_id STRING,
-            rent_dt STRING,
-            rent_station_no STRING,
-            rent_station_name STRING,
-            rent_hold STRING,
-            return_dt STRING,
-            return_station_no STRING,
-            return_station_name STRING,
-            return_hold STRING,
-            use_min STRING,
-            use_distance_m STRING,
-            user_class_cd STRING,
-            sex_cd STRING,
-            birth_year STRING,
-            rent_station_id STRING,
-            return_station_id STRING,
-            bike_se_cd STRING,
-            rent_date_partition STRING,
-            source_file STRING,
-            ingested_at TIMESTAMP
-        )
-        USING iceberg
-        PARTITIONED BY (rent_date_partition)
-        """
-    )
-    spark.sql(
-        f"ALTER TABLE {bronze_table_name()} SET TBLPROPERTIES ('write.distribution-mode'='hash')"
-    )
+    cat = catalog or build_iceberg_catalog()
+    try:
+        return cat.load_table(bronze_table_name())
+    except NoSuchTableError as exc:
+        raise PromotionError(
+            f"{bronze_table_name()} 테이블이 없음 - initial_load_rental_history를 먼저 "
+            "실행해 Bronze 테이블을 만들어야 함 (이 잡은 테이블을 자동 생성하지 않음)"
+        ) from exc
 
 
-def build_bronze_dataframe(spark, raw_rows: list[dict], rent_date_partition: str, source_file: str):
-    """API 원본 행을 Bronze 표준 컬럼 + lineage 컬럼으로 매핑한다.
+def build_bronze_arrow_table(raw_rows: list[dict], rent_date_partition: str, source_file: str) -> pa.Table:
+    """API 원본 행을 Bronze 표준 컬럼 + lineage 컬럼으로 매핑한 PyArrow Table을 만든다.
 
     START_INDEX/END_INDEX/RNUM은 페이징 메타데이터일 뿐 실제 데이터 컬럼이 아니므로
     스키마 검증 전에 제거한다 (안 지우면 매 호출마다 "알 수 없는 컬럼" 경고가 계속 발생함).
     """
     rows = [strip_pagination_meta(row) for row in raw_rows]
-    actual_columns = list(rows[0].keys())
-    validate_and_report(actual_columns)  # 필수 컬럼 없으면 SchemaValidationError
+    actual_columns = set(rows[0].keys())
+    validate_and_report(list(actual_columns))  # 필수 컬럼 없으면 SchemaValidationError
 
-    raw_df = spark.createDataFrame(rows)
-    mapped_df = raw_df.select(*build_select_exprs(actual_columns))
-    return (
-        mapped_df.withColumn("rent_date_partition", F.lit(rent_date_partition))
-        .withColumn("source_file", F.lit(source_file))
-        .withColumn("ingested_at", F.current_timestamp())
-    )
+    chosen_src = {
+        dst: next((src for src in _STANDARD_TO_ALIASES[dst] if src in actual_columns), None)
+        for dst in BRONZE_BUSINESS_COLUMNS
+    }
+
+    ingested_at = datetime.now(timezone.utc)
+    cols: dict[str, list] = {dst: [] for dst in BRONZE_BUSINESS_COLUMNS}
+    for row in rows:
+        for dst in BRONZE_BUSINESS_COLUMNS:
+            src = chosen_src[dst]
+            value = row.get(src) if src is not None else None
+            cols[dst].append(str(value) if value is not None else None)
+
+    row_count = len(rows)
+    cols["rent_date_partition"] = [rent_date_partition] * row_count
+    cols["source_file"] = [source_file] * row_count
+    cols["ingested_at"] = [ingested_at] * row_count
+
+    return pa.table(cols, schema=ARROW_SCHEMA)
 
 
 def validate_selection_document(document, promotion_id: str) -> None:
-    """Spark를 켜기 전에 selection 계약을 다시 검증한다."""
+    """PyIceberg를 켜기 전에 selection 계약을 다시 검증한다."""
     if not isinstance(document, dict):
         raise PromotionError("selection.json을 읽을 수 없음")
     if document.get("dataset") != DATASET:
@@ -153,7 +184,7 @@ def plan_promotion(document: dict) -> list[dict]:
 
 
 def load_payloads(bucket: str, plan: list[dict]) -> list[dict]:
-    """선택된 payload를 전부 먼저 읽는다. 하나라도 누락/변조면 Spark를 켜지 않고 실패한다."""
+    """선택된 payload를 전부 먼저 읽는다. 하나라도 누락/변조면 Iceberg를 건드리지 않고 실패한다."""
     loaded = []
     for item in plan:
         rows = get_json(bucket, item["source_file"])
@@ -170,27 +201,35 @@ def load_payloads(bucket: str, plan: list[dict]) -> list[dict]:
     return loaded
 
 
-def promote(spark, payloads: list[dict]) -> dict[str, int]:
-    """선택 bundle 전체를 한 DataFrame으로 만들어 파티션을 한 번에 교체한다."""
+def _committed_partition_counts(table, partitions: list[str]) -> dict[str, int]:
+    """커밋된 snapshot을 다시 읽어 파티션별 실제 행 수를 센다 (부분 반영 여부 검증용)."""
+    fresh_table = table.refresh()
+    arrow = fresh_table.scan(
+        row_filter=build_partition_filter(PARTITION_COLUMN, partitions),
+        selected_fields=(PARTITION_COLUMN,),
+    ).to_arrow()
+
+    col = arrow.column(PARTITION_COLUMN)
+    return {p: (pc.sum(pc.equal(col, p)).as_py() or 0) for p in partitions}
+
+
+def promote(payloads: list[dict]) -> dict[str, int]:
+    """선택 bundle 전체를 한 PyArrow Table로 만들어 파티션을 단일 snapshot commit으로 교체한다."""
     started_at = time.monotonic()
-    frames = [
-        build_bronze_dataframe(
-            spark, item["rows"], item["rent_date_partition"], item["source_file"]
+    table = load_bronze_table()
+
+    arrow_tables = [
+        build_bronze_arrow_table(
+            item["rows"], item["rent_date_partition"], item["source_file"]
         )
         for item in payloads
     ]
-    bronze_df = functools.reduce(lambda left, right: left.unionByName(right), frames)
-    bronze_df.writeTo(bronze_table_name()).overwritePartitions()
-
+    bronze_table = pa.concat_tables(arrow_tables)
     partitions = [item["rent_date_partition"] for item in payloads]
-    committed = (
-        spark.table(bronze_table_name())
-        .where(F.col("rent_date_partition").isin(partitions))
-        .groupBy("rent_date_partition")
-        .count()
-        .collect()
-    )
-    counts = {row["rent_date_partition"]: row["count"] for row in committed}
+
+    overwrite_partitions(table, bronze_table, PARTITION_COLUMN, partitions)
+    counts = _committed_partition_counts(table, partitions)
+
     logger.info(
         "Bronze 파티션 교체 완료: partitions=%s input=%s committed=%s elapsed_seconds=%.3f",
         partitions,
@@ -266,9 +305,7 @@ def run() -> dict:
         payloads = load_payloads(bucket, plan)
 
         ensure_bucket(config.SETTINGS.warehouse_bucket)
-        spark = build_spark_session("bronze-promote-rental-history")
-        ensure_bronze_table(spark)
-        partition_counts = promote(spark, payloads)
+        partition_counts = promote(payloads)
         promotion = build_promotion_document(document, partition_counts)
 
     put_json(bucket, promotion_key(run_date, promotion_id), promotion)

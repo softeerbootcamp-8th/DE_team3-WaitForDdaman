@@ -41,6 +41,18 @@ class RawCollectionError(Exception):
     """Raw snapshot이 후속 승격 후보로 사용할 수 없는 상태임을 나타낸다."""
 
 
+def unusable_reason(manifest: dict) -> str:
+    """운영 로그에서 0행·API 미완료·스키마 장애를 혼동하지 않게 분류한다."""
+    status = manifest.get("status")
+    if status == "COMPLETE_EMPTY":
+        return "EMPTY_RESULT"
+    if status == "INCOMPLETE":
+        return "API_INCOMPLETE"
+    if status == "COMPLETE" and manifest.get("schema_valid") is not True:
+        return "SCHEMA_INVALID"
+    return "UNUSABLE_SNAPSHOT"
+
+
 def parse_collection_cutoff(value: str) -> datetime:
     """Airflow가 전달한 논리적 cutoff를 timezone-aware KST 시각으로 정규화한다.
 
@@ -231,9 +243,12 @@ def collect_snapshot(
     else:
         status = "COMPLETE"
 
-    schema_valid = False
+    # 빈 결과는 검사할 컬럼 자체가 없으므로 스키마 실패(False)와 구분한다.
+    # JSON null로 저장되어 운영 로그에서 COMPLETE_EMPTY가 스키마 장애처럼 보이지 않는다.
+    schema_valid: bool | None = None
     schema_error: str | None = None
     if raw_rows:
+        schema_valid = False
         columns = list(strip_pagination_meta(raw_rows[0]).keys())
         try:
             validate_and_report(columns)
@@ -327,6 +342,7 @@ def run() -> list[dict]:
             "target_date": manifest.get("target_date", window.target_date.isoformat()),
             "status": manifest["status"],
             "schema_valid": manifest["schema_valid"],
+            "reason": unusable_reason(manifest),
         }
         if window.required:
             unusable.append(summary)

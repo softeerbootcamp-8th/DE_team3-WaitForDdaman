@@ -108,7 +108,9 @@ def test_only_the_promotion_task_uses_the_bronze_pool(dag):
     }
 
     assert pooled == {f"{GROUP}.promote_to_bronze"}
-    assert _task(dag, f"{GROUP}.promote_to_bronze").execution_timeout == timedelta(hours=2)
+    # #194: Spark/JVM 제거 후 PyIceberg 단일 snapshot commit만 남아 2시간은 과도한
+    # 여유였다 - 다른 PyIceberg 기반 Bronze 태스크(30분)와 같은 값으로 낮췄다.
+    assert _task(dag, f"{GROUP}.promote_to_bronze").execution_timeout == timedelta(minutes=30)
 
 
 def test_rental_history_asset_is_published_only_by_the_publish_task(dag):

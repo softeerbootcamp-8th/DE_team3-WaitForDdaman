@@ -75,11 +75,37 @@ resource "aws_iam_role_policy_attachment" "serving_sync_secrets_attach" {
   policy_arn = aws_iam_policy.serving_sync_secrets_policy.arn
 }
 
+# write_bike_risk_daily.py / write_station_daily.py / verify_serving_sync.py가
+# pyiceberg로 warehouse_bucket의 Iceberg 데이터 파일을 직접 스캔한다 (#207) -
+# 카탈로그(JDBC)는 위 Secrets Manager 자격증명으로 붙지만, 실제 Parquet 데이터
+# 읽기는 S3 권한이 별도로 필요하다. warehouse_bucket 하위로만 범위를 한정한다.
+data "aws_iam_policy_document" "serving_sync_s3_read_policy_doc" {
+  statement {
+    effect  = "Allow"
+    actions = ["s3:GetObject", "s3:ListBucket"]
+    resources = [
+      "arn:aws:s3:::${var.warehouse_bucket}",
+      "arn:aws:s3:::${var.warehouse_bucket}/*",
+    ]
+  }
+}
+
+resource "aws_iam_policy" "serving_sync_s3_read_policy" {
+  name        = "serving-sync-lambda-s3-read-policy"
+  description = "Allows serving_sync Lambda to read Iceberg data files from the warehouse bucket"
+  policy      = data.aws_iam_policy_document.serving_sync_s3_read_policy_doc.json
+}
+
+resource "aws_iam_role_policy_attachment" "serving_sync_s3_read_attach" {
+  role       = aws_iam_role.serving_sync_lambda_role.name
+  policy_arn = aws_iam_policy.serving_sync_s3_read_policy.arn
+}
+
 # ---- 보안그룹: Lambda -> RDS ----
 # 기존 RDS 보안그룹(var.rds_security_group_id)의 다른 인바운드 규칙은 건드리지
 # 않고, 이 Lambda 전용 보안그룹에서의 5432 인바운드만 새로 추가한다.
 resource "aws_security_group" "serving_sync_lambda_sg" {
-  name = "serving-sync-lambda-sg"
+  name        = "serving-sync-lambda-sg"
   # AWS 보안그룹/규칙 description은 ASCII만 허용한다 (Issue #188) - 한글 원문:
   # "serving_sync Lambda(write/verify) 아웃바운드 전용 보안그룹"
   description = "Outbound-only security group for serving_sync Lambda (write/verify)"
