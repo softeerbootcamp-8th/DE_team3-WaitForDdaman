@@ -17,7 +17,7 @@ import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag, task
 
-from dag_assets import RENTAL_HISTORY_BRONZE
+from dag_assets import RENTAL_HISTORY_BRONZE, RENTAL_HISTORY_SILVER
 from dag_common import DEFAULT_ARGS, SILVER_POOL
 
 INGESTION_DIR = "/opt/airflow/ingestion"
@@ -94,6 +94,7 @@ def silver_rental_history():
         append_env=True,
         execution_timeout=timedelta(hours=1),
         pool=SILVER_POOL,
+        outlets=[RENTAL_HISTORY_SILVER],  # #217 dq_rental_history_dag의 트리거
     )
 
     metadata >> transform_silver_rental_history
