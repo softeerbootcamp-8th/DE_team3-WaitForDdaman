@@ -62,6 +62,9 @@ iceberg_catalog_sg_id = "sg-0ff85e9c8d00a6c6b"
 # iceberg_catalog RDS 마스터 비밀번호 - 반드시 실제 값으로 채울 것 (커밋 금지)
 iceberg_catalog_master_password = "REPLACE_ME"
 
+# Airflow 워커(EC2)의 기존 보안그룹 ID - iceberg_catalog RDS 인바운드 허용에 쓴다
+airflow_ec2_sg_id = "REPLACE_ME"
+
 # iceberg_catalog_db_subnet_group_name = "waitforddaman-subnet"
 # iceberg_catalog_master_username      = "iceberg_admin"
 # emr_spark_image_tag                  = "latest"
