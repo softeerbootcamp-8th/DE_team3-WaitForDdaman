@@ -353,6 +353,12 @@ def bronze_initial_load_all_sources():
         task_id="load_silver_rental_history_chunk",
         execution_timeout=timedelta(hours=1),  # 청크 1개(최대 31일) 기준 - 순차 6시간에서 축소
         pool=SILVER_POOL,
+        # pyiceberg SqlCatalog는 커밋 재시도가 없다 - 매핑 인스턴스를 동시에 띄우면
+        # silver.rental_history/silver.rental_history_quarantine에 대한 동시
+        # overwrite_partition 커밋이 충돌해 CommitFailedException으로 재시도를
+        # 소진할 수 있다. 일회성 백필이라 청크 wall-clock 시간이 병목이 아니므로
+        # 매핑 인스턴스를 직렬화해 동시 쓰기 경합 자체를 없앤다 (#232).
+        max_active_tis_per_dag=1,
     ).expand(
         bash_command=rental_history_backfill_ranges.map(
             lambda r: bash_staging_job(

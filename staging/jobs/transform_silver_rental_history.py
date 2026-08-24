@@ -43,7 +43,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import duckdb
 import pyarrow as pa
-from pyiceberg.exceptions import NoSuchTableError
+from pyiceberg.exceptions import NoSuchTableError, TableAlreadyExistsError
 from pyiceberg.expressions import And, GreaterThanOrEqual, LessThanOrEqual
 from pyiceberg.partitioning import PartitionField, PartitionSpec
 from pyiceberg.schema import Schema
@@ -309,12 +309,18 @@ def _ensure_silver_table(catalog):
         return catalog.load_table(SILVER_TABLE)
     except NoSuchTableError:
         logger.info("%s 테이블 신규 생성", SILVER_TABLE)
-        return catalog.create_table(
-            SILVER_TABLE,
-            schema=SILVER_SCHEMA,
-            partition_spec=SILVER_PARTITION_SPEC,
-            properties=SILVER_PROPERTIES,
-        )
+        try:
+            return catalog.create_table(
+                SILVER_TABLE,
+                schema=SILVER_SCHEMA,
+                partition_spec=SILVER_PARTITION_SPEC,
+                properties=SILVER_PROPERTIES,
+            )
+        except TableAlreadyExistsError:
+            # 동시에 실행된 다른 백필 청크가 먼저 만들었다 - 동일 스키마 상수로
+            # 만들어졌으므로 그냥 로드해서 쓴다.
+            logger.info("%s 테이블이 다른 청크에서 이미 생성됨 - 로드로 대체", SILVER_TABLE)
+            return catalog.load_table(SILVER_TABLE)
 
 
 def _ensure_quarantine_table(catalog):
@@ -324,7 +330,13 @@ def _ensure_quarantine_table(catalog):
         return catalog.load_table(QUARANTINE_TABLE)
     except NoSuchTableError:
         logger.info("%s 테이블 신규 생성", QUARANTINE_TABLE)
-        return catalog.create_table(QUARANTINE_TABLE, schema=QUARANTINE_SCHEMA)
+        try:
+            return catalog.create_table(QUARANTINE_TABLE, schema=QUARANTINE_SCHEMA)
+        except TableAlreadyExistsError:
+            # 동시에 실행된 다른 백필 청크가 먼저 만들었다 - 동일 스키마 상수로
+            # 만들어졌으므로 그냥 로드해서 쓴다.
+            logger.info("%s 테이블이 다른 청크에서 이미 생성됨 - 로드로 대체", QUARANTINE_TABLE)
+            return catalog.load_table(QUARANTINE_TABLE)
 
 
 def _split_return_dt_violations(
