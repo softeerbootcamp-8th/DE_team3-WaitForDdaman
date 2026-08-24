@@ -53,9 +53,12 @@ def get_map_data() -> dict:
     # 쓴 것과 같은 투영식이라 점이 소속 구 폴리곤 안에 놓인다.
     snapshot_date = _latest_snapshot_date()
     with engine.connect() as conn:
+        # dim_district는 station_daily/bike_risk_daily와 달리 날짜별로 갱신되는
+        # 파이프라인 산출물이 아니라 고정된 구 경계 참조 데이터라 snapshot_date로
+        # 거르지 않는다 - 걸렀다면 station_daily가 다음 날짜로 넘어갈 때마다
+        # 시딩 당시 날짜와 어긋나 지도가 매번 비어 보였을 것이다.
         districts = conn.execute(
-            text("SELECT name, path, cx, cy, view_box_w, view_box_h FROM serving.dim_district WHERE snapshot_date = :d"),
-            {"d": snapshot_date},
+            text("SELECT name, path, cx, cy, view_box_w, view_box_h FROM serving.dim_district"),
         ).mappings().all()
         stations = conn.execute(
             text(
