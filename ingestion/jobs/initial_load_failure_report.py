@@ -29,7 +29,7 @@ from pyspark.sql import functions as F
 import config
 from common.encoding_utils import EncodingMismatchError, convert_euckr_file_to_utf8
 from common.file_utils import NotThisDatasetError, is_xlsx, unzip_if_needed
-from common.s3_utils import download_file, ensure_bucket, split_s3_uri, to_spark_readable_path, upload_file
+from common.s3_utils import download_file, ensure_bucket, split_s3_uri, upload_file
 from common.spark_session import build_spark_session
 from schema.failure_report_schema import (
     SchemaValidationError,
@@ -100,6 +100,17 @@ def _read_xlsx_as_spark_df(spark, path: Path):
     return spark.createDataFrame(df)
 
 
+def _read_csv_as_spark_df(spark, path: Path):
+    """
+    변환된 UTF-8 CSV를 pandas로 읽어 driver 메모리에서 바로 Spark DataFrame으로
+    변환한다 - _read_xlsx_as_spark_df와 동일한 이유(위 문단 참고). S3 스테이징 후
+    spark.read.csv()로 재읽기(#224)가 일반 EUC-KR 변환 CSV에서도 동일하게 재현돼
+    (실측: 2026-08-24, 대여이력 22,966행 정상 파일에서도 재현), 이 파일도 통일한다.
+    """
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    return spark.createDataFrame(df)
+
+
 def _process_one_file(spark, raw_path: Path, workdir: Path):
     if is_xlsx(raw_path):
         raw_df = _read_xlsx_as_spark_df(spark, raw_path)
@@ -109,10 +120,7 @@ def _process_one_file(spark, raw_path: Path, workdir: Path):
         if convert_result["dropped_bytes"] > 0:
             logger.warning("파일 %s: 손상 바이트 %d개 폐기", raw_path.name, convert_result["dropped_bytes"])
 
-        csv_source = to_spark_readable_path(
-            utf8_path, config.SETTINGS.raw_bucket, "raw/failure_report/_utf8_staging"
-        )
-        raw_df = spark.read.option("header", "true").csv(csv_source)
+        raw_df = _read_csv_as_spark_df(spark, utf8_path)
     actual_columns = raw_df.columns
 
     if not is_failure_report_file(actual_columns):
