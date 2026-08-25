@@ -29,10 +29,13 @@ from airflow.sdk import dag
 
 from dag_common import notify_slack_on_failure
 
+PYLIB_DIR = "/opt/airflow/pylib"
 INGESTION_DIR = "/opt/airflow/ingestion"
 
 
 def _set_watermark_callable(params, **kwargs):
+    if PYLIB_DIR not in sys.path:
+        sys.path.insert(0, PYLIB_DIR)
     if INGESTION_DIR not in sys.path:
         sys.path.insert(0, INGESTION_DIR)
 
