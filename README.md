@@ -89,16 +89,8 @@
 
 저희의 데이터 파이프라인을 구성할 때 고려한 사항은 다음과 같습니다.
 
-### 1. 업무 시작 전에 정보를 전달
 
-- 최종 수집 실패 시 검증된 당일 예비 데이터를 사용하여 일별 산출물 생성의 연속성 확보
-- 장애 감지 및 신속한 대응
-    - Lambda 오류와 DLQ 메시지를 CloudWatch Alarm으로 감지하고 SNS로 전달
-    - Airflow Task 실패 시 Slack 알림
-    - 실패 범위를 Task 단위로 격리하여 해당 작업부터 재실행
-    - CloudWatch 기반 파이프라인 모니터링 및 Slack 장애 알림
-
-### 2. 믿고 사용할 수 있는 정보를 전달
+### 1. 믿고 사용할 수 있는 정보를 전달
 
 - 데이터 시점 및 변경 이력 관리
     - Iceberg의 파티션 단위 원자적 overwrite로 쓰기 일관성 확보 및 Snapshot 기반 중복 제거를 통한 시점 관리
@@ -111,7 +103,8 @@
     - 메달리온 아키텍처 단계별 SQL Assertion으로 필수값, 중복, 값의 범위 및 키 정합성 검증
 - 고장 신고 내역을 포함한 ML 기반 위험도 예측 및 대여중단 의사결정 파이프라인
 
-### 3. 데이터가 증가해도 제시간에 처리
+
+### 2. 데이터가 증가해도 제시간에 처리
 
 - 작업 특성에 따른 처리 엔진 선택
     - 초기에 대용량 파일 적재 시 Spark 사용
@@ -124,22 +117,32 @@
     - Small file 병합, 보존 기간 지난 Snapshot 만료, 고아 파일 정리를 통해 조회 효율과 저장 공간을 관리
     - 일 배치와 유지보수 DAG를 분리하여 유지보수 실패가 일별 산출물 제공에 미치는 영향 차단
 
+
+### 3. 업무 시작 전에 정보를 전달
+
+- 최종 수집 실패 시 검증된 당일 예비 데이터를 사용하여 일별 산출물 생성의 연속성 확보
+- 장애 감지 및 신속한 대응
+    - Lambda 오류와 DLQ 메시지를 CloudWatch Alarm으로 감지하고 SNS로 전달
+    - Airflow Task 실패 시 Slack 알림
+    - 실패 범위를 Task 단위로 격리하여 해당 작업부터 재실행
+    - CloudWatch 기반 파이프라인 모니터링 및 Slack 장애 알림
+
 ## 기술 스택
 
 | 영역 | 기술 | 선택 이유 |
 | --- | --- | --- |
-| Orchestration | Airflow | 일별 스케줄, Asset·Sensor 의존성, 재시도와 Task 단위 재실행 |
-| Distributed Processing | Spark | 대용량 초기 적재와 모델 피처 집계 |
-| In-process Analytics | DuckDB | 일별 SQL 변환, Window Function과 조인을 낮은 기동 비용으로 처리 |
-| Data Interface | PyArrow | DuckDB와 Iceberg 사이의 컬럼형 데이터 전달 |
-| Data Lakehouse | S3, Apache Iceberg, PyIceberg | 파티셔닝, 원자적 커밋, Snapshot, 재처리와 변경 이력 관리 |
-| ML | scikit-learn, LightGBM | 규칙·선형·트리 모델 비교와 Champion 관리 |
-| Serving | PostgreSQL, FastAPI | 일별 Mart 적재와 읽기 전용 API 제공 |
-| Frontend | React, TypeScript | 지도, 위험 자전거 목록과 수거 확정 화면 제공 |
-| Infrastructure | AWS Lambda, EC2, RDS, ECR | Raw 수집, 실행 환경, 서빙 DB와 이미지 배포 |
-| Monitoring | CloudWatch, SNS, Slack | Lambda·DLQ 감지와 Airflow 실패 알림 |
-| IaC·CI/CD | Terraform, GitHub Actions, Docker | 인프라 재현과 이미지 기반 배포 자동화 |
-| Local Development | Docker Compose, LocalStack | AWS 자원을 로컬에서 재현하고 E2E 검증 |
+| Orchestration | ![Apache Airflow](https://img.shields.io/badge/Airflow-%23017CEE.svg?style=for-the-badge&logo=Apache%20Airflow&logoColor=white) | 일별 스케줄, Asset·Sensor 의존성, 재시도와 Task 단위 재실행 |
+| Distributed Processing | ![Spark](https://img.shields.io/badge/spark-%23E25A1C.svg?style=for-the-badge&logo=apachespark&logoColor=white) | 대용량 초기 적재와 모델 피처 집계 |
+| In-process Analytics | ![Duckdb](https://img.shields.io/badge/duckdb-%23FFF000.svg?style=for-the-badge&logo=duckdb&logoColor=black) | 일별 SQL 변환, Window Function과 조인을 낮은 기동 비용으로 처리 |
+| Data Interface | ![PyArrow](https://img.shields.io/badge/PyArrow-%23000000.svg?style=for-the-badge&logo=apachearrow&logoColor=white) | DuckDB와 Iceberg 사이의 컬럼형 데이터 전달 |
+| Data Lakehouse | ![Amazon S3](https://img.shields.io/badge/S3-%23569A31.svg?style=for-the-badge&logo=amazons3&logoColor=white) Apache Iceberg PyIceberg | 파티셔닝, 원자적 커밋, Snapshot, 재처리와 변경 이력 관리 |
+| ML | ![scikit-learn](https://img.shields.io/badge/scikit--learn-%23F7931E.svg?style=for-the-badge&logo=scikitlearn&logoColor=white) LightGBM | 규칙·선형·트리 모델 비교와 Champion 관리 |
+| Serving | ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-%234169E1.svg?style=for-the-badge&logo=postgresql&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-%23009688.svg?style=for-the-badge&logo=fastapi&logoColor=white) | 일별 Mart 적재와 읽기 전용 API 제공 |
+| Frontend | ![React](https://img.shields.io/badge/React-%2361DAFB.svg?style=for-the-badge&logo=react&logoColor=black) ![TypeScript](https://img.shields.io/badge/TypeScript-%233178C6.svg?style=for-the-badge&logo=typescript&logoColor=white) | 지도, 위험 자전거 목록과 수거 확정 화면 제공 |
+| Infrastructure | ![AWS Lambda](https://img.shields.io/badge/Lambda-%23FF9900.svg?style=for-the-badge&logo=awslambda&logoColor=white) ![Amazon EC2](https://img.shields.io/badge/EC2-%23FF9900.svg?style=for-the-badge&logo=amazonec2&logoColor=white) ![Amazon RDS](https://img.shields.io/badge/RDS-%23527FFF.svg?style=for-the-badge&logo=amazonrds&logoColor=white) ![Amazon ECR](https://img.shields.io/badge/ECR-%23FF9900.svg?style=for-the-badge&logo=amazonecr&logoColor=white) | Raw 수집, 실행 환경, 서빙 DB와 이미지 배포 |
+| Monitoring | ![CloudWatch](https://img.shields.io/badge/CloudWatch-%23FF9900.svg?style=for-the-badge&logo=cloudwatch&logoColor=white) ![Amazon SNS](https://img.shields.io/badge/SNS-%23FF9900.svg?style=for-the-badge&logo=amazonsns&logoColor=white) ![Slack](https://img.shields.io/badge/Slack-%234A154B.svg?style=for-the-badge&logo=slack&logoColor=white) | Lambda·DLQ 감지와 Airflow 실패 알림 |
+| IaC·CI/CD | ![Terraform](https://img.shields.io/badge/Terraform-%237B42BC.svg?style=for-the-badge&logo=terraform&logoColor=white) ![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-%232088FF.svg?style=for-the-badge&logo=githubactions&logoColor=white) ![Docker](https://img.shields.io/badge/Docker-%232496ED.svg?style=for-the-badge&logo=docker&logoColor=white) | 인프라 재현과 이미지 기반 배포 자동화 |
+| Local Development | ![Docker Compose](https://img.shields.io/badge/Docker%20Compose-%232496ED.svg?style=for-the-badge&logo=docker&logoColor=white) LocalStack | AWS 자원을 로컬에서 재현하고 E2E 검증 |
 
 ## 한계 및 향후 작업
 
