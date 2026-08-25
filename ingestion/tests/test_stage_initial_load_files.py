@@ -35,9 +35,9 @@ def test_run_uploads_new_files_and_returns_deterministic_uris(aws_env, tmp_path)
 
     uris = stage_initial_load_files.run("rental_history", [str(local)])
 
-    assert uris == ["s3://test-initial-load-bucket/raw/rental_history/_initial_load_staging/2601.csv"]
+    assert uris == ["s3://test-initial-load-bucket/raw/rental_history/_initial_load_staging/input_2601.csv"]
     body = s3_utils.get_s3_client().get_object(
-        Bucket=BUCKET, Key="raw/rental_history/_initial_load_staging/2601.csv"
+        Bucket=BUCKET, Key="raw/rental_history/_initial_load_staging/input_2601.csv"
     )["Body"].read()
     assert body == b"csv-body"
 
@@ -63,7 +63,7 @@ def test_run_skips_reupload_when_already_staged(aws_env, tmp_path, monkeypatch):
 
     uris = stage_initial_load_files.run("rental_history", [str(local)])
 
-    assert uris == ["s3://test-initial-load-bucket/raw/rental_history/_initial_load_staging/2601.csv"]
+    assert uris == ["s3://test-initial-load-bucket/raw/rental_history/_initial_load_staging/input_2601.csv"]
     assert upload_calls == []
 
 
@@ -100,10 +100,23 @@ def test_run_reuses_legacy_key_via_server_side_copy_without_touching_local_file(
 
     uris = stage_initial_load_files.run("rental_history", [str(local)])
 
-    safe_key = "raw/rental_history/_initial_load_staging/_______________2601.csv"
+    safe_key = "raw/rental_history/_initial_load_staging/input_2601.csv"
     assert uris == [f"s3://{BUCKET}/{safe_key}"]
     body = s3_utils.get_s3_client().get_object(Bucket=BUCKET, Key=safe_key)["Body"].read()
     assert body == b"legacy-body"
+
+
+def test_run_never_returns_hidden_spark_input_key(aws_env, tmp_path):
+    from jobs import stage_initial_load_files
+
+    local = tmp_path / "서울특별시 공공자전거 대여이력 정보_1603.csv"
+    local.write_bytes(b"csv-body")
+
+    uris = stage_initial_load_files.run("rental_history", [str(local)])
+
+    key = uris[0].rsplit("/", 1)[-1]
+    assert key == "input_1603.csv"
+    assert not key.startswith((".", "_"))
 
 
 def test_run_handles_batch_of_multiple_files(aws_env, tmp_path):
@@ -117,6 +130,6 @@ def test_run_handles_batch_of_multiple_files(aws_env, tmp_path):
     uris = stage_initial_load_files.run("failure_report", [str(a), str(b)])
 
     assert uris == [
-        "s3://test-initial-load-bucket/raw/failure_report/_initial_load_staging/a.csv",
-        "s3://test-initial-load-bucket/raw/failure_report/_initial_load_staging/b.csv",
+        "s3://test-initial-load-bucket/raw/failure_report/_initial_load_staging/input_a.csv",
+        "s3://test-initial-load-bucket/raw/failure_report/_initial_load_staging/input_b.csv",
     ]
