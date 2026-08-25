@@ -37,7 +37,35 @@ concurrency:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # 4개 이미지가 서로 독립적인데 예전엔 한 잡 안에서 순서대로 빌드해서
+    # (airflow 6분 + api 2분 + web 1.5분 + spark 1.5분) 배포 하나에 11분 넘게
+    # 걸렸다. matrix로 쪼개서 병렬로 돌리면 총 소요시간이 "합"이 아니라
+    # "가장 느린 것 하나"(대개 airflow)에 수렴한다. public 레포라 Linux 러너
+    # Actions 분(分)은 무료라 잡을 늘려도 비용 문제는 없다.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: airflow
+            dockerfile: airflow/Dockerfile.prod
+            context: .
+            platform: linux/arm64
+          - image: api
+            dockerfile: services/api/Dockerfile.prod
+            context: .
+            platform: linux/arm64
+          - image: web
+            dockerfile: services/web/Dockerfile.prod
+            context: services/web
+            platform: linux/arm64
+          - image: emr-spark-prod
+            dockerfile: spark/Dockerfile.prod
+            context: .
+            platform: linux/amd64
     outputs:
+      # matrix 잡에서 같은 output 이름에 여러 leg가 쓰면 그중 하나의 값이
+      # 채택된다(GitHub Actions 공식 동작) - 4개 leg 모두 같은 AWS 계정/리전으로
+      # 로그인하므로 어느 leg의 값이 남아도 동일해서 문제 없다.
       registry: ${{ steps.login-ecr.outputs.registry }}
     steps:
       - uses: actions/checkout@v4
@@ -57,8 +85,10 @@ jobs:
 
       # EC2가 t4g.large(arm64/Graviton)인데 GitHub 러너는 x86_64라서, RUN 스텝
       # (pip install, apt-get, npm run build)을 실행하려면 QEMU 에뮬레이션이 필요하다.
-      # --platform만 지정하면 exec format error로 죽는다.
+      # --platform만 지정하면 exec format error로 죽는다. spark는 amd64로 네이티브
+      # 빌드하므로 QEMU가 필요 없다.
       - name: Set up QEMU (arm64 cross-build)
+        if: matrix.platform == 'linux/arm64'
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
@@ -68,56 +98,23 @@ jobs:
 
       # :latest 외에 커밋 SHA 태그도 붙인다 - 지금 서버에 어느 커밋이 떠 있는지
       # 추적하고 문제 시 특정 버전으로 롤백할 수 있게.
-      - name: Build & push airflow image
+      #
+      # cache-from/cache-to에 이미지별 scope를 준다 - scope 없이 기본 scope
+      # 하나를 4개 이미지가 공유하면 뒤에 도는 이미지의 cache-to가 앞선 이미지의
+      # 캐시를 밀어내 버려서, DAG 코드만 바뀐 배포에서도 airflow의 apt-get/pip
+      # install 레이어가 매번 캐시 미스로 새로 돌았다(실측: 매 배포 6분 안팎 고정).
+      - name: Build & push ${{ matrix.image }} image
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: airflow/Dockerfile.prod
-          platforms: linux/arm64
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
           push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
           tags: |
-            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-airflow:latest
-            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-airflow:${{ github.sha }}
-
-      - name: Build & push api image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: services/api/Dockerfile.prod
-          platforms: linux/arm64
-          push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          tags: |
-            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-api:latest
-            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-api:${{ github.sha }}
-
-      - name: Build & push web image
-        uses: docker/build-push-action@v6
-        with:
-          context: services/web
-          file: services/web/Dockerfile.prod
-          platforms: linux/arm64
-          push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          tags: |
-            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-web:latest
-            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-web:${{ github.sha }}
-
-      - name: Build & push EMR Spark image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: spark/Dockerfile.prod
-          push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          tags: |
-            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-emr-spark-prod:latest
-            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-emr-spark-prod:${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-${{ matrix.image }}:latest
+            ${{ steps.login-ecr.outputs.registry }}/waitforddaman-${{ matrix.image }}:${{ github.sha }}
 
   deploy:
     needs: build-and-push
