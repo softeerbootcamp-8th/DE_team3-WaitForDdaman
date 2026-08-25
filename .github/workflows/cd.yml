@@ -136,6 +136,10 @@ jobs:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
       - name: Get runner public IP
         id: runner-ip
         run: echo "ip=$(curl -sf --retry 3 https://checkip.amazonaws.com | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
@@ -171,6 +175,12 @@ jobs:
           script: |
             set -e
             cd /opt/waitforddaman
+            if [ -z "$ECR_REGISTRY" ]; then
+              ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+              ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.ap-northeast-2.amazonaws.com"
+            fi
+            export ECR_REGISTRY
+            export IMAGE_TAG="${IMAGE_TAG:-latest}"
             # EC2는 자체 인스턴스 IAM 역할로 ECR pull한다(GitHub OIDC와는 별개 경로)
             aws ecr get-login-password --region ap-northeast-2 \
               | docker login --username AWS --password-stdin "$ECR_REGISTRY"
@@ -182,7 +192,7 @@ jobs:
             docker image prune -f
             docker compose -f docker-compose.prod.yml ps
         env:
-          ECR_REGISTRY: ${{ needs.build-and-push.outputs.registry }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
 
       # if: always() - 배포가 실패해도 열어둔 22번 규칙은 반드시 회수한다.
