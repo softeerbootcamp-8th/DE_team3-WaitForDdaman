@@ -59,9 +59,51 @@ variable "rds_security_group_id" {
   type        = string
 }
 
-variable "serving_db_secret_arn" {
-  description = "SERVING_DB_HOST/PORT/NAME/USER/PASSWORD(+ ICEBERG_JDBC_CATALOG_USER/PASSWORD)를 담은 기존 Secrets Manager 시크릿 ARN"
-  type        = string
+# serving_sync/bikeman_event_generator DB 자격증명 - Secrets Manager를 쓰려 했으나
+# 이 계정에 secretsmanager:CreateSecret/ListSecrets 권한 자체가 없어(SCP가 아니라
+# 순수 IAM 권한 gap, MFA로도 안 풀림) Lambda 환경변수로 직접 주입하는 방식으로
+# 우회한다. app/_secrets.py가 SERVING_DB_SECRET_ARN/BIKEMAN_DB_SECRET_ARN이 없으면
+# "환경변수가 이미 채워져 있다"고 보고 조용히 넘어가도록 이미 짜여 있어 코드 변경 없이 동작.
+variable "serving_db_host" {
+  type = string
+}
+variable "serving_db_port" {
+  type    = string
+  default = "5432"
+}
+variable "serving_db_name" {
+  type = string
+}
+variable "serving_db_user" {
+  type = string
+}
+variable "serving_db_password" {
+  type      = string
+  sensitive = true
+}
+variable "iceberg_jdbc_catalog_user" {
+  type = string
+}
+variable "iceberg_jdbc_catalog_password" {
+  type      = string
+  sensitive = true
+}
+variable "bikeman_writer_db_host" {
+  type = string
+}
+variable "bikeman_writer_db_port" {
+  type    = string
+  default = "5432"
+}
+variable "bikeman_writer_db_name" {
+  type = string
+}
+variable "bikeman_writer_db_user" {
+  type = string
+}
+variable "bikeman_writer_db_password" {
+  type      = string
+  sensitive = true
 }
 
 variable "warehouse_bucket" {
@@ -130,11 +172,6 @@ variable "emr_spark_image_tag" {
 # bikeman_event_generator Lambda (#186) - serving_sync(#172)와 같은 VPC/RDS를
 # 재사용한다(같은 domain-db 인스턴스, docs/RDS 적재 및 세팅 설계.md 2절 참고).
 # ------------------------------------------------------------------------------
-variable "bikeman_db_secret_arn" {
-  description = "bikeman_writer 역할(BIKEMAN_WRITER_DB_HOST/PORT/NAME/USER/PASSWORD)을 담은 기존 Secrets Manager 시크릿 ARN"
-  type        = string
-}
-
 variable "bikeman_event_generator_image_tag" {
   description = "infra/lambdas/bikeman_event_generator 이미지의 ECR 태그"
   type        = string

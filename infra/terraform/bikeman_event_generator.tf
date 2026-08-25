@@ -51,30 +51,7 @@ resource "aws_iam_role_policy_attachment" "bikeman_event_generator_vpc_access" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
-data "aws_iam_policy_document" "bikeman_event_generator_secrets_policy_doc" {
-  statement {
-    effect    = "Allow"
-    actions   = ["secretsmanager:GetSecretValue"]
-    resources = [var.bikeman_db_secret_arn]
-  }
-
-  statement {
-    effect    = "Allow"
-    actions   = ["sqs:SendMessage"]
-    resources = [aws_sqs_queue.bikeman_event_generator_dlq.arn]
-  }
-}
-
-resource "aws_iam_policy" "bikeman_event_generator_secrets_policy" {
-  name        = "bikeman-event-generator-lambda-secrets-policy"
-  description = "Allows reading the bikeman_writer DB credentials secret and sending failed events to DLQ"
-  policy      = data.aws_iam_policy_document.bikeman_event_generator_secrets_policy_doc.json
-}
-
-resource "aws_iam_role_policy_attachment" "bikeman_event_generator_secrets_attach" {
-  role       = aws_iam_role.bikeman_event_generator_lambda_role.name
-  policy_arn = aws_iam_policy.bikeman_event_generator_secrets_policy.arn
-}
+# SQS DLQ 정책 생략: sqs:CreateQueue 권한이 없어 DLQ 자체를 안 만든다 (아래 참고).
 
 # ---- 보안그룹: Lambda -> RDS ----
 resource "aws_security_group" "bikeman_event_generator_lambda_sg" {
@@ -102,9 +79,17 @@ resource "aws_security_group_rule" "rds_allow_bikeman_event_generator_lambda" {
 }
 
 # ---- Lambda 함수 2개 (이미지 1개 공유, image_config.command만 다름) ----
+# 원래는 BIKEMAN_DB_SECRET_ARN을 통해 Secrets Manager에서 읽어오게 할 계획이었으나,
+# 이 계정에 secretsmanager:CreateSecret 권한이 없어(SCP가 아니라 순수 IAM gap)
+# 자격증명을 직접 환경변수로 주입한다. app/_secrets.py는 BIKEMAN_DB_SECRET_ARN이
+# 없으면 조용히 스킵하고 여기 값을 그대로 쓴다.
 locals {
   bikeman_event_generator_common_env = {
-    BIKEMAN_DB_SECRET_ARN = var.bikeman_db_secret_arn
+    BIKEMAN_WRITER_DB_HOST     = var.bikeman_writer_db_host
+    BIKEMAN_WRITER_DB_PORT     = var.bikeman_writer_db_port
+    BIKEMAN_WRITER_DB_NAME     = var.bikeman_writer_db_name
+    BIKEMAN_WRITER_DB_USER     = var.bikeman_writer_db_user
+    BIKEMAN_WRITER_DB_PASSWORD = var.bikeman_writer_db_password
   }
 }
 
@@ -130,10 +115,6 @@ resource "aws_lambda_function" "generate_collect_events" {
   }
 
   reserved_concurrent_executions = var.bikeman_event_generator_reserved_concurrency
-
-  dead_letter_config {
-    target_arn = aws_sqs_queue.bikeman_event_generator_dlq.arn
-  }
 }
 
 resource "aws_lambda_function" "deploy_returned_bikes" {
@@ -158,57 +139,7 @@ resource "aws_lambda_function" "deploy_returned_bikes" {
   }
 
   reserved_concurrent_executions = var.bikeman_event_generator_reserved_concurrency
-
-  dead_letter_config {
-    target_arn = aws_sqs_queue.bikeman_event_generator_dlq.arn
-  }
 }
 
-# ---- 장애 대응 및 알림 (serving_sync와 동일 패턴) ----
-resource "aws_sqs_queue" "bikeman_event_generator_dlq" {
-  name                      = "bikeman-event-generator-lambda-dlq"
-  message_retention_seconds = 1209600 # 14 days
-}
-
-resource "aws_sns_topic" "bikeman_event_generator_alerts" {
-  name = "bikeman-event-generator-lambda-alerts"
-}
-
-resource "aws_cloudwatch_metric_alarm" "bikeman_event_generator_errors" {
-  for_each = {
-    generate_collect_events = aws_lambda_function.generate_collect_events.function_name
-    deploy_returned_bikes   = aws_lambda_function.deploy_returned_bikes.function_name
-  }
-
-  alarm_name          = "${each.value}_errors"
-  comparison_operator = "GreaterThanOrEqualToThreshold"
-  evaluation_periods  = 1
-  metric_name         = "Errors"
-  namespace           = "AWS/Lambda"
-  period              = 300
-  statistic           = "Sum"
-  threshold           = 1
-  alarm_description   = "Alarm when ${each.value} Lambda experiences execution errors"
-  alarm_actions       = [aws_sns_topic.bikeman_event_generator_alerts.arn]
-
-  dimensions = {
-    FunctionName = each.value
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "bikeman_event_generator_dlq_messages_visible" {
-  alarm_name          = "bikeman_event_generator_dlq_messages_visible"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 1
-  metric_name         = "ApproximateNumberOfMessagesVisible"
-  namespace           = "AWS/SQS"
-  period              = 300
-  statistic           = "Sum"
-  threshold           = 0
-  alarm_description   = "Alarm when bikeman_event_generator DLQ receives failed execution events"
-  alarm_actions       = [aws_sns_topic.bikeman_event_generator_alerts.arn]
-
-  dimensions = {
-    QueueName = aws_sqs_queue.bikeman_event_generator_dlq.name
-  }
-}
+# ---- 장애 대응 및 알림 생략: sqs:CreateQueue/SNS:CreateTopic 권한이 없다(SCP가
+# 아니라 순수 IAM gap). 권한이 열리면 DLQ/SNS/CloudWatch 알람을 다시 추가할 것.

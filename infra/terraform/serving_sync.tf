@@ -50,30 +50,7 @@ resource "aws_iam_role_policy_attachment" "serving_sync_vpc_access" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
-data "aws_iam_policy_document" "serving_sync_secrets_policy_doc" {
-  statement {
-    effect    = "Allow"
-    actions   = ["secretsmanager:GetSecretValue"]
-    resources = [var.serving_db_secret_arn]
-  }
-
-  statement {
-    effect    = "Allow"
-    actions   = ["sqs:SendMessage"]
-    resources = [aws_sqs_queue.serving_sync_dlq.arn]
-  }
-}
-
-resource "aws_iam_policy" "serving_sync_secrets_policy" {
-  name        = "serving-sync-lambda-secrets-policy"
-  description = "Allows reading the serving DB / iceberg catalog credentials secret and sending failed events to DLQ"
-  policy      = data.aws_iam_policy_document.serving_sync_secrets_policy_doc.json
-}
-
-resource "aws_iam_role_policy_attachment" "serving_sync_secrets_attach" {
-  role       = aws_iam_role.serving_sync_lambda_role.name
-  policy_arn = aws_iam_policy.serving_sync_secrets_policy.arn
-}
+# SQS DLQ 정책 생략: sqs:CreateQueue 권한이 없어 DLQ 자체를 안 만든다 (아래 참고).
 
 # write_bike_risk_daily.py / write_station_daily.py / verify_serving_sync.py가
 # pyiceberg로 warehouse_bucket의 Iceberg 데이터 파일을 직접 스캔한다 (#207) -
@@ -133,30 +110,33 @@ resource "aws_security_group_rule" "rds_allow_serving_sync_lambda" {
 }
 
 # ---- S3 Gateway VPC Endpoint ----
-# VPC 서브넷 안에서 NAT 없이 S3(Iceberg 데이터/카탈로그 warehouse)에 접근하기
-# 위함. Gateway 타입은 요금이 없다(Interface 타입과 다름).
-resource "aws_vpc_endpoint" "serving_sync_s3_gateway" {
-  vpc_id            = var.vpc_id
-  service_name      = "com.amazonaws.${var.aws_region}.s3"
-  vpc_endpoint_type = "Gateway"
-  route_table_ids   = var.route_table_ids
-}
+# 생략: rtb-00e33332c4ec8246c/rtb-011d8b54a3d18e7a7(우리 private 서브넷)에 이미
+# S3 Gateway 엔드포인트(vpce-0685bfa0c07335eb4, EMR Serverless 인프라가 생성)가
+# 연결돼 있어서 이 리소스를 또 만들면 같은 라우트 테이블에 중복 라우트가 생겨 apply가
+# 실패한다. 기존 엔드포인트를 그대로 재사용한다.
 
 # ---- Lambda 함수 3개 (이미지 1개 공유, image_config.command만 다름) ----
 # 공통 환경변수 - config.SETTINGS(config/__init__.py)가 그대로 읽는 이름들.
-# ICEBERG_JDBC_CATALOG_USER/PASSWORD, SERVING_DB_HOST/PORT/NAME/USER/PASSWORD는
-# 여기 안 넣는다 - app/_secrets.py가 콜드 스타트 시 SERVING_DB_SECRET_ARN으로
-# Secrets Manager에서 읽어 os.environ에 채운다(평문으로 Terraform에 안 남김).
+# 원래는 SERVING_DB_SECRET_ARN을 통해 app/_secrets.py가 콜드 스타트 시 Secrets
+# Manager에서 읽어오게 할 계획이었으나, 이 계정에 secretsmanager:CreateSecret
+# 권한이 없어(SCP가 아니라 순수 IAM gap) 자격증명을 직접 환경변수로 주입한다.
+# SERVING_DB_SECRET_ARN을 비워두면 _secrets.py가 조용히 스킵하고 여기 값을 그대로 쓴다.
 locals {
   serving_sync_common_env = {
-    APP_ENV                  = "aws"
-    RAW_BUCKET               = var.raw_bucket
-    WAREHOUSE_BUCKET         = var.warehouse_bucket
-    ICEBERG_CATALOG_TYPE     = "jdbc"
-    ICEBERG_CATALOG_NAME     = var.iceberg_catalog_name
-    ICEBERG_WAREHOUSE_PATH   = "s3a://${var.warehouse_bucket}/warehouse"
-    ICEBERG_JDBC_CATALOG_URI = var.iceberg_jdbc_catalog_uri
-    SERVING_DB_SECRET_ARN    = var.serving_db_secret_arn
+    APP_ENV                       = "aws"
+    RAW_BUCKET                    = var.raw_bucket
+    WAREHOUSE_BUCKET              = var.warehouse_bucket
+    ICEBERG_CATALOG_TYPE          = "jdbc"
+    ICEBERG_CATALOG_NAME          = var.iceberg_catalog_name
+    ICEBERG_WAREHOUSE_PATH        = "s3a://${var.warehouse_bucket}/warehouse"
+    ICEBERG_JDBC_CATALOG_URI      = var.iceberg_jdbc_catalog_uri
+    ICEBERG_JDBC_CATALOG_USER     = var.iceberg_jdbc_catalog_user
+    ICEBERG_JDBC_CATALOG_PASSWORD = var.iceberg_jdbc_catalog_password
+    SERVING_DB_HOST               = var.serving_db_host
+    SERVING_DB_PORT               = var.serving_db_port
+    SERVING_DB_NAME               = var.serving_db_name
+    SERVING_DB_USER               = var.serving_db_user
+    SERVING_DB_PASSWORD           = var.serving_db_password
   }
 }
 
@@ -183,10 +163,6 @@ resource "aws_lambda_function" "write_bike_risk_daily" {
 
   # RDS 커넥션 수를 제한한다 - 동시에 뜰 수 있는 인스턴스 수의 상한.
   reserved_concurrent_executions = var.serving_sync_reserved_concurrency
-
-  dead_letter_config {
-    target_arn = aws_sqs_queue.serving_sync_dlq.arn
-  }
 }
 
 resource "aws_lambda_function" "write_station_daily" {
@@ -211,10 +187,6 @@ resource "aws_lambda_function" "write_station_daily" {
   }
 
   reserved_concurrent_executions = var.serving_sync_reserved_concurrency
-
-  dead_letter_config {
-    target_arn = aws_sqs_queue.serving_sync_dlq.arn
-  }
 }
 
 resource "aws_lambda_function" "verify_serving_sync" {
@@ -241,58 +213,7 @@ resource "aws_lambda_function" "verify_serving_sync" {
   # write_*보다 넉넉하게 - bike_risk_daily/station_daily 검증 둘 다 이 함수를
   # 공유해서 부르므로(#172, verify_serving_sync.py 참고) 동시 실행 여지가 더 있다.
   reserved_concurrent_executions = var.serving_sync_reserved_concurrency * 2
-
-  dead_letter_config {
-    target_arn = aws_sqs_queue.serving_sync_dlq.arn
-  }
 }
 
-# ---- 장애 대응 및 알림 (raw-fetch Lambda와 동일 패턴, main.tf 참고) ----
-resource "aws_sqs_queue" "serving_sync_dlq" {
-  name                      = "serving-sync-lambda-dlq"
-  message_retention_seconds = 1209600 # 14 days
-}
-
-resource "aws_sns_topic" "serving_sync_alerts" {
-  name = "serving-sync-lambda-alerts"
-}
-
-resource "aws_cloudwatch_metric_alarm" "serving_sync_errors" {
-  for_each = {
-    write_bike_risk_daily = aws_lambda_function.write_bike_risk_daily.function_name
-    write_station_daily   = aws_lambda_function.write_station_daily.function_name
-    verify_serving_sync   = aws_lambda_function.verify_serving_sync.function_name
-  }
-
-  alarm_name          = "${each.value}_errors"
-  comparison_operator = "GreaterThanOrEqualToThreshold"
-  evaluation_periods  = 1
-  metric_name         = "Errors"
-  namespace           = "AWS/Lambda"
-  period              = 300
-  statistic           = "Sum"
-  threshold           = 1
-  alarm_description   = "Alarm when ${each.value} Lambda experiences execution errors"
-  alarm_actions       = [aws_sns_topic.serving_sync_alerts.arn]
-
-  dimensions = {
-    FunctionName = each.value
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "serving_sync_dlq_messages_visible" {
-  alarm_name          = "serving_sync_dlq_messages_visible"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 1
-  metric_name         = "ApproximateNumberOfMessagesVisible"
-  namespace           = "AWS/SQS"
-  period              = 300
-  statistic           = "Sum"
-  threshold           = 0
-  alarm_description   = "Alarm when serving_sync DLQ receives failed execution events"
-  alarm_actions       = [aws_sns_topic.serving_sync_alerts.arn]
-
-  dimensions = {
-    QueueName = aws_sqs_queue.serving_sync_dlq.name
-  }
-}
+# ---- 장애 대응 및 알림 생략: sqs:CreateQueue/SNS:CreateTopic 권한이 없다(SCP가
+# 아니라 순수 IAM gap). 권한이 열리면 DLQ/SNS/CloudWatch 알람을 다시 추가할 것.
