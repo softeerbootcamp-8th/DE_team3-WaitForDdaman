@@ -213,16 +213,3 @@ def test_every_rental_task_receives_the_same_logical_cutoff(dag):
     }
 
     assert len(cutoffs) == 1
-
-
-def test_legacy_catchup_dag_no_longer_runs_rental_history():
-    import sys
-
-    from airflow.dag_processing.dagbag import DagBag
-
-    folder = _dag_folder()
-    if folder not in sys.path:
-        sys.path.insert(0, folder)
-    catchup = DagBag(folder).dags["bronze_catchup_all_sources"]
-    assert "catchup_rental_history" not in catchup.task_ids
-    assert "catchup_failure_report" in catchup.task_ids

@@ -38,7 +38,6 @@ from common.s3_utils import (
     upload_file,
 )
 from common.spark_session import build_spark_session
-from jobs.diagnose_emr_s3_csv import diagnose_csv_path
 from schema.rental_history_schema import (
     SchemaValidationError,
     build_select_exprs,
@@ -121,8 +120,6 @@ def _process_one_csv(spark, csv_path: Path, staging_dir: Path):
         config.SETTINGS.raw_bucket,
         "raw/rental_history/_utf8_staging",
     )
-    # 진단은 원래 실패하던 spark.read.csv()와 같은 JobRun/Role에서 수행한다.
-    diagnose_csv_path(spark, csv_source)
     raw_df = spark.read.option("header", "true").csv(csv_source)
     actual_columns = raw_df.columns
 
