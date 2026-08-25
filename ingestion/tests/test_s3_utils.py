@@ -80,6 +80,63 @@ def test_ensure_bucket_survives_concurrent_creation(s3_env, monkeypatch):
     s3_utils.ensure_bucket(BUCKET)  # 여기서 BucketAlreadyOwnedByYou가 터지면 안 된다
 
 
+def test_upload_file_if_changed_uploads_when_key_missing(s3_env, tmp_path):
+    from common import s3_utils
+
+    s3_utils.ensure_bucket(BUCKET)
+    local = tmp_path / "a.csv"
+    local.write_bytes(b"hello")
+
+    uploaded = s3_utils.upload_file_if_changed(local, BUCKET, "raw/staging/a.csv")
+
+    assert uploaded is True
+    body = s3_utils.get_s3_client().get_object(Bucket=BUCKET, Key="raw/staging/a.csv")["Body"].read()
+    assert body == b"hello"
+
+
+def test_upload_file_if_changed_skips_when_content_unchanged(s3_env, tmp_path, monkeypatch):
+    from common import s3_utils
+
+    s3_utils.ensure_bucket(BUCKET)
+    local = tmp_path / "a.csv"
+    local.write_bytes(b"hello")
+
+    first = s3_utils.upload_file_if_changed(local, BUCKET, "raw/staging/a.csv")
+    assert first is True
+
+    real_client = s3_utils.get_s3_client()
+    upload_calls = []
+    orig_upload_file = real_client.upload_file
+
+    def spying_upload_file(*args, **kwargs):
+        upload_calls.append((args, kwargs))
+        return orig_upload_file(*args, **kwargs)
+
+    monkeypatch.setattr(real_client, "upload_file", spying_upload_file)
+    monkeypatch.setattr(s3_utils, "get_s3_client", lambda: real_client)
+
+    second = s3_utils.upload_file_if_changed(local, BUCKET, "raw/staging/a.csv")
+
+    assert second is False
+    assert upload_calls == []  # 내용이 같으면 두 번째 호출은 실제 업로드를 하지 않아야 함
+
+
+def test_upload_file_if_changed_reuploads_when_content_differs(s3_env, tmp_path):
+    from common import s3_utils
+
+    s3_utils.ensure_bucket(BUCKET)
+    local = tmp_path / "a.csv"
+    local.write_bytes(b"hello")
+    s3_utils.upload_file_if_changed(local, BUCKET, "raw/staging/a.csv")
+
+    local.write_bytes(b"changed-content")  # 로컬 원본이 재다운로드 등으로 갱신된 상황을 재현
+    uploaded = s3_utils.upload_file_if_changed(local, BUCKET, "raw/staging/a.csv")
+
+    assert uploaded is True
+    body = s3_utils.get_s3_client().get_object(Bucket=BUCKET, Key="raw/staging/a.csv")["Body"].read()
+    assert body == b"changed-content"
+
+
 def test_list_keys_returns_only_matching_prefix_in_sorted_order(s3_env):
     from common import s3_utils
 
