@@ -17,9 +17,16 @@ chunk_list, #249) Dynamic Task Mapping으로 배치마다 이 스크립트를 �
             종료 코드 1로 끝낸다(재시도는 배치 단위 - 멱등이라 안전하지만 이미 성공한
             파일도 다시 처리된다).
 
+전달 방식(entryPointArguments 우선, INPUT_FILES 환경변수는 하위호환용, #255) -
+initial_load_rental_history.py와 동일한 이유(그 파일 문서 참고).
+
 사용법:
+    python -m jobs.initial_load_failure_report --input-files-json '["./raw_downloads/failure_2601.csv"]'
     INPUT_FILES='["./raw_downloads/failure_2601.csv"]' python -m jobs.initial_load_failure_report
 """
+from __future__ import annotations
+
+import argparse
 import json
 import logging
 import os
@@ -227,12 +234,23 @@ def run(input_files: list[str]) -> None:
         sys.exit(1)
 
 
-if __name__ == "__main__":
-    raw_input_files = os.getenv("INPUT_FILES")
+def _resolve_input_files(argv: list[str] | None = None) -> list[str]:
+    """entryPointArguments(--input-files-json)를 우선하고, 없으면 INPUT_FILES 환경변수로
+    내려간다(#255) - 로컬 BashOperator 등 기존 호출부와의 하위호환용."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input-files-json", default=None)
+    args = parser.parse_args(argv)
+
+    raw_input_files = args.input_files_json or os.getenv("INPUT_FILES")
     if not raw_input_files:
         logger.error(
-            "사용법: INPUT_FILES='[\"./raw_downloads/failure_2601.csv\"]' "
-            "python -m jobs.initial_load_failure_report"
+            "사용법: python -m jobs.initial_load_failure_report "
+            "--input-files-json '[\"./raw_downloads/failure_2601.csv\"]' "
+            "(또는 INPUT_FILES='[\"./raw_downloads/failure_2601.csv\"]')"
         )
         sys.exit(1)
-    run(json.loads(raw_input_files))
+    return json.loads(raw_input_files)
+
+
+if __name__ == "__main__":
+    run(_resolve_input_files())
