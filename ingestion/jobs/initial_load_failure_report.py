@@ -24,6 +24,8 @@ initial_load_rental_history.py와 동일한 이유(그 파일 문서 참고).
     python -m jobs.initial_load_failure_report --input-files-json '["./raw_downloads/failure_2601.csv"]'
     INPUT_FILES='["./raw_downloads/failure_2601.csv"]' python -m jobs.initial_load_failure_report
 """
+from __future__ import annotations
+
 import argparse
 import json
 import logging

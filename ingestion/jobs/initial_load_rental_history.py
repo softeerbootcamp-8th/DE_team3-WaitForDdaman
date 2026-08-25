@@ -39,6 +39,8 @@ JSON 리스트를 그대로 각 토큰으로 드라이버에 전달하므로 이
     python -m jobs.initial_load_rental_history --input-files-json '["./raw_downloads/2601.csv"]'
     INPUT_FILES='["./raw_downloads/2601.csv"]' python -m jobs.initial_load_rental_history
 """
+from __future__ import annotations
+
 import argparse
 import json
 import logging
