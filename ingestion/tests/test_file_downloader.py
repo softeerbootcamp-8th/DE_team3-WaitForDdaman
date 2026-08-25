@@ -83,6 +83,33 @@ def test_skips_files_already_present_locally(tmp_path):
     assert existing.read_bytes() == b"already-here"  # 재다운로드로 덮어쓰지 않음
 
 
+def test_lists_remote_once_but_downloads_only_missing_files(tmp_path):
+    """목록 조회(GET)는 매칭 파일 집합을 정하기 위해 한 번 하고, 실제 다운로드(POST)는
+    로컬에 없는 파일만 골라서 한다 - 이미 있는 파일은 목록에 있어도 재요청하지 않는다."""
+    existing = tmp_path / "서울특별시 공공자전거 대여이력 정보_2601.csv"
+    existing.write_bytes(b"already-here")
+
+    list_calls = []
+    posted = []
+
+    def fake_get(url, **kwargs):
+        list_calls.append(url)
+        return _FakeListResp()
+
+    def fake_post(url, data, **kwargs):
+        posted.append(data)
+        return _ok_download_resp("서울특별시 공공자전거 대여이력 정보_2015.zip", b"zip-body")
+
+    with patch("requests.get", side_effect=fake_get), patch("requests.post", side_effect=fake_post):
+        ensure_backfill_files("OA-15182", tmp_path, file_pattern="*")
+
+    assert len(list_calls) == 1  # 목록 조회는 한 번만
+    assert len(posted) == 1  # 다운로드는 없는 파일 1개만
+    assert posted[0]["seq"] == "84"
+    assert existing.read_bytes() == b"already-here"  # 이미 있는 파일은 그대로 유지
+    assert (tmp_path / "서울특별시 공공자전거 대여이력 정보_2015.zip").read_bytes() == b"zip-body"
+
+
 def test_html_error_page_response_raises_and_does_not_write_file(tmp_path):
     html_error = _FakeDownloadResp(
         200,

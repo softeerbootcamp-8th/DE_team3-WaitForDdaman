@@ -27,6 +27,7 @@ import sys
 
 import duckdb
 import pyarrow as pa
+import config
 from pyiceberg.exceptions import NoSuchTableError
 from pyiceberg.expressions import EqualTo
 from pyiceberg.partitioning import PartitionField, PartitionSpec
@@ -117,9 +118,11 @@ def _ensure_silver_table(catalog):
         return catalog.load_table(SILVER_TABLE)
     except NoSuchTableError:
         logger.info("%s 테이블 신규 생성", SILVER_TABLE)
+        location = f"{config.SETTINGS.iceberg_warehouse_path.rstrip('/')}/silver/station_active"
         return catalog.create_table(
             SILVER_TABLE,
             schema=SILVER_SCHEMA,
+            location=location,
             partition_spec=SILVER_PARTITION_SPEC,
             properties=SILVER_PROPERTIES,
         )

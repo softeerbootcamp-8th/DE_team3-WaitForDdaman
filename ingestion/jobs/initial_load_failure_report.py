@@ -1,21 +1,26 @@
 """
 Bronze 초기 적재 잡 - 서울시 공공자전거 고장신고 내역 (OA-15644)
 
-실행 방식: 파일 하나(INPUT_FILE)를 받아 독립된 프로세스(=하나의 Spark 세션/JVM)로
-처리하고 종료한다. 파일 다운로드와 대상 목록 나열은 jobs/list_input_files.py가
-먼저 수행한다 - Airflow DAG는 그 목록으로 Dynamic Task Mapping을 돌려 파일마다
-이 스크립트를 별도 프로세스로 실행한다.
+실행 방식: 파일 목록(INPUT_FILES, JSON 배열)을 받아 하나의 프로세스(=하나의 Spark
+세션/JVM) 안에서 파일마다 순차로 처리하고 종료한다. 파일 다운로드와 대상 목록 나열은
+jobs/list_input_files.py가 먼저 수행하고, DAG가 그 목록을 배치로 잘라(dag_common.
+chunk_list, #249) Dynamic Task Mapping으로 배치마다 이 스크립트를 별도 프로세스로
+실행한다 - initial_load_rental_history.py와 동일한 구조/이유(그 파일 문서 참고).
 
 주의: 가장 오래된 파일(2015_2020.10)은 .xlsx 형식이고, 나머지는 .csv(일부는
 확장자만 .csv인 zip)다. 둘 다 이 잡에서 자동으로 처리한다.
 
 멱등성: 재실행 시 동일 날짜(reg_date_partition) 파티션을 덮어쓴다.
-안전한 실패: 압축 파일 하나가 여러 CSV로 풀리는 경우, 그중 스키마 검증에 실패하는
-            CSV가 있어도 전체를 죽이지 않고 그 CSV만 스킵한다.
+안전한 실패: 배치 안의 한 파일에서, 압축 파일 하나가 여러 CSV로 풀리는 경우 그중
+            스키마 검증에 실패하는 CSV가 있어도 전체를 죽이지 않고 그 CSV만 스킵한
+            뒤 나머지 파일까지 계속 처리한다. 실패한 파일이 있으면 배치 전체를
+            종료 코드 1로 끝낸다(재시도는 배치 단위 - 멱등이라 안전하지만 이미 성공한
+            파일도 다시 처리된다).
 
 사용법:
-    INPUT_FILE=./raw_downloads/failure_2601.csv python -m jobs.initial_load_failure_report
+    INPUT_FILES='["./raw_downloads/failure_2601.csv"]' python -m jobs.initial_load_failure_report
 """
+import json
 import logging
 import os
 import sys
@@ -143,17 +148,14 @@ def _process_one_file(spark, raw_path: Path, workdir: Path):
     return bronze_df
 
 
-def run(input_file: str) -> None:
-    ensure_bucket(config.SETTINGS.raw_bucket)
-    ensure_bucket(config.SETTINGS.warehouse_bucket)
+def _process_one_input_file(spark, input_file: str) -> tuple[int, bool, bool]:
+    """input_file 하나를 처리한다. (row_count, failed, skipped)를 반환한다.
 
-    spark = build_spark_session("bronze-initial-load-failure-report")
-    _ensure_bronze_table(spark)
-
-    total_rows, failed, skipped = 0, False, False
-
-    # 파일 1개 처리 범위로 한정된 TemporaryDirectory. 프로세스도 파일 1개만 처리하고
-    # 종료하므로, 정상/OOM 종료 여부와 무관하게 이 파일 하나 분량만 디스크에 남을 수 있다.
+    파일 1개 처리 범위로 한정된 TemporaryDirectory - 이 함수가 반환하면(정상/예외
+    무관) 그 즉시 정리되므로, 배치 안에 파일이 여러 개 있어도 동시에 두 파일 분량이
+    디스크에 누적되지 않는다.
+    """
+    row_count, failed, skipped = 0, False, False
     with tempfile.TemporaryDirectory() as tmpdir:
         workdir = Path(tmpdir)
         if input_file.startswith("s3://"):
@@ -164,18 +166,18 @@ def run(input_file: str) -> None:
             raw_path = Path(input_file)
             if not raw_path.exists():
                 logger.error("입력 파일이 없습니다: %s", input_file)
-                sys.exit(1)
+                return row_count, True, skipped
 
         for target_path in unzip_if_needed(raw_path, workdir):
             try:
                 bronze_df = _process_one_file(spark, target_path, workdir).cache()
-                row_count = bronze_df.count()
+                file_row_count = bronze_df.count()
 
                 bronze_df.writeTo(_table_name()).overwritePartitions()
                 bronze_df.unpersist()
 
-                total_rows += row_count
-                logger.info("적재 완료: %s (%d행)", target_path.name, row_count)
+                row_count += file_row_count
+                logger.info("적재 완료: %s (%d행)", target_path.name, file_row_count)
             except NotThisDatasetError as e:
                 logger.info("고장신고 데이터셋이 아닌 것으로 보여 스킵: %s (%s)", target_path.name, e)
                 skipped = True
@@ -188,20 +190,49 @@ def run(input_file: str) -> None:
                 logger.error("인코딩 불일치로 스킵: %s (%s)", target_path.name, e)
                 failed = True
 
+    return row_count, failed, skipped
+
+
+def run(input_files: list[str]) -> None:
+    ensure_bucket(config.SETTINGS.raw_bucket)
+    ensure_bucket(config.SETTINGS.warehouse_bucket)
+
+    spark = build_spark_session("bronze-initial-load-failure-report")
+    _ensure_bronze_table(spark)
+
+    total_rows = 0
+    failed_files: list[str] = []
+    skipped_files: list[str] = []
+
+    # 배치 안의 파일을 순차 처리한다 - 하나의 Spark 세션/JVM(=EMR JobRun 하나)을 재사용해
+    # 파일마다 새 JobRun을 띄우던 시작 오버헤드를 없앤다(#249). 전체 파일을 한 DataFrame
+    # 으로 합치지 않고 파일 단위로 읽고/쓰고/unpersist하므로, 파일 하나 실패가 나머지
+    # 파일 처리를 막지 않는다.
+    for input_file in input_files:
+        row_count, failed, skipped = _process_one_input_file(spark, input_file)
+        total_rows += row_count
+        if failed:
+            failed_files.append(input_file)
+        if skipped:
+            skipped_files.append(input_file)
+
     logger.info(
-        "파일 처리 종료: %s, 총 %d행, 다른 데이터셋으로 스킵=%s, 스키마 실패=%s",
-        input_file,
+        "배치 처리 종료: 파일 %d개, 총 %d행, 다른 데이터셋으로 스킵=%s, 스키마 실패=%s",
+        len(input_files),
         total_rows,
-        skipped,
-        failed,
+        skipped_files,
+        failed_files,
     )
-    if failed:
+    if failed_files:
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    input_file = os.getenv("INPUT_FILE")
-    if not input_file:
-        logger.error("사용법: INPUT_FILE=./raw_downloads/failure_2601.csv python -m jobs.initial_load_failure_report")
+    raw_input_files = os.getenv("INPUT_FILES")
+    if not raw_input_files:
+        logger.error(
+            "사용법: INPUT_FILES='[\"./raw_downloads/failure_2601.csv\"]' "
+            "python -m jobs.initial_load_failure_report"
+        )
         sys.exit(1)
-    run(input_file)
+    run(json.loads(raw_input_files))

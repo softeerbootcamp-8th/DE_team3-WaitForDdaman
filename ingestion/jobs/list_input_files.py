@@ -35,7 +35,7 @@ from pathlib import Path
 import config
 from common.file_downloader import ensure_backfill_files
 from common.file_utils import expand_archives
-from common.s3_utils import ensure_bucket, upload_file
+from common.s3_utils import ensure_bucket, upload_file_if_changed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -74,9 +74,12 @@ def run(dataset: str, input_dir: str, file_pattern: str) -> list[str]:
             # 내역_2015_2020.10.xlsx" 파일에서 INPUT_FILE이 드라이버에 전달되지 않음).
             # 스테이징 업로드 시점에 ASCII로 안전한 이름으로 바꿔서 이 문제 자체를 없앤다 -
             # 파일 내용은 이름과 무관하므로 안전하다.
+            # deterministic key(파일명 기반) + upload_file_if_changed로 멱등하게 만든다 -
+            # 재실행 시 스테이징에 같은 내용의 파일이 이미 있으면 재업로드하지 않고 그대로
+            # 재사용하고, 로컬 원본이 바뀐 경우(재다운로드로 갱신된 경우)에만 덮어쓴다.
             safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", path.name)
             key = f"raw/{dataset}/_initial_load_staging/{safe_name}"
-            upload_file(path, config.SETTINGS.raw_bucket, key)
+            upload_file_if_changed(path, config.SETTINGS.raw_bucket, key)
             uris.append(f"s3://{config.SETTINGS.raw_bucket}/{key}")
         return uris
 
