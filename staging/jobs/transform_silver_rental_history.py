@@ -473,9 +473,8 @@ def _load_bronze_promotion_metadata() -> dict | None:
     """
     silver_rental_history_dag.py가 triggering_asset_events에서 뽑아 넘긴 값을 읽는다.
 
-    Catchup(bronze_catchup_all_sources_dag.py)이나 수동 트리거처럼 Asset event에
-    metadata가 없으면 세 값이 모두 빈 문자열로 넘어온다 - 이 경우 None을 돌려줘
-    기존 확정 워터마크 구간만 처리하게 한다 (Catchup 코드는 이 이슈에서 건드리지 않는다).
+    수동 트리거처럼 Asset event에 metadata가 없으면 세 값이 모두 빈 문자열로 넘어온다 -
+    이 경우 None을 돌려줘 기존 확정 워터마크 구간만 처리하게 한다.
     """
     run_date = (os.getenv("RENTAL_HISTORY_BRONZE_RUN_DATE") or "").strip()
     promotion_id = (os.getenv("RENTAL_HISTORY_BRONZE_PROMOTION_ID") or "").strip()

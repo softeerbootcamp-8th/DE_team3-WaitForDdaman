@@ -6,10 +6,9 @@ Silver 일 배치 DAG - 대여이력 (bronze.rental_history -> silver.rental_his
 실어 보낸다. 이 DAG은 그 값을 triggering_asset_events에서 그대로 꺼내 전달할 뿐,
 S3의 "최신 COMPLETE promotion"을 추측하지 않는다.
 
-bronze_catchup_all_sources처럼 metadata 없이 같은 Asset을 발행하는 경로에서 트리거되면
-(수동 트리거 포함) 세 값이 빈 문자열이 되고, transform_silver_rental_history가 그걸
-"metadata 없음"으로 보고 기존 확정 워터마크 구간만 처리한다 - 이 DAG에서는 분기가 필요
-없다.
+수동 트리거처럼 metadata 없이 같은 Asset을 발행하는 경로에서 트리거되면 세 값이 빈
+문자열이 되고, transform_silver_rental_history가 그걸 "metadata 없음"으로 보고 기존
+확정 워터마크 구간만 처리한다 - 이 DAG에서는 분기가 필요 없다.
 """
 from datetime import timedelta
 

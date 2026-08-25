@@ -192,7 +192,12 @@ services:
   airflow-init:
     <<: *airflow-common
     container_name: airflow-init
-    command: version
+    # 운영에서도 EMR 초기 적재 배치용 pool을 재배포 시 자동 보장한다.
+    # pools set은 이미 존재하면 슬롯/설명을 갱신하고 없으면 생성하므로 멱등적이다.
+    command:
+      - bash
+      - -c
+      - airflow version && airflow pools set emr_initial_load 3 'EMR Serverless 초기 적재 배치 동시 제출 제한 (pre-initialized executor 3개)'
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'

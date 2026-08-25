@@ -49,17 +49,44 @@ DAG에서 이어져야 한다. 별도 set_watermark DAG를 손으로 트리거�
 ⚠️ *_pattern으로 적재 범위를 좁히면 *_watermark_date도 그 범위의 마지막 날짜로 같이
    바꿔야 한다. 안 그러면 실제로 적재하지 않은 기간을 처리 완료로 표시한다.
 
-### 왜 병렬을 2개로 제한하는가
+### 왜 병렬을 2개로 제한하는가 (로컬에서만)
 로컬(LocalStack) 환경에서 여러 Spark 잡이 동시에 대량 PutObject를 보내면
 "read of closed file" 레이스 컨디션이 발생하는 게 실측으로 확인됐다. 각 잡이 이미
 내부적으로 로컬 병렬도를 제한하고 있으므로, DAG 레벨에서도 동시 실행을 제한한다.
+이건 LocalStack 전용 제약이라 AWS 환경(is_aws_env())에서는 적용하지 않는다 -
+그대로 두면 EMR Serverless 초기 적재 배치들이 실제로는 원격 애플리케이션에서
+독립 실행되는데도 로컬 레이스 컨디션 방지용 상한에 불필요하게 발목 잡힌다.
 
-max_active_tasks=2는 이 DAG 안에서만 유효하다. 초기 적재는 몇 시간짜리라 도중에 일 배치
+max_active_tasks는 이 DAG 안에서만 유효하다. 초기 적재는 몇 시간짜리라 도중에 일 배치
 스케줄(06:00)과 겹치는 게 정상 케이스인데, DAG 단위 제한은 서로를 알지 못한다.
 그래서 Spark를 쓰는 태스크는 각 레이어의 daily 잡과 같은 풀에 넣어 전역으로 묶는다 -
-Bronze 초기 적재 태스크는 BRONZE_POOL, Silver 승격 태스크(load_silver_*)는 daily
+로컬 Bronze 초기 적재 태스크는 BRONZE_POOL, Silver 승격 태스크(load_silver_*)는 daily
 silver_*_dag.py와 같은 SILVER_POOL. 워터마크 태스크는 S3에 JSON 한 개만 쓰고 Spark를
 안 띄우므로 풀에서 제외한다(슬롯을 잡으면 정작 초기 적재가 밀린다).
+
+### EMR Serverless 초기 적재: 파일당 JobRun -> 배치당 JobRun (#249)
+EMR Serverless 애플리케이션은 pre-initialized capacity(Driver 1개 + Executor 3개,
+각 4vCPU/16GB)를 미리 띄워 두지만, JobRun 하나마다 애플리케이션 큐잉/드라이버 초기화
+오버헤드가 있다. 기존에는 파일 하나 = EMR JobRun 하나였다 - 파일이 수십 개면 이
+오버헤드도 수십 번 반복됐다.
+
+이제 list_input_files.py가 만든 파일 목록을 dag_common.chunk_list()로 미리
+batch_size개씩 묶고(*_emr_batch_size 파라미터), Dynamic Task Mapping은 파일이 아니라
+"배치"를 펼친다(.expand(input_files=...)). 배치 하나 = EMR JobRun 하나 = Spark 세션
+하나이고, initial_load_rental_history.py / initial_load_failure_report.py가 그 안에서
+파일을 순차 처리한다 - 파일마다 독립된 TemporaryDirectory를 열고 닫아 파일 단위 메모리
+안전성은 그대로 유지하고, 전체 파일을 한 DataFrame으로 합치지 않는다(각 잡 파일의
+모듈 docstring 참고).
+
+배치 크기는 트레이드오프다: 크게 잡을수록 JobRun 수(=오버헤드)가 줄지만, 배치 하나가
+실패하면 Airflow 태스크 재시도가 그 배치 전체를 다시 돌린다(이미 성공한 파일도 같이 -
+overwritePartitions가 멱등이라 결과는 같지만 시간이 더 든다). 대여이력은 파일이 커서
+(최대 700MB급) 배치를 작게, 고장신고는 파일이 작아서 배치를 크게 잡는다 - 두 값 모두
+Trigger DAG w/ config로 조정 가능하다.
+
+EMR JobRun을 제출하는 배치 태스크는 BRONZE_POOL이 아니라 EMR_INITIAL_LOAD_POOL을 쓴다
+(dag_common.py 참고) - 워커 로컬 메모리가 아니라 EMR pre-initialized capacity가 진짜
+제약이기 때문이다.
 
 ### 실행 방법
 Airflow UI에서 "Trigger DAG w/ config"로 각 소스의 input_dir / 파일 패턴을 조정할 수 있다.
@@ -74,10 +101,12 @@ from airflow.sdk import dag, task
 
 from dag_common import (
     BRONZE_POOL,
+    EMR_INITIAL_LOAD_POOL,
     INGESTION_DIR,
     SILVER_POOL,
     bash_job,
     bash_staging_job,
+    chunk_list,
     is_aws_env,
     notify_slack_on_failure,
     run_emr_serverless_spark_job,
@@ -101,16 +130,24 @@ default_args = {
     start_date=pendulum.datetime(2026, 1, 1, tz="Asia/Seoul"),
     catchup=False,
     max_active_runs=1,
-    max_active_tasks=2,  # 로컬 LocalStack 동시 쓰기 부하 제한
+    # 로컬은 LocalStack 동시 쓰기 레이스 컨디션 방지용 상한(2), AWS는 EMR Serverless가
+    # 원격에서 JobRun을 독립 실행하므로 이 상한을 적용할 이유가 없다 - EMR_INITIAL_LOAD_POOL
+    # 슬롯 수가 실제 동시성 제약 역할을 한다 (#249, "왜 병렬을 2개로 제한하는가" 문단 참고).
+    max_active_tasks=2 if not is_aws_env() else 10,
     default_args=default_args,
     tags=["bronze", "independent", "manual"],
     params={
         "rental_history_dir": f"{INGESTION_DIR}/data/rental_history",
         "rental_history_pattern": "*",
         "rental_history_watermark_date": "2026-06-30",
+        # 배치 하나 = EMR JobRun 하나 (#249). 대여이력은 반기 파일이 최대 700MB급이라
+        # 배치를 작게 잡아 배치 실패 시 재시도 비용(이미 성공한 파일 재처리)을 낮춘다.
+        "rental_history_emr_batch_size": "3",
         "failure_report_dir": f"{INGESTION_DIR}/data/failure_report",
         "failure_report_pattern": "*",
         "failure_report_watermark_date": "2026-06-30",
+        # 고장신고는 파일이 작아서 배치를 더 크게 잡아 JobRun 수를 더 줄인다.
+        "failure_report_emr_batch_size": "6",
         # transform_silver_rental_history.py(다른 DAG인 silver_rental_history_dag.py와
         # 공유하는 잡)는 손대지 않는다 - 대신 이 DAG의 load_silver_rental_history 태스크가
         # 그 잡을 여러 번 순차 호출해서 몇 년치를 나눠 처리한다. 청크 크기(chunk_days)는
@@ -153,38 +190,56 @@ def bronze_initial_load_all_sources():
 
     rental_history_files = parse_rental_history_files(list_rental_history_files.output)
 
-    @task(
-        task_id="initial_load_rental_history_file",
-        execution_timeout=timedelta(minutes=30),
-        pool=BRONZE_POOL,
-    )
-    def initial_load_rental_history_file_emr(input_file: str) -> str:
-        return run_emr_serverless_spark_job(
-            entry_point="local:///opt/app/ingestion/jobs/initial_load_rental_history.py",
-            name="bronze-initial-load-rental-history",
-            extra_env={"INPUT_FILE": input_file},
-            log_group_name="/emr-serverless/bronze-initial-load",
-            log_stream_name_prefix="rental-history",
-            tags={
-                "dag_id": "bronze_initial_load_all_sources",
-                "task_id": "initial_load_rental_history_file",
-                "dataset": "rental_history",
-            },
+    if is_aws_env():
+        # 파일 목록을 배치로 미리 잘라서(dag_common.chunk_list, #249) 배치 단위로
+        # Dynamic Task Mapping을 편다 - 배치 하나 = EMR JobRun 하나. 이렇게 해야 파일이
+        # 수십 개여도 EMR JobRun 시작 오버헤드가 배치 수만큼만 발생한다("EMR Serverless
+        # 초기 적재: 파일당 JobRun -> 배치당 JobRun" 문단 참고).
+        @task(task_id="chunk_rental_history_files")
+        def chunk_rental_history_files(files: list[str], batch_size: str) -> list[list[str]]:
+            return chunk_list(files, int(batch_size))
+
+        rental_history_file_batches = chunk_rental_history_files(
+            rental_history_files, "{{ params.rental_history_emr_batch_size }}"
         )
 
-    # 파일 개수만큼 태스크 인스턴스가 동적으로 생성된다(Dynamic Task Mapping) - 파일
-    # 하나 = spark-submit 프로세스 하나 = 새 JVM. 하나가 OOM으로 죽어도 그 인스턴스만
-    # 재시도되고 나머지 파일에는 영향이 없다.
-    if is_aws_env():
-        rental_history = initial_load_rental_history_file_emr.expand(input_file=rental_history_files)
+        @task(
+            task_id="initial_load_rental_history_batch",
+            # 배치 기본 크기(3) x 파일 1개당 기존 상한(30분) + 여유. 배치 크기 파라미터를
+            # 크게 바꾸면 이 상한도 같이 늘려야 한다.
+            execution_timeout=timedelta(hours=3),
+            pool=EMR_INITIAL_LOAD_POOL,
+        )
+        def initial_load_rental_history_batch_emr(input_files: list[str]) -> str:
+            return run_emr_serverless_spark_job(
+                entry_point="local:///opt/app/ingestion/jobs/initial_load_rental_history.py",
+                name="bronze-initial-load-rental-history",
+                extra_env={"INPUT_FILES": json.dumps(input_files)},
+                log_group_name="/emr-serverless/bronze-initial-load",
+                log_stream_name_prefix="rental-history",
+                tags={
+                    "dag_id": "bronze_initial_load_all_sources",
+                    "task_id": "initial_load_rental_history_batch",
+                    "dataset": "rental_history",
+                },
+            )
+
+        # 배치 개수만큼 태스크 인스턴스가 동적으로 생성된다(Dynamic Task Mapping) - 배치
+        # 하나가 실패해도 그 배치 인스턴스만 재시도되고 나머지 배치에는 영향이 없다
+        # (단, 재시도는 배치 전체 단위 - 배치 안 개별 파일 단위는 아니다. #249 문단 참고).
+        rental_history = initial_load_rental_history_batch_emr.expand(
+            input_files=rental_history_file_batches
+        )
     else:
+        # 로컬은 배치로 묶지 않는다 - EMR JobRun 시작 오버헤드가 없는 환경이라 묶을
+        # 이유가 없고, 기존 "파일 하나 = 새 프로세스" 격리를 그대로 유지한다.
         rental_history = BashOperator.partial(
             task_id="initial_load_rental_history_file",
             execution_timeout=timedelta(minutes=30),  # 폴더 전체 기준(3시간) -> 파일 1개 기준으로 축소
             pool=BRONZE_POOL,
         ).expand(
             bash_command=rental_history_files.map(
-                lambda f: bash_job("initial_load_rental_history", f"INPUT_FILE='{f}' ")
+                lambda f: bash_job("initial_load_rental_history", f"INPUT_FILES='{json.dumps([f])}' ")
             )
         )
 
@@ -207,27 +262,40 @@ def bronze_initial_load_all_sources():
 
     failure_report_files = parse_failure_report_files(list_failure_report_files.output)
 
-    @task(
-        task_id="initial_load_failure_report_file",
-        execution_timeout=timedelta(minutes=20),
-        pool=BRONZE_POOL,
-    )
-    def initial_load_failure_report_file_emr(input_file: str) -> str:
-        return run_emr_serverless_spark_job(
-            entry_point="local:///opt/app/ingestion/jobs/initial_load_failure_report.py",
-            name="bronze-initial-load-failure-report",
-            extra_env={"INPUT_FILE": input_file},
-            log_group_name="/emr-serverless/bronze-initial-load",
-            log_stream_name_prefix="failure-report",
-            tags={
-                "dag_id": "bronze_initial_load_all_sources",
-                "task_id": "initial_load_failure_report_file",
-                "dataset": "failure_report",
-            },
+    if is_aws_env():
+        # rental_history와 동일한 배치 구조(#249) - 고장신고는 파일이 작아 배치를
+        # 더 크게 잡는다(failure_report_emr_batch_size 기본값 참고).
+        @task(task_id="chunk_failure_report_files")
+        def chunk_failure_report_files(files: list[str], batch_size: str) -> list[list[str]]:
+            return chunk_list(files, int(batch_size))
+
+        failure_report_file_batches = chunk_failure_report_files(
+            failure_report_files, "{{ params.failure_report_emr_batch_size }}"
         )
 
-    if is_aws_env():
-        failure_report = initial_load_failure_report_file_emr.expand(input_file=failure_report_files)
+        @task(
+            task_id="initial_load_failure_report_batch",
+            # 배치 기본 크기(6) x 파일 1개당 기존 상한(20분) + 여유.
+            execution_timeout=timedelta(hours=2),
+            pool=EMR_INITIAL_LOAD_POOL,
+        )
+        def initial_load_failure_report_batch_emr(input_files: list[str]) -> str:
+            return run_emr_serverless_spark_job(
+                entry_point="local:///opt/app/ingestion/jobs/initial_load_failure_report.py",
+                name="bronze-initial-load-failure-report",
+                extra_env={"INPUT_FILES": json.dumps(input_files)},
+                log_group_name="/emr-serverless/bronze-initial-load",
+                log_stream_name_prefix="failure-report",
+                tags={
+                    "dag_id": "bronze_initial_load_all_sources",
+                    "task_id": "initial_load_failure_report_batch",
+                    "dataset": "failure_report",
+                },
+            )
+
+        failure_report = initial_load_failure_report_batch_emr.expand(
+            input_files=failure_report_file_batches
+        )
     else:
         failure_report = BashOperator.partial(
             task_id="initial_load_failure_report_file",
@@ -235,7 +303,7 @@ def bronze_initial_load_all_sources():
             pool=BRONZE_POOL,
         ).expand(
             bash_command=failure_report_files.map(
-                lambda f: bash_job("initial_load_failure_report", f"INPUT_FILE='{f}' ")
+                lambda f: bash_job("initial_load_failure_report", f"INPUT_FILES='{json.dumps([f])}' ")
             )
         )
 
