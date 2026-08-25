@@ -81,7 +81,7 @@
 
 ### 인프라 아키텍처
 
-![인프라 아키텍처](docs/images/infra-architecture.png)
+![인프라 아키텍처](docs/images/infra_architecture.png)
 
 ## 우리의 고민정리 / 고려한 사항
 
