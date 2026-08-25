@@ -14,6 +14,7 @@ Airflow 없이 단독 실행 가능해야 한다.
 import logging
 import os
 
+import pyarrow as pa
 import psycopg2
 import psycopg2.extras
 
@@ -41,6 +42,12 @@ def connect():
         raise ServingDbError(f"필수 환경변수 누락: {e}. .env에 SERVING_DB_*를 설정하세요.") from e
     except psycopg2.OperationalError as e:
         raise ServingDbError(f"서빙 DB 연결 실패: {e}") from e
+
+
+def rows_for_insert(table: pa.Table, columns: list[str]) -> list[tuple]:
+    """PyArrow Table을 psycopg2 execute_values가 받는 (컬럼 순서 고정) 튜플 리스트로
+    바꾼다 - 카탈로그 없이 동작하는 순수 로직이라 단위 테스트가 가능하다."""
+    return [tuple(row[c] for c in columns) for row in table.select(columns).to_pylist()]
 
 
 def replace_partition(table: str, columns: list[str], snapshot_date: str, rows: list[tuple]) -> int:
