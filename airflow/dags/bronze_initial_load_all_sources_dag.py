@@ -178,10 +178,9 @@ default_args = {
         "failure_report_dir": f"{INGESTION_DIR}/data/failure_report",
         "failure_report_pattern": "*",
         "failure_report_watermark_date": "2026-06-30",
-        # 고장신고는 파일이 작아서 배치를 더 크게 잡아 JobRun 수를 더 줄인다.
-        "failure_report_emr_batch_size": "6",
-        # 고장신고는 파일이 작아서 스테이징 배치도 더 크게 잡는다.
-        "failure_report_staging_batch_size": "10",
+        # 고장신고는 파일이 작아서 12개씩 묶어 EMR JobRun/스테이징 업로드 수를 줄인다.
+        "failure_report_emr_batch_size": "12",
+        "failure_report_staging_batch_size": "12",
         # transform_silver_rental_history.py(다른 DAG인 silver_rental_history_dag.py와
         # 공유하는 잡)는 손대지 않는다 - 대신 이 DAG의 load_silver_rental_history 태스크가
         # 그 잡을 여러 번 순차 호출해서 몇 년치를 나눠 처리한다. 청크 크기(chunk_days)는
@@ -380,7 +379,7 @@ def bronze_initial_load_all_sources():
 
         @task(
             task_id="initial_load_failure_report_batch",
-            # 배치 기본 크기(6) x 파일 1개당 기존 상한(20분) + 여유.
+            # 배치 기본 크기(12) x 파일 1개당 기존 상한(20분) + 여유.
             execution_timeout=timedelta(hours=2),
             pool=EMR_INITIAL_LOAD_POOL,
         )

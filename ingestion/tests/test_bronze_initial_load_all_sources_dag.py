@@ -140,12 +140,12 @@ def test_aws_env_allows_more_concurrent_tasks_than_local(dag, aws_dag):
 
 def test_emr_batch_size_params_exist(dag):
     assert dag.params["rental_history_emr_batch_size"] == "3"
-    assert dag.params["failure_report_emr_batch_size"] == "6"
+    assert dag.params["failure_report_emr_batch_size"] == "12"
 
 
 def test_staging_batch_size_params_exist(dag):
     assert dag.params["rental_history_staging_batch_size"] == "6"
-    assert dag.params["failure_report_staging_batch_size"] == "10"
+    assert dag.params["failure_report_staging_batch_size"] == "12"
 
 
 def test_local_env_has_no_staging_batch_tasks(dag):
