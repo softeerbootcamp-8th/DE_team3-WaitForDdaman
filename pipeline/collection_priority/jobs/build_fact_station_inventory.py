@@ -246,13 +246,18 @@ def _ensure_gold_tables(catalog):
     return gold_table, bike_last_action_table
 
 
-def _bike_last_action_baseline(catalog) -> pa.Table:
-    """직전 상태 전체 (테이블이 비어있으면 빈 Table - cold start도 안전)."""
-    full = catalog.load_table(BIKE_LAST_ACTION_TABLE).scan(
-        selected_fields=("bike_id", "action_event_type", "action_station_id", "action_at")
+def _load_bike_last_action_baseline_snapshot(catalog) -> pa.Table:
+    """baseline 계산과 MAX(snapshot_date) 조회에 필요한 컬럼을 gold.bike_last_action에서
+    한 번만 스캔한다 (테이블이 비어있으면 빈 Table - cold start도 안전)."""
+    return catalog.load_table(BIKE_LAST_ACTION_TABLE).scan(
+        selected_fields=("bike_id", "action_event_type", "action_station_id", "action_at", "snapshot_date")
     ).to_arrow()
+
+
+def _bike_last_action_baseline(gold_snapshot: pa.Table) -> pa.Table:
+    """직전 상태 전체 (테이블이 비어있으면 빈 Table - cold start도 안전)."""
     con = duckdb.connect(":memory:")
-    con.register("t", full)
+    con.register("t", gold_snapshot)
     return query_arrow(
         con,
         """
@@ -266,15 +271,14 @@ def _bike_last_action_baseline(catalog) -> pa.Table:
     )
 
 
-def _bike_last_action_baseline_snapshot_date(catalog) -> date | None:
+def _bike_last_action_baseline_snapshot_date(gold_snapshot: pa.Table) -> date | None:
     """gold.bike_last_action에 남아있는 MAX(snapshot_date) - 그 값보다 이전
     bikeman_action 이벤트는 이미 baseline에 반영되어 있으므로, 이번 실행의
     델타 시작일로 그대로 쓸 수 있다. 테이블이 비어있으면(cold start) None."""
-    full = catalog.load_table(BIKE_LAST_ACTION_TABLE).scan(selected_fields=("snapshot_date",)).to_arrow()
-    if len(full) == 0:
+    if len(gold_snapshot) == 0:
         return None
     con = duckdb.connect(":memory:")
-    con.register("t", full)
+    con.register("t", gold_snapshot)
     return con.execute("SELECT MAX(snapshot_date) FROM t").fetchone()[0]
 
 
@@ -303,8 +307,9 @@ def _read_bikeman_action_delta(catalog, start_date: date | None, end_date: date)
 
 def build_bike_last_action(catalog, snapshot_date: date) -> pa.Table:
     """gold.bike_last_action의 오늘자 스냅샷을 증분(baseline+delta)으로 계산한다."""
-    baseline = _bike_last_action_baseline(catalog)
-    delta_start = _bike_last_action_baseline_snapshot_date(catalog)
+    gold_snapshot = _load_bike_last_action_baseline_snapshot(catalog)
+    baseline = _bike_last_action_baseline(gold_snapshot)
+    delta_start = _bike_last_action_baseline_snapshot_date(gold_snapshot)
     delta_end = snapshot_date - timedelta(days=1)
     bikeman_action_delta = _read_bikeman_action_delta(catalog, delta_start, delta_end)
 
