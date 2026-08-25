@@ -23,6 +23,16 @@ OTHER_SOURCE_TASKS = [
     "daily_batch_bikeman_event",
     "daily_batch_station_active",
 ]
+# 이 두 원천만 완전히 독립(업스트림/다운스트림 없음) - failure_report/bikeman_event.
+INDEPENDENT_SOURCE_TASKS = ["daily_batch_failure_report", "daily_batch_bikeman_event"]
+# station_master/station_active는 같은 원천 안에서 raw-fetch Lambda invoke가 upstream으로
+# 붙는다(2026-08-25) - events:PutRule 권한이 없어 EventBridge 대신 이 DAG가 00:10 스케줄을
+# 대신한다. "원천 사이에 의존성을 두지 않는다" 원칙과는 충돌하지 않는다(같은 원천 안에서만
+# 닫힌 의존성).
+LAMBDA_UPSTREAM_BY_TASK = {
+    "daily_batch_station_master": "fetch_station_master_raw",
+    "daily_batch_station_active": "fetch_station_active_raw",
+}
 
 
 def _dag_folder() -> str:
@@ -128,13 +138,25 @@ def test_rental_history_asset_is_published_only_by_the_publish_task(dag):
 
 
 def test_other_bronze_sources_stay_independent_of_the_rental_group(dag):
-    for task_id in OTHER_SOURCE_TASKS:
+    for task_id in INDEPENDENT_SOURCE_TASKS:
         task = _task(dag, task_id)
         assert task.upstream_task_ids == set()
         assert task.downstream_task_ids == set()
 
-    assert {task.task_id for task in dag.tasks if not task.task_id.startswith(f"{GROUP}.")} == set(
-        OTHER_SOURCE_TASKS
+    for task_id, lambda_task_id in LAMBDA_UPSTREAM_BY_TASK.items():
+        task = _task(dag, task_id)
+        assert task.upstream_task_ids == {lambda_task_id}
+        assert task.downstream_task_ids == set()
+
+        lambda_task = _task(dag, lambda_task_id)
+        assert lambda_task.upstream_task_ids == set()
+        assert lambda_task.downstream_task_ids == {task_id}
+
+    all_non_rental_task_ids = {
+        task.task_id for task in dag.tasks if not task.task_id.startswith(f"{GROUP}.")
+    }
+    assert all_non_rental_task_ids == set(OTHER_SOURCE_TASKS) | set(
+        LAMBDA_UPSTREAM_BY_TASK.values()
     )
 
 
