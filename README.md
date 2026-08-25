@@ -2,7 +2,9 @@
 
 따릉이 : 9와4분의3 대여소에서 너를 기다려 (WaitForDdaman)
 
-![](docs/images/real_ttareungi_waiting_for_ddaman.png)
+<p align="center">
+  <img src="docs/images/real_ttareungi_waiting_for_ddaman.png" width="300">
+</p>
 
 ## 개요
 
