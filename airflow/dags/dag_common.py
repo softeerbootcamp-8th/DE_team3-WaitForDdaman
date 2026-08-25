@@ -126,6 +126,10 @@ def is_aws_env() -> bool:
     return os.getenv("APP_ENV", "local") == "aws"
 
 
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes")
+
+
 def chunk_list(items: list, batch_size: int) -> list[list]:
     """items를 batch_size개씩 연속 구간으로 자른다 (순서 보존, 마지막 배치는 나머지만).
 
@@ -205,6 +209,16 @@ def run_emr_serverless_spark_job(
     tags: dict[str, str] | None = None,
 ) -> str:
     """EMR Serverless Spark job을 제출하고 terminal 상태까지 polling한다."""
+    # AWS 분기 DAG의 staging/인자 전달 흐름을 로컬에서 확인할 때 사용한다.
+    # 이 모드에서는 boto3를 만들거나 EMR API를 호출하지 않는다.
+    if _env_flag("EMR_SERVERLESS_DRY_RUN"):
+        print(
+            "EMR Serverless dry-run: "
+            f"name={name} entry_point={entry_point} "
+            f"entry_point_arguments={entry_point_arguments or []}"
+        )
+        return f"dry-run:{name}"
+
     import boto3
 
     application_id = _required_env("EMR_SPARK_APPLICATION_ID")

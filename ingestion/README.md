@@ -357,6 +357,22 @@ pytest tests/ -v
 pytest tests/test_station_master_schema.py -v
 ```
 
+## AWS 초기 적재 로컬 시뮬레이션
+
+실제 AWS S3/EMR을 호출하지 않고 AWS 분기의 `staging 배치 → EMR 입력 인자` 흐름만
+확인하려면 LocalStack S3와 EMR dry-run을 함께 켠다. S3 업로드는 LocalStack에 실제로
+수행되고, EMR `start_job_run`은 호출하지 않고 전달할 인자만 로그에 남긴다.
+
+```bash
+APP_ENV=aws AWS_LOCAL_SIMULATION=true EMR_SERVERLESS_DRY_RUN=true \
+PROJECT_ENV_FILE=.env.local \
+docker compose --env-file .env.local -f docker-compose.local.yml up -d
+```
+
+이 모드에서는 초기 적재 DAG의 AWS 전용 staging 배치와 `S3_STAGING_POOL`을 확인할 수
+있지만, dry-run이므로 Bronze 테이블을 실제로 적재하지 않는다. 실제 EMR 적재 검증은
+dry-run을 끄고 AWS에서 별도 실행해야 한다.
+
 ## AWS 배포 시 바꿔야 하는 것
 
 루트 `.env`에서 아래 값들을 AWS 기준으로 교체한다 (`ingestion/.env`는 심볼릭

@@ -9,6 +9,7 @@ import functools
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -43,9 +44,20 @@ def get_s3_client():
     #       테스트에서 config.SETTINGS를 교체해 환경을 바꿔 검증할 수 있게 하기 위함. 캐시 키가
     #       그 값들 자체라서, 설정이 바뀌면 새 클라이언트를 만들고 안 바뀌면 재사용한다.
     settings = config.SETTINGS
-    if settings.env == "local":
+    # AWS 분기 흐름을 LocalStack으로 검증할 때만 켠다. 운영 APP_ENV=aws에서는
+    # 기본적으로 이 값이 꺼져 있으므로 IAM Role을 사용하는 기존 동작을 유지한다.
+    aws_local_simulation = os.getenv("AWS_LOCAL_SIMULATION", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if settings.env == "local" or aws_local_simulation:
         return _build_s3_client(
-            settings.env, settings.s3_endpoint, settings.s3_region, settings.s3_access_key, settings.s3_secret_key
+            "local",
+            settings.s3_endpoint,
+            settings.s3_region,
+            settings.s3_access_key,
+            settings.s3_secret_key,
         )
     return _build_s3_client(settings.env, None, settings.s3_region, None, None)
 
