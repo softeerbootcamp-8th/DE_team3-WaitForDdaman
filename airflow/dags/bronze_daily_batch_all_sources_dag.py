@@ -74,11 +74,26 @@ bikeman만 lookback이 있는 이유: 오프라인 작업 후 몰아서 제출�
 ### catchup=False인 이유
 밀린 날짜는 각 잡의 워터마크 로직이 알아서 이어서 처리한다. Airflow의 catchup에
 의존하지 않고 "하루 한 번 트리거"만 Airflow가 책임진다.
+
+### 대여소정보/실시간 대여정보 앞단의 Lambda invoke (2026-08-25 추가)
+원래는 Terraform EventBridge 규칙이 fetch_station_master_raw/fetch_station_active_raw
+Lambda를 00:10 KST에 별도로 트리거해서 S3 raw 영역에 스냅샷을 미리 착지시켜뒀고, 이
+DAG의 daily_batch_station_master/daily_batch_station_active는 그 결과물을 06:00에
+읽기만 하는 암묵적 관계였다. 이 AWS 계정에 events:PutRule 권한이 없어(조직 SCP가 아니라
+순수 IAM 권한 gap) 그 트리거 자체가 막혀서, 이 DAG 안에 Lambda invoke 태스크를 upstream으로
+직접 넣었다 - "같은 원천 안"의 의존성이라 위 "원천 사이에 의존성을 두지 않는다" 원칙과
+충돌하지 않는다(station_master 원천 안에서만 닫혀 있음).
+
+이 변경으로 스냅샷 시점이 00:10 KST -> 06:00 KST(이 DAG 실행 시각)로 밀린다 - 두 원천 다
+과거 소급 조회가 안 되는 API라서 "그 날짜의 대표 스냅샷"이라는 의미 자체는 유지되고,
+하루 중 station_master/station_active 데이터가 크게 변하는 소스가 아니라 실질적 영향은
+없다고 판단했다. events:PutRule 권한이 열리면 다시 EventBridge로 분리할 수 있다.
 """
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pendulum
+from airflow.providers.amazon.aws.operators.lambda_function import LambdaInvokeFunctionOperator
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import TaskGroup, dag, task
 from airflow.task.trigger_rule import TriggerRule
@@ -116,6 +131,10 @@ PRELIMINARY_MAX_AGE_MINUTES_TEMPLATE = (
     "{{ var.value.get('RENTAL_HISTORY_PRELIMINARY_MAX_AGE_MINUTES', '120') }}"
 )
 
+# infra/terraform/main.tf의 aws_lambda_function.function_name과 반드시 같아야 한다.
+FETCH_STATION_MASTER_RAW_LAMBDA = "fetch_station_master_raw"
+FETCH_STATION_ACTIVE_RAW_LAMBDA = "fetch_station_active_raw"
+
 
 @dag(
     dag_id="bronze_daily_batch_all_sources",
@@ -135,7 +154,14 @@ def bronze_daily_batch_all_sources():
     # 대여소정보: 워터마크 없음, 매일 전체 스냅샷을 그날 파티션으로 적재.
     # priority_weight를 높여 슬롯이 나면 먼저 잡게 한다 - 마스터 데이터라 최신인 편이
     # 낫고, 유일하게 소급이 불가능한 원천이라 하루 안에 반드시 성공해야 한다.
-    BashOperator(
+    fetch_station_master_raw = LambdaInvokeFunctionOperator(
+        task_id="fetch_station_master_raw",
+        function_name=FETCH_STATION_MASTER_RAW_LAMBDA,
+        invocation_type="RequestResponse",
+        execution_timeout=timedelta(minutes=5),
+        priority_weight=10,
+    )
+    daily_batch_station_master = BashOperator(
         task_id="daily_batch_station_master",
         bash_command=bash_job("daily_batch_station_master"),
         execution_timeout=timedelta(minutes=30),
@@ -143,6 +169,7 @@ def bronze_daily_batch_all_sources():
         pool=BRONZE_POOL,
         priority_weight=10,
     )
+    fetch_station_master_raw >> daily_batch_station_master
 
     # 대여이력: 하루치가 시간 단위 24회 호출 + 페이징이라 가장 오래 걸린다.
     # 이 원천만 예비 관측본 fallback이 필요해 단계별 태스크로 쪼갠다 (위 doc 참고).
@@ -271,13 +298,20 @@ def bronze_daily_batch_all_sources():
 
     # 실시간 대여정보: 워터마크 없음, station_master와 동일하게 매일 전체 스냅샷을
     # 그날 파티션으로 적재. gold.fact_station_inventory가 이 데이터를 필요로 한다.
-    BashOperator(
+    fetch_station_active_raw = LambdaInvokeFunctionOperator(
+        task_id="fetch_station_active_raw",
+        function_name=FETCH_STATION_ACTIVE_RAW_LAMBDA,
+        invocation_type="RequestResponse",
+        execution_timeout=timedelta(minutes=5),
+    )
+    daily_batch_station_active = BashOperator(
         task_id="daily_batch_station_active",
         bash_command=bash_job("daily_batch_station_active"),
         execution_timeout=timedelta(minutes=30),
         outlets=[STATION_ACTIVE_BRONZE],
         pool=BRONZE_POOL,
     )
+    fetch_station_active_raw >> daily_batch_station_active
 
     # 태스크 간 의존성을 의도적으로 두지 않는다 (위 doc 참고).
     # 순서 선호는 station_master의 priority_weight로만 표현한다.
