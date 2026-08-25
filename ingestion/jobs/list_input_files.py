@@ -21,6 +21,14 @@ Dynamic Task Mapping에서 파일 1개로 잡혀서, 그 프로세스 하나가 
 set_watermark.py와 동일하게 DATASET 환경변수로 대상을 분기한다 - 잡 하나로 두
 소스(rental_history/failure_report)를 모두 지원한다.
 
+### S3 업로드는 여기서 하지 않는다 (#255)
+이 잡은 항상 로컬 파일 경로만 반환한다 - AWS에서도 S3 업로드를 하지 않는다. 예전에는
+여기서 다운로드 직후 곧바로 S3에 순차 업로드까지 했는데, 빈 S3에 ~40~47GB/114개 파일을
+전부 올려야 하는 초기 상황에서는 이 태스크 하나가 몇 시간짜리가 되고, 재시도하면 이미
+올린 파일까지 처음부터 다시 순회해야 했다. 업로드는 jobs/stage_initial_load_files.py가
+배치 단위 Dynamic Task Mapping으로 별도로 맡는다(bronze_initial_load_all_sources_dag.py
+참고) - 다운로드/압축 해제 캐싱(ensure_backfill_files, 위 문단)은 그대로 이 잡에 남는다.
+
 사용법:
     DATASET=rental_history INPUT_DIR=./raw_downloads INPUT_FILE_PATTERN="*" python -m jobs.list_input_files
     DATASET=failure_report INPUT_DIR=./raw_downloads INPUT_FILE_PATTERN="*2601*" python -m jobs.list_input_files
@@ -28,14 +36,12 @@ set_watermark.py와 동일하게 DATASET 환경변수로 대상을 분기한다 
 import json
 import logging
 import os
-import re
 import sys
 from pathlib import Path
 
 import config
 from common.file_downloader import ensure_backfill_files
 from common.file_utils import expand_archives
-from common.s3_utils import ensure_bucket, upload_file_if_changed
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -61,27 +67,6 @@ def run(dataset: str, input_dir: str, file_pattern: str) -> list[str]:
     if not input_files:
         logger.error("입력 디렉토리에 파일이 없습니다: %s (패턴: %s)", input_dir, file_pattern)
         sys.exit(1)
-
-    if config.SETTINGS.env == "aws":
-        ensure_bucket(config.SETTINGS.raw_bucket)
-        uris = []
-        for path in input_files:
-            # 원본 파일명(한글/공백 포함 가능 - 서울 열린데이터광장 반기 파일 등)을 그대로
-            # 쓰면, 이 URI가 나중에 EMR Serverless의 sparkSubmitParameters(--conf
-            # ...INPUT_FILE=<uri>)로 전달될 때 문제가 된다. dag_common.py가 shlex.quote()로
-            # 감싸지만, EMR Serverless의 파서는 셸이 아니라서 그 따옴표 규칙을 지키지 않고
-            # 공백에서 토큰을 잘라먹는다(실측: 2026-08-24, "서울시 공공자전거 고장신고
-            # 내역_2015_2020.10.xlsx" 파일에서 INPUT_FILE이 드라이버에 전달되지 않음).
-            # 스테이징 업로드 시점에 ASCII로 안전한 이름으로 바꿔서 이 문제 자체를 없앤다 -
-            # 파일 내용은 이름과 무관하므로 안전하다.
-            # deterministic key(파일명 기반) + upload_file_if_changed로 멱등하게 만든다 -
-            # 재실행 시 스테이징에 같은 내용의 파일이 이미 있으면 재업로드하지 않고 그대로
-            # 재사용하고, 로컬 원본이 바뀐 경우(재다운로드로 갱신된 경우)에만 덮어쓴다.
-            safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", path.name)
-            key = f"raw/{dataset}/_initial_load_staging/{safe_name}"
-            upload_file_if_changed(path, config.SETTINGS.raw_bucket, key)
-            uris.append(f"s3://{config.SETTINGS.raw_bucket}/{key}")
-        return uris
 
     return [str(p) for p in input_files]
 

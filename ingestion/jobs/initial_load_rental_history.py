@@ -28,9 +28,18 @@ chunk_list, #249) Dynamic Task Mapping으로 배치마다 이 스크립트를 �
             멱등이라 결과는 같고, 시간만 더 든다(배치 크기를 작게 잡을수록 이
             비용이 줄어든다 - dag_common.chunk_list 문서 참고).
 
+전달 방식(entryPointArguments 우선, INPUT_FILES 환경변수는 하위호환용, #255):
+EMR Serverless의 sparkSubmitParameters(--conf ...ENV=값)는 자체 파서를 쓰는데, 셸이
+아니라서 공백/특수문자에서 토큰을 잘라먹는다(#218에서 실측 확인). entryPointArguments는
+JSON 리스트를 그대로 각 토큰으로 드라이버에 전달하므로 이 파싱 문제 자체가 없다 - DAG는
+이제 이 잡을 entryPointArguments(--input-files-json)로 부른다. INPUT_FILES 환경변수는
+로컬 BashOperator(파일당 프로세스) 등 기존 호출부가 그대로 동작하도록 fallback으로 남긴다.
+
 사용법:
+    python -m jobs.initial_load_rental_history --input-files-json '["./raw_downloads/2601.csv"]'
     INPUT_FILES='["./raw_downloads/2601.csv"]' python -m jobs.initial_load_rental_history
 """
+import argparse
 import json
 import logging
 import os
@@ -249,11 +258,23 @@ def run(input_files: list[str]) -> None:
         sys.exit(1)
 
 
-if __name__ == "__main__":
-    raw_input_files = os.getenv("INPUT_FILES")
+def _resolve_input_files(argv: list[str] | None = None) -> list[str]:
+    """entryPointArguments(--input-files-json)를 우선하고, 없으면 INPUT_FILES 환경변수로
+    내려간다(#255) - 로컬 BashOperator 등 기존 호출부와의 하위호환용."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input-files-json", default=None)
+    args = parser.parse_args(argv)
+
+    raw_input_files = args.input_files_json or os.getenv("INPUT_FILES")
     if not raw_input_files:
         logger.error(
-            "사용법: INPUT_FILES='[\"./raw_downloads/2601.csv\"]' python -m jobs.initial_load_rental_history"
+            "사용법: python -m jobs.initial_load_rental_history "
+            "--input-files-json '[\"./raw_downloads/2601.csv\"]' "
+            "(또는 INPUT_FILES='[\"./raw_downloads/2601.csv\"]')"
         )
         sys.exit(1)
-    run(json.loads(raw_input_files))
+    return json.loads(raw_input_files)
+
+
+if __name__ == "__main__":
+    run(_resolve_input_files())

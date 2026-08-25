@@ -88,6 +88,33 @@ EMR JobRun을 제출하는 배치 태스크는 BRONZE_POOL이 아니라 EMR_INIT
 (dag_common.py 참고) - 워커 로컬 메모리가 아니라 EMR pre-initialized capacity가 진짜
 제약이기 때문이다.
 
+### AWS 초기 적재 S3 스테이징: 다운로드/압축해제와 업로드를 분리 (#255)
+list_*_files 태스크는 다운로드(캐시 포함)+압축 해제까지만 하고 로컬 파일 경로를
+반환한다. S3 업로드는 stage_*_files_batch가 별도로 맡는다 - 완전히 빈 S3에서
+~40~47GB/114개 파일을 전부 올려야 하는 상황을 list_*_files 태스크 하나가 몇 시간
+동안 순차로 떠안으면, 재시도할 때마다 이미 올라간 파일까지 처음부터 다시 순회해야
+한다. 대신 로컬 파일 목록을 배치로 잘라(chunk_*_staging_files, *_staging_batch_size
+파라미터) 배치 단위로 Dynamic Task Mapping을 편다 - "파일 하나 = 태스크 하나"는
+만들지 않으면서도, 배치 하나가 실패해도 그 배치만 재시도된다. 이 배치 태스크는
+BRONZE_POOL/EMR_INITIAL_LOAD_POOL이 아니라 S3_STAGING_POOL을 쓴다(dag_common.py
+참고) - 워커(EC2 t4g.large, 2vCPU/8GB) 프로세스 안에서 boto3로 직접 로컬 MD5 계산과
+PutObject/CopyObject를 수행하는 태스크라, 다른 두 풀이 보호하는 자원(PyArrow 힙,
+EMR pre-initialized capacity)과는 다른 자원(워커 CPU/네트워크)을 보호해야 한다.
+
+업로드 자체의 멱등성/재사용(예전 한글/공백 key를 서버사이드 CopyObject로 재사용하는
+것 포함)은 jobs/stage_initial_load_files.py와 common/s3_utils.reuse_or_upload_staging_file
+문서를 참고한다.
+
+### EMR Serverless로의 INPUT_FILES 전달: entryPointArguments 우선 (#255)
+기존에는 파일 목록을 extra_env={"INPUT_FILES": ...}로 넘겨 EMR Serverless의
+sparkSubmitParameters(--conf ...driverEnv.INPUT_FILES=값)에 실었다. 이 파서는 셸이
+아니라서 공백에서 토큰을 잘라먹는다(#218 실측) - 스테이징 파일명을 ASCII로 안전하게
+바꿔서 회피했지만(#247, #255), 전달 경로 자체의 근본 문제는 남아 있었다. 이제
+entryPointArguments(--input-files-json)로 JSON 배열을 그대로 한 토큰으로 드라이버에
+전달한다 - 파서가 값 안의 공백/특수문자를 건드릴 일이 없다. INPUT_FILES 환경변수는
+initial_load_rental_history.py/initial_load_failure_report.py에 하위호환 fallback으로
+남아 있다(로컬 BashOperator 등 entryPointArguments를 쓰지 않는 호출부용).
+
 ### 실행 방법
 Airflow UI에서 "Trigger DAG w/ config"로 각 소스의 input_dir / 파일 패턴을 조정할 수 있다.
 예) 로컬 검증 시 대여이력만 1개월치: rental_history_pattern = "*2601*"
@@ -103,6 +130,7 @@ from dag_common import (
     BRONZE_POOL,
     EMR_INITIAL_LOAD_POOL,
     INGESTION_DIR,
+    S3_STAGING_POOL,
     SILVER_POOL,
     bash_job,
     bash_staging_job,
@@ -143,11 +171,17 @@ default_args = {
         # 배치 하나 = EMR JobRun 하나 (#249). 대여이력은 반기 파일이 최대 700MB급이라
         # 배치를 작게 잡아 배치 실패 시 재시도 비용(이미 성공한 파일 재처리)을 낮춘다.
         "rental_history_emr_batch_size": "3",
+        # S3 스테이징 업로드 배치 크기 (#255) - 대여이력은 연 12개 파일이므로
+        # 반기 단위(6개)로 묶는다. S3_STAGING_POOL 슬롯 수(2)에 맞춰 배치
+        # 하나(파일 최대 700MB급 x 이 값)가 워커 메모리/네트워크를 과도하게 잡지 않게 한다.
+        "rental_history_staging_batch_size": "6",
         "failure_report_dir": f"{INGESTION_DIR}/data/failure_report",
         "failure_report_pattern": "*",
         "failure_report_watermark_date": "2026-06-30",
         # 고장신고는 파일이 작아서 배치를 더 크게 잡아 JobRun 수를 더 줄인다.
         "failure_report_emr_batch_size": "6",
+        # 고장신고는 파일이 작아서 스테이징 배치도 더 크게 잡는다.
+        "failure_report_staging_batch_size": "10",
         # transform_silver_rental_history.py(다른 DAG인 silver_rental_history_dag.py와
         # 공유하는 잡)는 손대지 않는다 - 대신 이 DAG의 load_silver_rental_history 태스크가
         # 그 잡을 여러 번 순차 호출해서 몇 년치를 나눠 처리한다. 청크 크기(chunk_days)는
@@ -191,6 +225,41 @@ def bronze_initial_load_all_sources():
     rental_history_files = parse_rental_history_files(list_rental_history_files.output)
 
     if is_aws_env():
+        # S3 업로드는 list_rental_history_files가 아니라 여기서 배치 단위로 한다(#255) -
+        # "AWS 초기 적재 S3 스테이징" 문단 참고. rental_history_files는 이 시점에는 아직
+        # 로컬 파일 경로 목록이다.
+        @task(task_id="chunk_rental_history_staging_files")
+        def chunk_rental_history_staging_files(files: list[str], batch_size: str) -> list[list[str]]:
+            return chunk_list(files, int(batch_size))
+
+        rental_history_staging_batches = chunk_rental_history_staging_files(
+            rental_history_files, "{{ params.rental_history_staging_batch_size }}"
+        )
+
+        stage_rental_history_files_batch = BashOperator.partial(
+            task_id="stage_rental_history_files_batch",
+            # 스테이징 배치 기본 크기(5) x 파일 1개당 넉넉한 상한(700MB급 파일 감안).
+            execution_timeout=timedelta(hours=2),
+            pool=S3_STAGING_POOL,
+            do_xcom_push=True,
+        ).expand(
+            bash_command=rental_history_staging_batches.map(
+                lambda batch: bash_job(
+                    "stage_initial_load_files",
+                    f"DATASET=rental_history INPUT_FILES='{json.dumps(batch)}' ",
+                )
+            )
+        )
+
+        @task(task_id="parse_rental_history_staging_uris")
+        def parse_rental_history_staging_uris(raw_json_per_batch: list[str]) -> list[str]:
+            """배치별 XCom(JSON 배열 문자열)을 평평하게 이어붙여 하나의 S3 URI 목록으로 만든다."""
+            return [uri for raw_json in raw_json_per_batch for uri in json.loads(raw_json)]
+
+        rental_history_staged_uris = parse_rental_history_staging_uris(
+            stage_rental_history_files_batch.output
+        )
+
         # 파일 목록을 배치로 미리 잘라서(dag_common.chunk_list, #249) 배치 단위로
         # Dynamic Task Mapping을 편다 - 배치 하나 = EMR JobRun 하나. 이렇게 해야 파일이
         # 수십 개여도 EMR JobRun 시작 오버헤드가 배치 수만큼만 발생한다("EMR Serverless
@@ -200,7 +269,7 @@ def bronze_initial_load_all_sources():
             return chunk_list(files, int(batch_size))
 
         rental_history_file_batches = chunk_rental_history_files(
-            rental_history_files, "{{ params.rental_history_emr_batch_size }}"
+            rental_history_staged_uris, "{{ params.rental_history_emr_batch_size }}"
         )
 
         @task(
@@ -214,7 +283,11 @@ def bronze_initial_load_all_sources():
             return run_emr_serverless_spark_job(
                 entry_point="local:///opt/app/ingestion/jobs/initial_load_rental_history.py",
                 name="bronze-initial-load-rental-history",
-                extra_env={"INPUT_FILES": json.dumps(input_files)},
+                # entryPointArguments가 1차 전달 경로다(#255) - sparkSubmitParameters의
+                # 자체 파서가 공백에서 토큰을 잘라먹는 문제를 피한다("EMR Serverless로의
+                # INPUT_FILES 전달" 문단 참고). INPUT_FILES 환경변수는 잡 쪽에 하위호환
+                # fallback으로만 남아 있다.
+                entry_point_arguments=["--input-files-json", json.dumps(input_files)],
                 log_group_name="/emr-serverless/bronze-initial-load",
                 log_stream_name_prefix="rental-history",
                 tags={
@@ -263,6 +336,38 @@ def bronze_initial_load_all_sources():
     failure_report_files = parse_failure_report_files(list_failure_report_files.output)
 
     if is_aws_env():
+        # S3 업로드는 list_failure_report_files가 아니라 여기서 배치 단위로 한다(#255) -
+        # rental_history와 동일한 스테이징 구조("AWS 초기 적재 S3 스테이징" 문단 참고).
+        @task(task_id="chunk_failure_report_staging_files")
+        def chunk_failure_report_staging_files(files: list[str], batch_size: str) -> list[list[str]]:
+            return chunk_list(files, int(batch_size))
+
+        failure_report_staging_batches = chunk_failure_report_staging_files(
+            failure_report_files, "{{ params.failure_report_staging_batch_size }}"
+        )
+
+        stage_failure_report_files_batch = BashOperator.partial(
+            task_id="stage_failure_report_files_batch",
+            execution_timeout=timedelta(hours=1),
+            pool=S3_STAGING_POOL,
+            do_xcom_push=True,
+        ).expand(
+            bash_command=failure_report_staging_batches.map(
+                lambda batch: bash_job(
+                    "stage_initial_load_files",
+                    f"DATASET=failure_report INPUT_FILES='{json.dumps(batch)}' ",
+                )
+            )
+        )
+
+        @task(task_id="parse_failure_report_staging_uris")
+        def parse_failure_report_staging_uris(raw_json_per_batch: list[str]) -> list[str]:
+            return [uri for raw_json in raw_json_per_batch for uri in json.loads(raw_json)]
+
+        failure_report_staged_uris = parse_failure_report_staging_uris(
+            stage_failure_report_files_batch.output
+        )
+
         # rental_history와 동일한 배치 구조(#249) - 고장신고는 파일이 작아 배치를
         # 더 크게 잡는다(failure_report_emr_batch_size 기본값 참고).
         @task(task_id="chunk_failure_report_files")
@@ -270,7 +375,7 @@ def bronze_initial_load_all_sources():
             return chunk_list(files, int(batch_size))
 
         failure_report_file_batches = chunk_failure_report_files(
-            failure_report_files, "{{ params.failure_report_emr_batch_size }}"
+            failure_report_staged_uris, "{{ params.failure_report_emr_batch_size }}"
         )
 
         @task(
@@ -283,7 +388,9 @@ def bronze_initial_load_all_sources():
             return run_emr_serverless_spark_job(
                 entry_point="local:///opt/app/ingestion/jobs/initial_load_failure_report.py",
                 name="bronze-initial-load-failure-report",
-                extra_env={"INPUT_FILES": json.dumps(input_files)},
+                # entryPointArguments가 1차 전달 경로다(#255) - rental_history와 동일한
+                # 이유("EMR Serverless로의 INPUT_FILES 전달" 문단 참고).
+                entry_point_arguments=["--input-files-json", json.dumps(input_files)],
                 log_group_name="/emr-serverless/bronze-initial-load",
                 log_stream_name_prefix="failure-report",
                 tags={

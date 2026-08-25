@@ -137,6 +137,78 @@ def test_upload_file_if_changed_reuploads_when_content_differs(s3_env, tmp_path)
     assert body == b"changed-content"
 
 
+def test_copy_object_duplicates_content_server_side(s3_env):
+    from common import s3_utils
+
+    s3_utils.ensure_bucket(BUCKET)
+    s3_utils.get_s3_client().put_object(Bucket=BUCKET, Key="a.csv", Body=b"hello")
+
+    s3_utils.copy_object(BUCKET, "a.csv", "b.csv")
+
+    body = s3_utils.get_s3_client().get_object(Bucket=BUCKET, Key="b.csv")["Body"].read()
+    assert body == b"hello"
+
+
+def test_reuse_or_upload_staging_file_copies_legacy_key_without_local_upload(
+    s3_env, tmp_path, monkeypatch
+):
+    """신규(deterministic) key가 없고 legacy key가 있으면 서버사이드 CopyObject로
+    재사용해야 한다 - 로컬 업로드(PutObject)는 호출되면 안 된다 (#255)."""
+    from common import s3_utils
+
+    s3_utils.ensure_bucket(BUCKET)
+    s3_utils.get_s3_client().put_object(Bucket=BUCKET, Key="legacy/한글 파일.csv", Body=b"legacy-body")
+
+    local = tmp_path / "a.csv"
+    local.write_bytes(b"legacy-body")
+
+    real_client = s3_utils.get_s3_client()
+    monkeypatch.setattr(
+        real_client,
+        "upload_file",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("legacy 재사용 시 업로드하면 안 된다")),
+    )
+    monkeypatch.setattr(s3_utils, "get_s3_client", lambda: real_client)
+
+    reused = s3_utils.reuse_or_upload_staging_file(local, BUCKET, "new/a.csv", "legacy/한글 파일.csv")
+
+    assert reused is True
+    body = s3_utils.get_s3_client().get_object(Bucket=BUCKET, Key="new/a.csv")["Body"].read()
+    assert body == b"legacy-body"
+
+
+def test_reuse_or_upload_staging_file_uploads_when_neither_key_exists(s3_env, tmp_path):
+    from common import s3_utils
+
+    s3_utils.ensure_bucket(BUCKET)
+    local = tmp_path / "a.csv"
+    local.write_bytes(b"fresh-body")
+
+    reused = s3_utils.reuse_or_upload_staging_file(local, BUCKET, "new/a.csv", "legacy/missing.csv")
+
+    assert reused is True
+    body = s3_utils.get_s3_client().get_object(Bucket=BUCKET, Key="new/a.csv")["Body"].read()
+    assert body == b"fresh-body"
+
+
+def test_reuse_or_upload_staging_file_defers_to_drift_check_when_new_key_exists(s3_env, tmp_path):
+    """신규 key가 이미 있으면(legacy 여부와 무관하게) upload_file_if_changed의 기존
+    멱등/드리프트 감지 로직을 그대로 따른다 - legacy를 다시 확인하지 않는다."""
+    from common import s3_utils
+
+    s3_utils.ensure_bucket(BUCKET)
+    local = tmp_path / "a.csv"
+    local.write_bytes(b"v1")
+    s3_utils.upload_file_if_changed(local, BUCKET, "new/a.csv")
+
+    local.write_bytes(b"v2")
+    reused = s3_utils.reuse_or_upload_staging_file(local, BUCKET, "new/a.csv", "legacy/missing.csv")
+
+    assert reused is True
+    body = s3_utils.get_s3_client().get_object(Bucket=BUCKET, Key="new/a.csv")["Body"].read()
+    assert body == b"v2"
+
+
 def test_list_keys_returns_only_matching_prefix_in_sorted_order(s3_env):
     from common import s3_utils
 

@@ -189,7 +189,7 @@ services:
     command:
       - bash
       - -c
-      - airflow version && airflow pools set emr_initial_load 3 'EMR Serverless 초기 적재 배치 동시 제출 제한 (pre-initialized executor 3개)'
+      - airflow version && airflow pools set emr_initial_load 3 'EMR Serverless 초기 적재 배치 동시 제출 제한 (pre-initialized executor 3개)' && airflow pools set s3_initial_load_staging 2 '초기 적재 S3 스테이징 업로드 동시 실행 제한 (EC2 t4g.large 워커 자원 보호, #255)'
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'

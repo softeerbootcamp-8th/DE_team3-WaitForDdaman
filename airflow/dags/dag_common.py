@@ -60,6 +60,14 @@ BRONZE_POOL = "bronze_ingest"
 # on-demand로 최대 400vCPU까지 자동 확장하므로 슬롯을 넘는 배치는 대기했다가 순서대로 돈다.
 EMR_INITIAL_LOAD_POOL = "emr_initial_load"
 
+# 초기 적재 S3 스테이징 업로드 전용 풀 (#255). BRONZE_POOL/EMR_INITIAL_LOAD_POOL과 분리하는
+# 이유: 이 태스크는 Airflow 워커(EC2 t4g.large, 2vCPU/8GB) 프로세스 안에서 boto3로 직접
+# 로컬 MD5 계산 + PutObject/CopyObject를 수행한다 - EMR 제출 태스크(가벼운 polling)와도,
+# PyArrow 연산(BRONZE_POOL)과도 자원 성격이 다르다. 슬롯을 낮게 잡아, 완전히 빈 S3에
+# ~40~47GB/114개 파일을 한 번에 올려야 하는 최초 적재 시나리오에서도 여러 배치가 동시에
+# MD5 해시+업로드를 돌려 워커 CPU/메모리/네트워크를 잠식하지 않게 한다.
+S3_STAGING_POOL = "s3_initial_load_staging"
+
 # 서울시 Open API 키별 동시성을 제어하는 전역 풀. rental_history는 키 1~3,
 # failure_report는 키 4를 사용하므로 최대 4개 날짜 Task만 동시에 API를 호출한다.
 SEOUL_API_POOL = "seoul_api"
