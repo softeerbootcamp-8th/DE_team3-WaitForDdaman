@@ -1,0 +1,108 @@
+name: Fix bikeman_writer DB role (one-off)
+
+# 배경: bikeman_event_generator Lambda(#186)가 domain-db-v2에 bikeman_writer로
+# 접속할 때 "password authentication failed"가 계속 나서(2026-08-25 실측),
+# Terraform env var(BIKEMAN_WRITER_DB_PASSWORD=cutehamzzi)와 실제 RDS role
+# 비밀번호가 어긋나 있거나 role 자체가 없는 것으로 추정된다.
+#
+# 이 계정(edu/juri-lee54)은 조직 SCP가 EC2 SG/RDS Describe·변경을 전부 막고
+# 있어 로컬에서는 domain-db-v2에 접근할 방법이 없다. cd.yml의 배포 role
+# (waitforddaman-gha-role)은 이미 프로덕션 EC2 보안그룹의 SSH 인바운드를
+# 매 배포마다 여닫고 있어 이 SCP 대상이 아니므로, 동일한 open -> 작업 ->
+# close 패턴으로 RDS 접근을 임시로 열어 bikeman_writer를 정정한다.
+#
+# 일회성 runbook 성격의 workflow라 수동 트리거(workflow_dispatch)만 가능하다.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-northeast-2
+  RDS_SECURITY_GROUP_ID: sg-06f558c8cb56616c3
+  DOMAIN_DB_HOST: domain-db-v2.cfcteckvwznt.ap-northeast-2.rds.amazonaws.com
+  DOMAIN_DB_NAME: waitforddaman
+
+jobs:
+  fix-bikeman-writer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get runner public IP
+        id: runner-ip
+        run: echo "ip=$(curl -sf --retry 3 https://checkip.amazonaws.com | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      # cd.yml의 SSH open 스텝과 동일한 패턴 - 이 실행의 러너 IP만 5432로 연다.
+      - name: Open domain-db access for this runner
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id "$RDS_SECURITY_GROUP_ID" \
+            --protocol tcp --port 5432 \
+            --cidr ${{ steps.runner-ip.outputs.ip }}/32
+
+      - name: Install postgresql client
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends postgresql-client
+
+      # bikeman_writer가 없으면 생성, 있으면 비밀번호만 Terraform 값(cutehamzzi)에
+      # 맞춰 재설정한다. 스키마/테이블/grant는 sql/bike_man/bikeman_seed_init.sql의
+      # 관련 부분과 동일 - 전부 IF NOT EXISTS라 이미 존재해도 안전(no-op)하다.
+      - name: Ensure bikeman_writer role, schema, grants
+        env:
+          PGPASSWORD: ${{ secrets.DOMAIN_DB_MASTER_PASSWORD }}
+        run: |
+          psql "host=$DOMAIN_DB_HOST port=5432 dbname=$DOMAIN_DB_NAME user=${{ secrets.DOMAIN_DB_MASTER_USER }} sslmode=require" <<SQL
+          DO \$\$
+          BEGIN
+              IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'bikeman_writer') THEN
+                  CREATE ROLE bikeman_writer LOGIN PASSWORD '${{ secrets.BIKEMAN_WRITER_DB_PASSWORD }}';
+              ELSE
+                  ALTER ROLE bikeman_writer WITH PASSWORD '${{ secrets.BIKEMAN_WRITER_DB_PASSWORD }}';
+              END IF;
+          END
+          \$\$;
+
+          CREATE SCHEMA IF NOT EXISTS bikeman;
+          GRANT USAGE ON SCHEMA bikeman TO bikeman_writer;
+
+          CREATE TABLE IF NOT EXISTS bikeman.fact_worker_event (
+              event_id      UUID PRIMARY KEY,
+              event_type    VARCHAR(10) NOT NULL CHECK (event_type IN ('COLLECT', 'DEPLOY')),
+              bike_id       VARCHAR(20) NOT NULL,
+              station_id    VARCHAR(20),
+              worker_id     VARCHAR(20) NOT NULL,
+              occurred_at   TIMESTAMP NOT NULL,
+              received_at   TIMESTAMP NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_fact_worker_event_received_at ON bikeman.fact_worker_event (received_at);
+          CREATE INDEX IF NOT EXISTS idx_fact_worker_event_bike_id ON bikeman.fact_worker_event (bike_id);
+          GRANT SELECT, INSERT ON bikeman.fact_worker_event TO bikeman_writer;
+
+          -- generate_collect_events.py가 risk_score 상위 500대를 뽑을 때 읽는다.
+          GRANT USAGE ON SCHEMA serving TO bikeman_writer;
+          GRANT SELECT ON serving.bike_risk_daily TO bikeman_writer;
+          SQL
+
+      - name: Verify bikeman_writer can connect
+        env:
+          PGPASSWORD: ${{ secrets.BIKEMAN_WRITER_DB_PASSWORD }}
+        run: |
+          psql "host=$DOMAIN_DB_HOST port=5432 dbname=$DOMAIN_DB_NAME user=bikeman_writer sslmode=require" \
+            -c "SELECT current_user;" \
+            -c "SELECT count(*) AS existing_events FROM bikeman.fact_worker_event;"
+
+      # if: always() - 검증이 실패해도 방금 연 규칙은 반드시 회수한다 (cd.yml과 동일 이유).
+      - name: Close domain-db access for this runner
+        if: always() && steps.runner-ip.outputs.ip != ''
+        run: |
+          aws ec2 revoke-security-group-ingress \
+            --group-id "$RDS_SECURITY_GROUP_ID" \
+            --protocol tcp --port 5432 \
+            --cidr ${{ steps.runner-ip.outputs.ip }}/32
