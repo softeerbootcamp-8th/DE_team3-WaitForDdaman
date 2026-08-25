@@ -171,28 +171,32 @@ def _ensure_gold_table(catalog):
         return catalog.create_table(GOLD_TABLE, schema=GOLD_SCHEMA)
 
 
-def _baseline(catalog) -> pa.Table:
-    """직전 상태 전체 (테이블이 비어있으면 빈 Table - cold start도 안전)."""
-    full = catalog.load_table(GOLD_TABLE).scan(
-        selected_fields=("bike_id", "last_station_id", "last_event_at")
+def _load_gold_baseline_snapshot(catalog) -> pa.Table:
+    """baseline 계산과 MAX(snapshot_date) 조회에 필요한 컬럼을 gold.bike_location에서
+    한 번만 스캔한다 (테이블이 비어있으면 빈 Table - cold start도 안전)."""
+    return catalog.load_table(GOLD_TABLE).scan(
+        selected_fields=("bike_id", "last_station_id", "last_event_at", "snapshot_date")
     ).to_arrow()
+
+
+def _baseline(gold_snapshot: pa.Table) -> pa.Table:
+    """직전 상태 전체 (테이블이 비어있으면 빈 Table - cold start도 안전)."""
     con = duckdb.connect(":memory:")
-    con.register("t", full)
+    con.register("t", gold_snapshot)
     return query_arrow(
         con,
         "SELECT bike_id, last_station_id AS base_station_id, last_event_at AS base_event_at FROM t",
     )
 
 
-def _baseline_snapshot_date(catalog) -> date | None:
+def _baseline_snapshot_date(gold_snapshot: pa.Table) -> date | None:
     """gold.bike_location에 남아있는 MAX(snapshot_date) - 그 값보다 이전
     rent_date_partition은 이미 baseline에 반영되어 있다는 뜻이므로, 이번 실행의
     델타 시작일로 그대로 쓸 수 있다. 테이블이 비어있으면(cold start) None."""
-    full = catalog.load_table(GOLD_TABLE).scan(selected_fields=("snapshot_date",)).to_arrow()
-    if len(full) == 0:
+    if len(gold_snapshot) == 0:
         return None
     con = duckdb.connect(":memory:")
-    con.register("t", full)
+    con.register("t", gold_snapshot)
     row = con.execute("SELECT MAX(snapshot_date) FROM t").fetchone()
     return row[0]
 
@@ -224,8 +228,9 @@ def _read_silver_delta(catalog, start_date: date | None, end_date: date) -> pa.T
 
 
 def build_bike_location(catalog, snapshot_date: date) -> pa.Table:
-    baseline = _baseline(catalog)
-    delta_start = _baseline_snapshot_date(catalog)
+    gold_snapshot = _load_gold_baseline_snapshot(catalog)
+    baseline = _baseline(gold_snapshot)
+    delta_start = _baseline_snapshot_date(gold_snapshot)
     delta_end = snapshot_date - timedelta(days=1)
     silver_delta = _read_silver_delta(catalog, delta_start, delta_end)
     delta = _delta(silver_delta)

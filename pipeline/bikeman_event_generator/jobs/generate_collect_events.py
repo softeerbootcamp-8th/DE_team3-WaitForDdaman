@@ -21,24 +21,12 @@ import logging
 import os
 import random
 
-import psycopg2
-
 import bikeman_db
 import event_builder
+from bikeman_connection import connect as _connect
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
-
-
-def _connect():
-    return psycopg2.connect(
-        host=os.environ["BIKEMAN_WRITER_DB_HOST"],
-        port=os.environ.get("BIKEMAN_WRITER_DB_PORT", "5432"),
-        dbname=os.environ["BIKEMAN_WRITER_DB_NAME"],
-        user=os.environ["BIKEMAN_WRITER_DB_USER"],
-        password=os.environ["BIKEMAN_WRITER_DB_PASSWORD"],
-        connect_timeout=10,
-    )
 
 
 def run(target_date: str) -> int:
