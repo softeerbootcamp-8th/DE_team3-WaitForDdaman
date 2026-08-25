@@ -9,6 +9,7 @@ import functools
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -43,9 +44,20 @@ def get_s3_client():
     #       테스트에서 config.SETTINGS를 교체해 환경을 바꿔 검증할 수 있게 하기 위함. 캐시 키가
     #       그 값들 자체라서, 설정이 바뀌면 새 클라이언트를 만들고 안 바뀌면 재사용한다.
     settings = config.SETTINGS
-    if settings.env == "local":
+    # AWS 분기 흐름을 LocalStack으로 검증할 때만 켠다. 운영 APP_ENV=aws에서는
+    # 기본적으로 이 값이 꺼져 있으므로 IAM Role을 사용하는 기존 동작을 유지한다.
+    aws_local_simulation = os.getenv("AWS_LOCAL_SIMULATION", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if settings.env == "local" or aws_local_simulation:
         return _build_s3_client(
-            settings.env, settings.s3_endpoint, settings.s3_region, settings.s3_access_key, settings.s3_secret_key
+            "local",
+            settings.s3_endpoint,
+            settings.s3_region,
+            settings.s3_access_key,
+            settings.s3_secret_key,
         )
     return _build_s3_client(settings.env, None, settings.s3_region, None, None)
 
@@ -129,6 +141,39 @@ def upload_file_if_changed(local_path: Path, bucket: str, key: str) -> bool:
     s3.upload_file(str(local_path), bucket, key, ExtraArgs={"Metadata": {"content-md5": local_md5}})
     logger.info("업로드 완료(멱등 갱신): %s -> s3://%s/%s", local_path, bucket, key)
     return True
+
+
+def copy_object(bucket: str, source_key: str, dest_key: str) -> None:
+    """서버사이드 CopyObject. 데이터가 S3 내부에서만 이동해 EC2로 내려받거나 다시 올리지 않는다."""
+    s3 = get_s3_client()
+    s3.copy_object(Bucket=bucket, CopySource={"Bucket": bucket, "Key": source_key}, Key=dest_key)
+    logger.info("서버사이드 복사 완료: s3://%s/%s -> s3://%s/%s", bucket, source_key, bucket, dest_key)
+
+
+def reuse_or_upload_staging_file(local_path: Path, bucket: str, key: str, legacy_key: str) -> bool:
+    """
+    초기 적재 스테이징 업로드 - deterministic key(#247)에 아직 아무 것도 없으면, 로컬
+    MD5 계산이나 재업로드보다 먼저 legacy key(한글/공백 원본 파일명을 그대로 쓰던 #218
+    이전 방식)가 이미 S3에 있는지 확인한다. 있으면 서버사이드 CopyObject로 그 내용을
+    그대로 재사용한다(#255) - #247에서 ASCII 안전 key로 넘어가면서, 예전에 이미 다
+    올려둔 반기 파일(최대 700MB급)들이 새 key 기준으로는 "없는 파일"처럼 보여 처음부터
+    다시 내려받고/해시하고/올리게 되는 낭비를 막는다.
+
+    legacy 재사용이 없는 일반 경우(신규 key도 legacy key도 없거나, 신규 key가 이미
+    있어 변경 여부를 확인해야 하는 경우)는 그대로 upload_file_if_changed의 기존 멱등
+    로직(로컬 MD5로 변경 여부 판단)을 따른다.
+
+    NOTE: legacy에서 복사된 객체는 content-md5 메타데이터가 없다 - 바로 다음 재시도에서
+    upload_file_if_changed가 로컬 MD5를 다시 계산해 1회 더 덮어쓸 수 있다. 이 1회성
+    재확인 비용은 원래 문제(재다운로드+재해시+재업로드가 매 실행마다 반복되던 것)에
+    비하면 훨씬 작아 감내할 만하다.
+    """
+    if head_object(bucket, key) is None:
+        legacy = head_object(bucket, legacy_key)
+        if legacy is not None:
+            copy_object(bucket, legacy_key, key)
+            return True
+    return upload_file_if_changed(local_path, bucket, key)
 
 
 def to_spark_readable_path(local_path: Path, bucket: str, staging_prefix: str) -> str:
