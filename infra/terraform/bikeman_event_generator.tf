@@ -78,21 +78,6 @@ resource "aws_security_group_rule" "rds_allow_bikeman_event_generator_lambda" {
   description              = "Allow RDS access from bikeman_event_generator Lambda (#186)"
 }
 
-# domain-db(bikeman_writer 등)에 Lambda 말고는 붙을 경로가 없어, bikeman_writer
-# 비밀번호를 점검/재설정하려는 psql 접속이 EC2에서도 타임아웃났다 (실측:
-# 2026-08-25). iceberg_catalog RDS에 이미 적용한 것과 동일한 패턴
-# (iceberg_catalog_allow_airflow_ec2, emr_spark.tf)으로 Airflow 워커(EC2) SG를
-# 허용한다.
-resource "aws_security_group_rule" "rds_allow_airflow_ec2" {
-  type                     = "ingress"
-  from_port                = 5432
-  to_port                  = 5432
-  protocol                 = "tcp"
-  security_group_id        = var.rds_security_group_id
-  source_security_group_id = var.airflow_ec2_sg_id
-  description              = "Allow domain-db RDS access from the Airflow worker EC2"
-}
-
 # ---- Lambda 함수 2개 (이미지 1개 공유, image_config.command만 다름) ----
 # 원래는 BIKEMAN_DB_SECRET_ARN을 통해 Secrets Manager에서 읽어오게 할 계획이었으나,
 # 이 계정에 secretsmanager:CreateSecret 권한이 없어(SCP가 아니라 순수 IAM gap)
