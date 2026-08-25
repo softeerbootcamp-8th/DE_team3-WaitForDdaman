@@ -17,13 +17,9 @@ provider "aws" {
 }
 
 # ------------------------------------------------------------------------------
-# Dead Letter Queue (SQS)
-# ------------------------------------------------------------------------------
-resource "aws_sqs_queue" "raw_fetch_dlq" {
-  name                      = "raw-fetch-lambda-dlq"
-  message_retention_seconds = 1209600 # 14 days
-}
-
+# Dead Letter Queue (SQS) - 생략: 이 계정에 sqs:CreateQueue 권한이 없다(SCP가 아니라
+# 순수 IAM gap). DLQ/SNS 알림은 부가 기능이라 없어도 Lambda 자체는 정상 동작한다 -
+# 권한이 열리면 이 블록과 아래 dead_letter_config/모니터링 섹션을 다시 추가할 것.
 # ------------------------------------------------------------------------------
 # IAM Role & Policies for Lambdas
 # ------------------------------------------------------------------------------
@@ -54,17 +50,11 @@ data "aws_iam_policy_document" "raw_fetch_policy_doc" {
     actions   = ["s3:PutObject", "s3:GetObject"]
     resources = ["arn:aws:s3:::${var.raw_bucket}/raw/*"]
   }
-
-  statement {
-    effect    = "Allow"
-    actions   = ["sqs:SendMessage"]
-    resources = [aws_sqs_queue.raw_fetch_dlq.arn]
-  }
 }
 
 resource "aws_iam_policy" "raw_fetch_policy" {
   name        = "raw-fetch-lambda-policy"
-  description = "Allows writing raw payloads to S3 and sending failed events to DLQ"
+  description = "Allows writing raw payloads to S3"
   policy      = data.aws_iam_policy_document.raw_fetch_policy_doc.json
 }
 
@@ -109,10 +99,6 @@ resource "aws_lambda_function" "fetch_station_master_raw" {
       SEOUL_API_BASE_URL = var.seoul_api_base_url
     }
   }
-
-  dead_letter_config {
-    target_arn = aws_sqs_queue.raw_fetch_dlq.arn
-  }
 }
 
 resource "aws_lambda_function" "fetch_station_active_raw" {
@@ -133,166 +119,18 @@ resource "aws_lambda_function" "fetch_station_active_raw" {
       SEOUL_API_BASE_URL = var.seoul_api_base_url
     }
   }
-
-  dead_letter_config {
-    target_arn = aws_sqs_queue.raw_fetch_dlq.arn
-  }
 }
 
 # ------------------------------------------------------------------------------
-# EventBridge Schedule (Daily 00:10 KST = 15:10 UTC)
+# EventBridge Schedule - 생략: 이 계정에 events:PutRule 권한이 없다(SCP가 아니라
+# 순수 IAM gap). 대신 airflow/dags/raw_fetch_lambda_dag.py가 매일 00:10 KST에
+# lambda:InvokeFunction으로 이 두 Lambda를 직접 호출한다(lambda_shared.tf의
+# airflow_worker_lambda_invoke_policy에 권한 포함). 권한이 열리면 되살릴 것.
 # ------------------------------------------------------------------------------
-resource "aws_cloudwatch_event_rule" "daily_raw_fetch_schedule" {
-  name                = "daily-raw-fetch-at-0010-kst"
-  description         = "Triggers raw fetch Lambdas daily at 00:10 KST (15:10 UTC)"
-  schedule_expression = "cron(10 15 * * ? *)"
-}
-
-resource "aws_cloudwatch_event_target" "target_station_master" {
-  rule      = aws_cloudwatch_event_rule.daily_raw_fetch_schedule.name
-  target_id = "fetch_station_master_raw_target"
-  arn       = aws_lambda_function.fetch_station_master_raw.arn
-}
-
-resource "aws_cloudwatch_event_target" "target_station_active" {
-  rule      = aws_cloudwatch_event_rule.daily_raw_fetch_schedule.name
-  target_id = "fetch_station_active_raw_target"
-  arn       = aws_lambda_function.fetch_station_active_raw.arn
-}
-
-resource "aws_lambda_permission" "allow_eventbridge_station_master" {
-  statement_id  = "AllowExecutionFromEventBridgeStationMaster"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.fetch_station_master_raw.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.daily_raw_fetch_schedule.arn
-}
-
-resource "aws_lambda_permission" "allow_eventbridge_station_active" {
-  statement_id  = "AllowExecutionFromEventBridgeStationActive"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.fetch_station_active_raw.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.daily_raw_fetch_schedule.arn
-}
 
 # ------------------------------------------------------------------------------
-# Monitoring & Alerting (CloudWatch Alarm -> SNS)
+# Monitoring & Alerting (CloudWatch Alarm -> SNS) - 생략: sns:CreateTopic 권한이
+# 없다. notify_slack Lambda(Issue #180)도 SNS가 있어야 트리거되므로 같이 뺐다 -
+# 이미 만들어진 notify_slack Lambda는 이번 apply에서 destroy될 수 있다(무해함,
+# 어차피 아무것도 호출해주지 않아 동작 안 하고 있었음). 권한이 열리면 되살릴 것.
 # ------------------------------------------------------------------------------
-resource "aws_sns_topic" "raw_fetch_alerts" {
-  name = "raw-fetch-lambda-alerts"
-}
-
-resource "aws_cloudwatch_metric_alarm" "station_master_errors" {
-  alarm_name          = "fetch_station_master_raw_errors"
-  comparison_operator = "GreaterThanOrEqualToThreshold"
-  evaluation_periods  = 1
-  metric_name         = "Errors"
-  namespace           = "AWS/Lambda"
-  period              = 300
-  statistic           = "Sum"
-  threshold           = 1
-  alarm_description   = "Alarm when fetch_station_master_raw Lambda experiences execution errors"
-  alarm_actions       = [aws_sns_topic.raw_fetch_alerts.arn]
-
-  dimensions = {
-    FunctionName = aws_lambda_function.fetch_station_master_raw.function_name
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "station_active_errors" {
-  alarm_name          = "fetch_station_active_raw_errors"
-  comparison_operator = "GreaterThanOrEqualToThreshold"
-  evaluation_periods  = 1
-  metric_name         = "Errors"
-  namespace           = "AWS/Lambda"
-  period              = 300
-  statistic           = "Sum"
-  threshold           = 1
-  alarm_description   = "Alarm when fetch_station_active_raw Lambda experiences execution errors"
-  alarm_actions       = [aws_sns_topic.raw_fetch_alerts.arn]
-
-  dimensions = {
-    FunctionName = aws_lambda_function.fetch_station_active_raw.function_name
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "dlq_messages_visible" {
-  alarm_name          = "raw_fetch_dlq_messages_visible"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 1
-  metric_name         = "ApproximateNumberOfMessagesVisible"
-  namespace           = "AWS/SQS"
-  period              = 300
-  statistic           = "Sum"
-  threshold           = 0
-  alarm_description   = "Alarm when raw fetch DLQ receives failed execution events"
-  alarm_actions       = [aws_sns_topic.raw_fetch_alerts.arn]
-
-  dimensions = {
-    QueueName = aws_sqs_queue.raw_fetch_dlq.name
-  }
-}
-
-# ------------------------------------------------------------------------------
-# Slack Notification (SNS -> Lambda -> Slack Incoming Webhook) - Issue #180
-# ------------------------------------------------------------------------------
-# slack_webhook_url이 비어있는 환경(로컬/dev)에서는 이 리소스들을 전부 스킵한다 -
-# 웹훅이 없는데 리소스를 만들면 알림이 항상 실패하기만 하고, terraform apply
-# 자체를 막을 이유는 없다.
-locals {
-  slack_notifications_enabled = var.slack_webhook_url != ""
-}
-
-data "archive_file" "notify_slack_zip" {
-  type        = "zip"
-  source_file = "${path.module}/../lambdas/notify_slack/lambda_function.py"
-  output_path = "${path.module}/build/notify_slack.zip"
-}
-
-resource "aws_iam_role" "notify_slack_lambda_role" {
-  count              = local.slack_notifications_enabled ? 1 : 0
-  name               = "notify-slack-lambda-exec-role"
-  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
-}
-
-resource "aws_iam_role_policy_attachment" "notify_slack_basic_execution" {
-  count      = local.slack_notifications_enabled ? 1 : 0
-  role       = aws_iam_role.notify_slack_lambda_role[0].name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-}
-
-resource "aws_lambda_function" "notify_slack" {
-  count            = local.slack_notifications_enabled ? 1 : 0
-  function_name    = "notify_slack"
-  role             = aws_iam_role.notify_slack_lambda_role[0].arn
-  handler          = "lambda_function.lambda_handler"
-  runtime          = "python3.12"
-  timeout          = 10
-  memory_size      = 128
-
-  filename         = data.archive_file.notify_slack_zip.output_path
-  source_code_hash = data.archive_file.notify_slack_zip.output_base64sha256
-
-  environment {
-    variables = {
-      SLACK_WEBHOOK_URL = var.slack_webhook_url
-    }
-  }
-}
-
-resource "aws_sns_topic_subscription" "raw_fetch_alerts_to_slack" {
-  count     = local.slack_notifications_enabled ? 1 : 0
-  topic_arn = aws_sns_topic.raw_fetch_alerts.arn
-  protocol  = "lambda"
-  endpoint  = aws_lambda_function.notify_slack[0].arn
-}
-
-resource "aws_lambda_permission" "allow_sns_notify_slack" {
-  count         = local.slack_notifications_enabled ? 1 : 0
-  statement_id  = "AllowExecutionFromSNSRawFetchAlerts"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.notify_slack[0].function_name
-  principal     = "sns.amazonaws.com"
-  source_arn    = aws_sns_topic.raw_fetch_alerts.arn
-}
