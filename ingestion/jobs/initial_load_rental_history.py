@@ -1,23 +1,37 @@
 """
 Bronze 초기 적재 잡 - 서울시 공공자전거 대여이력 (OA-15182)
 
-실행 방식: 파일 하나(INPUT_FILE)를 받아 독립된 프로세스(=하나의 Spark 세션/JVM)로
-처리하고 종료한다. 파일 다운로드와 대상 목록 나열은 jobs/list_input_files.py가
-먼저 수행한다 - Airflow DAG는 그 목록으로 Dynamic Task Mapping을 돌려 파일마다
-이 스크립트를 별도 프로세스로 실행한다. 파일 하나 = JVM 하나로 격리해야, 반기
-파일(최대 700MB급)을 여러 개 순회하면서 임시 파일/힙이 누적돼 OOM 나는 걸 막을 수
-있다 (기존에는 폴더 전체를 세션 하나로 순회했다).
+실행 방식: 파일 목록(INPUT_FILES, JSON 배열)을 받아 하나의 프로세스(=하나의 Spark
+세션/JVM) 안에서 파일마다 순차로 처리하고 종료한다. 파일 다운로드와 대상 목록 나열은
+jobs/list_input_files.py가 먼저 수행하고, DAG가 그 목록을 배치로 잘라(dag_common.
+chunk_list, #249) Dynamic Task Mapping으로 배치마다 이 스크립트를 별도 프로세스로
+실행한다.
+
+#249: 예전에는 파일 하나 = JVM 하나 = EMR Serverless JobRun 하나였다. 파일이
+수십 개면 JobRun 시작 오버헤드(애플리케이션 큐잉, 드라이버 초기화)도 수십 번
+반복됐다 - 배치로 묶어 오버헤드를 (파일 수 / 배치 크기)번으로 줄인다. 대신 파일
+단위 메모리 안전성은 그대로 유지한다: 파일마다 독립된 TemporaryDirectory를 열고
+닫아서, 반기 파일(최대 700MB급)을 여러 개 순회해도 임시 파일/힙이 파일 하나 분량
+이상 누적되지 않는다(기존 "파일 하나 = JVM 하나"의 격리 취지를 JVM 안에서 재현).
+전체 파일을 하나의 DataFrame으로 합치는 일은 없다 - 파일마다 읽고, 쓰고, unpersist
+한 뒤 다음 파일로 넘어간다.
 
 멱등성: 재실행 시 동일 날짜(rent_date_partition) 파티션을 덮어쓴다
        (Iceberg overwritePartitions) -> 같은 입력으로 몇 번 돌려도 결과가 같다.
 
-안전한 실패: 파일 안에 스키마 검증에 실패하는 CSV가 있어도(압축 파일 하나가 여러
-            CSV로 풀리는 경우) 그 CSV만 스킵하고 계속 처리한 뒤, 실패가 있었으면
-            종료 코드 1로 종료한다 (Airflow가 실패를 감지할 수 있도록).
+안전한 실패: 배치 안의 한 파일에서 스키마 검증에 실패하는 CSV가 있어도(압축 파일
+            하나가 여러 CSV로 풀리는 경우) 그 CSV만 스킵하고 나머지 파일까지 계속
+            처리한다. 실패한 파일이 하나라도 있었으면 배치 전체를 종료 코드 1로
+            끝내(Airflow가 실패를 감지해 배치 태스크를 재시도하도록) 실패 파일
+            목록을 로그에 남긴다. 재시도는 배치 단위다 - 같은 배치를 통째로
+            다시 돌리면 이미 성공한 파일도 재처리되지만 overwritePartitions가
+            멱등이라 결과는 같고, 시간만 더 든다(배치 크기를 작게 잡을수록 이
+            비용이 줄어든다 - dag_common.chunk_list 문서 참고).
 
 사용법:
-    INPUT_FILE=./raw_downloads/2601.csv python -m jobs.initial_load_rental_history
+    INPUT_FILES='["./raw_downloads/2601.csv"]' python -m jobs.initial_load_rental_history
 """
+import json
 import logging
 import os
 import sys
@@ -145,22 +159,15 @@ def _process_one_csv(spark, csv_path: Path, staging_dir: Path):
     return bronze_df
 
 
-def run(input_file: str) -> None:
-    # Iceberg(warehouse_bucket)와 원본 랜딩(raw_bucket) 버킷 모두 Spark 세션 생성 전에
-    # 존재해야 한다. LocalStack은 버킷을 자동으로 만들어주지 않아서, 이 호출이 없으면
-    # CREATE TABLE 단계에서 "NoSuchBucket"으로 실패한다.
-    ensure_bucket(config.SETTINGS.raw_bucket)
-    ensure_bucket(config.SETTINGS.warehouse_bucket)
+def _process_one_input_file(spark, input_file: str) -> tuple[int, bool, bool]:
+    """input_file 하나를 처리한다. (row_count, failed, skipped)를 반환한다.
 
-    spark = build_spark_session("bronze-initial-load-rental-history")
-    _ensure_bronze_table(spark)
-
-    total_rows, failed, skipped = 0, False, False
-
-    # 이 TemporaryDirectory는 파일 1개 처리 범위로 한정된다 (프로세스 자체도 파일 1개만
-    # 처리하고 종료한다). 압축 해제 결과물/UTF-8 변환본이 여기 쌓이는데, 프로세스가
-    # 정상 종료되든 OOM으로 강제 종료되든 이 파일 하나 분량만 디스크에 남을 수 있다 -
-    # 예전처럼 폴더 전체를 한 세션으로 순회하며 무한정 누적되는 구조가 아니다.
+    이 TemporaryDirectory는 파일 1개 처리 범위로 한정된다 - 압축 해제 결과물/UTF-8
+    변환본이 여기 쌓이는데, 이 함수가 반환하는 순간(정상 종료든 예외든 with 블록이
+    닫히며) 파일 하나 분량만 디스크에 남았다가 즉시 정리된다. 배치 안에 파일이
+    여러 개 있어도 동시에 두 파일 분량이 누적되지 않는다.
+    """
+    row_count, failed, skipped = 0, False, False
     with tempfile.TemporaryDirectory() as tmpdir:
         workdir = Path(tmpdir)
         if input_file.startswith("s3://"):
@@ -171,7 +178,7 @@ def run(input_file: str) -> None:
             raw_path = Path(input_file)
             if not raw_path.exists():
                 logger.error("입력 파일이 없습니다: %s", input_file)
-                sys.exit(1)
+                return row_count, True, skipped
 
         for csv_path in unzip_if_needed(raw_path, workdir):
             try:
@@ -179,14 +186,14 @@ def run(input_file: str) -> None:
                 # Iceberg가 스스로 분산+정렬을 처리한다. 우리가 직접 repartition/sort를
                 # 하면 Iceberg 입장에서는 신뢰할 수 없는 정렬이라 중복 셔플만 될 뿐이라 뺐다.
                 bronze_df = _process_one_csv(spark, csv_path, workdir).cache()
-                row_count = bronze_df.count()
+                csv_row_count = bronze_df.count()
 
                 # 재실행 시 동일 날짜 파티션만 덮어써서 멱등성 보장 (다른 파티션엔 영향 없음)
                 bronze_df.writeTo(_table_name()).overwritePartitions()
                 bronze_df.unpersist()
 
-                total_rows += row_count
-                logger.info("적재 완료: %s (%d행)", csv_path.name, row_count)
+                row_count += csv_row_count
+                logger.info("적재 완료: %s (%d행)", csv_path.name, csv_row_count)
             except NotThisDatasetError as e:
                 # 실패가 아니라 정상 스킵 - 입력 파일이 다른 데이터셋인 경우
                 logger.info("대여이력 데이터셋이 아닌 것으로 보여 스킵: %s (%s)", csv_path.name, e)
@@ -200,20 +207,53 @@ def run(input_file: str) -> None:
                 logger.error("인코딩 불일치로 스킵: %s (%s)", csv_path.name, e)
                 failed = True
 
+    return row_count, failed, skipped
+
+
+def run(input_files: list[str]) -> None:
+    # Iceberg(warehouse_bucket)와 원본 랜딩(raw_bucket) 버킷 모두 Spark 세션 생성 전에
+    # 존재해야 한다. LocalStack은 버킷을 자동으로 만들어주지 않아서, 이 호출이 없으면
+    # CREATE TABLE 단계에서 "NoSuchBucket"으로 실패한다.
+    ensure_bucket(config.SETTINGS.raw_bucket)
+    ensure_bucket(config.SETTINGS.warehouse_bucket)
+
+    spark = build_spark_session("bronze-initial-load-rental-history")
+    _ensure_bronze_table(spark)
+
+    total_rows = 0
+    failed_files: list[str] = []
+    skipped_files: list[str] = []
+
+    # 배치 안의 파일을 순차 처리한다 - 하나의 Spark 세션/JVM(=EMR JobRun 하나)을 재사용해
+    # 파일마다 새 JobRun을 띄우던 시작 오버헤드를 없앤다(#249). 전체 파일을 한 DataFrame
+    # 으로 합치지 않고 파일 단위로 읽고/쓰고/unpersist하므로, 파일 하나 실패가 나머지
+    # 파일 처리를 막지 않는다.
+    for input_file in input_files:
+        row_count, failed, skipped = _process_one_input_file(spark, input_file)
+        total_rows += row_count
+        if failed:
+            failed_files.append(input_file)
+        if skipped:
+            skipped_files.append(input_file)
+
     logger.info(
-        "파일 처리 종료: %s, 총 %d행, 다른 데이터셋으로 스킵=%s, 스키마 실패=%s",
-        input_file,
+        "배치 처리 종료: 파일 %d개, 총 %d행, 다른 데이터셋으로 스킵=%s, 스키마 실패=%s",
+        len(input_files),
         total_rows,
-        skipped,
-        failed,
+        skipped_files,
+        failed_files,
     )
-    if failed:
-        sys.exit(1)  # non-zero exit -> Airflow가 실패로 감지 (스킵은 실패로 취급하지 않음)
+    if failed_files:
+        # non-zero exit -> Airflow가 배치 태스크 실패로 감지해 배치 전체를 재시도한다
+        # (스킵은 실패로 취급하지 않음). 어떤 파일이 실패했는지는 위 로그로 특정할 수 있다.
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    input_file = os.getenv("INPUT_FILE")
-    if not input_file:
-        logger.error("사용법: INPUT_FILE=./raw_downloads/2601.csv python -m jobs.initial_load_rental_history")
+    raw_input_files = os.getenv("INPUT_FILES")
+    if not raw_input_files:
+        logger.error(
+            "사용법: INPUT_FILES='[\"./raw_downloads/2601.csv\"]' python -m jobs.initial_load_rental_history"
+        )
         sys.exit(1)
-    run(input_file)
+    run(json.loads(raw_input_files))

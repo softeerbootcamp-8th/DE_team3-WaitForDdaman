@@ -50,6 +50,16 @@ load_env_file()
 # 풀이 없으면 이 풀을 지정한 태스크는 스케줄되지 못하고 대기 상태에 머문다.
 BRONZE_POOL = "bronze_ingest"
 
+# EMR Serverless로 제출하는 초기 적재 배치 전용 풀 (#249). BRONZE_POOL과 분리하는 이유:
+# BRONZE_POOL은 "Airflow 워커 프로세스 자체의 PyArrow 메모리"를 보호하는 가드인데,
+# EMR 제출 태스크는 워커에서 boto3로 start_job_run 후 polling만 할 뿐 무거운 연산을
+# 워커에서 하지 않는다 - 진짜 자원 제약은 EMR Serverless 애플리케이션의 pre-initialized
+# capacity(Driver 1개 + Executor 3개, 각 4vCPU/16GB)다. 슬롯 수를 이 pre-initialized
+# Executor 개수에 맞춰, 매핑된 배치 태스크들이 지나치게 많이 동시 제출돼 매번 콜드스타트
+# Executor를 새로 띄우는 상황(=오버헤드 재발)을 피한다. 그 이상 필요하면 EMR Serverless가
+# on-demand로 최대 400vCPU까지 자동 확장하므로 슬롯을 넘는 배치는 대기했다가 순서대로 돈다.
+EMR_INITIAL_LOAD_POOL = "emr_initial_load"
+
 # 서울시 Open API 키별 동시성을 제어하는 전역 풀. rental_history는 키 1~3,
 # failure_report는 키 4를 사용하므로 최대 4개 날짜 Task만 동시에 API를 호출한다.
 SEOUL_API_POOL = "seoul_api"
@@ -106,6 +116,21 @@ def notify_slack_on_failure(context: dict) -> None:
 
 def is_aws_env() -> bool:
     return os.getenv("APP_ENV", "local") == "aws"
+
+
+def chunk_list(items: list, batch_size: int) -> list[list]:
+    """items를 batch_size개씩 연속 구간으로 자른다 (순서 보존, 마지막 배치는 나머지만).
+
+    #249: 파일 하나당 EMR Serverless JobRun을 하나씩 새로 시작하면 pre-initialized
+    capacity를 매번 다시 요청하는 시작 오버헤드가 파일 개수만큼 반복된다. 배치로 묶어
+    배치 하나 = JobRun 하나가 되게 하면 오버헤드가 (파일 수 / batch_size)번으로 준다.
+    batch_size가 작을수록 오버헤드 절감은 줄지만 배치 하나가 실패했을 때 재시도 비용
+    (이미 성공한 파일도 같은 JobRun 안에서 재처리 - 멱등이라 결과는 같지만 시간이 더 듦)
+    이 작아진다 - compute_silver_rental_history_backfill_ranges.py의 chunk_days와
+    동일한 트레이드오프 축이라 이름도 맞췄다."""
+    if batch_size < 1:
+        raise ValueError(f"batch_size는 1 이상이어야 합니다: {batch_size}")
+    return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
 
 
 def _required_env(name: str) -> str:
