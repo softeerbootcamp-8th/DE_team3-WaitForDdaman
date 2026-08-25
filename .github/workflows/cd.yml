@@ -185,15 +185,24 @@ jobs:
             aws ecr get-login-password --region ap-northeast-2 \
               | docker login --username AWS --password-stdin "$ECR_REGISTRY"
             docker compose -f docker-compose.prod.yml pull
-            # up -d로 컨테이너만 교체한다. DB는 RDS에 있어서 컨테이너 교체와
-            # 무관하지만, down -v는 airflow-logs-volume(DAG 실행 로그)을 날리므로
-            # 배포 경로에서는 쓰지 않는다.
-            docker compose -f docker-compose.prod.yml up -d
+            # up -d --force-recreate로 최신 이미지로 컨테이너를 강제 교체한다.
+            docker compose -f docker-compose.prod.yml up -d --force-recreate
             docker image prune -f
             docker compose -f docker-compose.prod.yml ps
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
+
+      - name: Update EMR Serverless application image
+        continue-on-error: true
+        run: |
+          APP_ID="00g87apnd47p1r2p"
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/waitforddaman-emr-spark-prod:latest"
+          echo "==> Updating EMR Serverless application ($APP_ID) to $IMAGE_URI"
+          aws emr-serverless update-application \
+            --application-id "$APP_ID" \
+            --image-configuration imageUri="$IMAGE_URI" \
+            --region ${{ env.AWS_REGION }} || true
 
       # if: always() - 배포가 실패해도 열어둔 22번 규칙은 반드시 회수한다.
       # 이게 없으면 실패한 실행의 러너 IP가 영구히 남아 SG가 계속 오염된다.
