@@ -5,6 +5,7 @@ boto3는 endpoint_url만 다르면 LocalStack과 실제 AWS S3를 동일한 코�
 로컬에서는 access key를 더미값으로 명시하고, AWS에서는 IAM Role을 쓰도록
 자격증명을 아예 넘기지 않는다(boto3가 기본 자격증명 체인을 사용).
 """
+import functools
 import json
 import logging
 from pathlib import Path
@@ -21,21 +22,31 @@ logger = logging.getLogger(__name__)
 _RETRY_CONFIG = Config(signature_version="s3v4", retries={"max_attempts": 3, "mode": "standard"})
 
 
-def get_s3_client():
-    # NOTE: config.SETTINGS를 매 호출 시점에 속성 조회한다 (모듈 임포트 시점에 값을 캡처하지 않음).
-    #       테스트에서 config.SETTINGS를 교체해 환경을 바꿔 검증할 수 있게 하기 위함.
-    settings = config.SETTINGS
-    if settings.env == "local":
+@functools.lru_cache(maxsize=None)
+def _build_s3_client(env: str, endpoint_url: Optional[str], region: str, access_key: Optional[str], secret_key: Optional[str]):
+    if env == "local":
         return boto3.client(
             "s3",
-            endpoint_url=settings.s3_endpoint,
-            region_name=settings.s3_region,
-            aws_access_key_id=settings.s3_access_key,
-            aws_secret_access_key=settings.s3_secret_key,
+            endpoint_url=endpoint_url,
+            region_name=region,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
             config=_RETRY_CONFIG,
         )
     # AWS: endpoint 미지정 -> 기본 AWS S3, 자격증명은 IAM Role/기본 체인 사용
-    return boto3.client("s3", region_name=settings.s3_region, config=_RETRY_CONFIG)
+    return boto3.client("s3", region_name=region, config=_RETRY_CONFIG)
+
+
+def get_s3_client():
+    # NOTE: config.SETTINGS를 매 호출 시점에 속성 조회한다 (모듈 임포트 시점에 값을 캡처하지 않음).
+    #       테스트에서 config.SETTINGS를 교체해 환경을 바꿔 검증할 수 있게 하기 위함. 캐시 키가
+    #       그 값들 자체라서, 설정이 바뀌면 새 클라이언트를 만들고 안 바뀌면 재사용한다.
+    settings = config.SETTINGS
+    if settings.env == "local":
+        return _build_s3_client(
+            settings.env, settings.s3_endpoint, settings.s3_region, settings.s3_access_key, settings.s3_secret_key
+        )
+    return _build_s3_client(settings.env, None, settings.s3_region, None, None)
 
 
 def ensure_bucket(bucket: str) -> None:

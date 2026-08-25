@@ -78,7 +78,7 @@ def list_partitions(table_identifier: str, partition_col: str = "") -> list[str]
             return []
         raise
 
-    return sorted(list(set(partitions)))
+    return sorted(set(partitions))
 
 
 def max_partition(table_identifier: str, partition_col: str = "") -> Optional[str]:

@@ -20,11 +20,11 @@ import logging
 import os
 from datetime import date
 
-import pyarrow as pa
 from pyiceberg.expressions import EqualTo
 
 from common.iceberg_catalog import build_iceberg_catalog
 from serving_db import ensure_serving_tables, replace_partition
+from serving_db import rows_for_insert as _rows_for_insert
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -36,12 +36,6 @@ COLUMNS = [
     "healthy_ratio", "risk_grade", "risk_score", "dist_km", "start_year", "aging",
     "fail_history",
 ]
-
-
-def _rows_for_insert(table: pa.Table, columns: list[str]) -> list[tuple]:
-    """PyArrow Table을 psycopg2 execute_values가 받는 (컬럼 순서 고정) 튜플 리스트로
-    바꾼다 - 카탈로그 없이 동작하는 순수 로직이라 단위 테스트가 가능하다."""
-    return [tuple(row[c] for c in columns) for row in table.select(columns).to_pylist()]
 
 
 def run() -> None:
