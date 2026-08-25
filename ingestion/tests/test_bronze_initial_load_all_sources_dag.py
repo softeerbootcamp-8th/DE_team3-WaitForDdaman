@@ -140,4 +140,91 @@ def test_aws_env_allows_more_concurrent_tasks_than_local(dag, aws_dag):
 
 def test_emr_batch_size_params_exist(dag):
     assert dag.params["rental_history_emr_batch_size"] == "3"
-    assert dag.params["failure_report_emr_batch_size"] == "6"
+    assert dag.params["failure_report_emr_batch_size"] == "12"
+
+
+def test_staging_batch_size_params_exist(dag):
+    assert dag.params["rental_history_staging_batch_size"] == "6"
+    assert dag.params["failure_report_staging_batch_size"] == "12"
+
+
+def test_local_env_has_no_staging_batch_tasks(dag):
+    """로컬은 list_input_files.py가 반환하는 로컬 경로를 그대로 쓴다 - S3 스테이징
+    배치 태스크(#255)는 AWS 전용이다."""
+    task_ids = set(dag.task_ids)
+    assert "stage_rental_history_files_batch" not in task_ids
+    assert "stage_failure_report_files_batch" not in task_ids
+    assert "chunk_rental_history_staging_files" not in task_ids
+    assert "chunk_failure_report_staging_files" not in task_ids
+
+
+def test_aws_env_has_staging_batch_tasks_between_list_and_emr_chunk(aws_dag):
+    """AWS는 다운로드(list_*_files)와 S3 업로드(stage_*_files_batch)를 분리한다(#255) -
+    "파일 하나 = 태스크 하나"가 아니라 배치 단위 Dynamic Task Mapping이어야 한다."""
+    task_ids = set(aws_dag.task_ids)
+    assert "stage_rental_history_files_batch" in task_ids
+    assert "stage_failure_report_files_batch" in task_ids
+    assert "chunk_rental_history_staging_files" in task_ids
+    assert "chunk_failure_report_staging_files" in task_ids
+
+    stage_rental = aws_dag.get_task("stage_rental_history_files_batch")
+    stage_failure = aws_dag.get_task("stage_failure_report_files_batch")
+    assert stage_rental.is_mapped
+    assert stage_failure.is_mapped
+
+    chunk_rental_staging = aws_dag.get_task("chunk_rental_history_staging_files")
+    chunk_failure_staging = aws_dag.get_task("chunk_failure_report_staging_files")
+    assert chunk_rental_staging.task_id in stage_rental.upstream_task_ids
+    assert chunk_failure_staging.task_id in stage_failure.upstream_task_ids
+
+    # 스테이징 배치 결과(URI 목록)가 EMR 배치 청소 단계보다 먼저 와야 한다.
+    chunk_rental_emr = aws_dag.get_task("chunk_rental_history_files")
+    chunk_failure_emr = aws_dag.get_task("chunk_failure_report_files")
+    assert "parse_rental_history_staging_uris" in chunk_rental_emr.upstream_task_ids
+    assert "parse_failure_report_staging_uris" in chunk_failure_emr.upstream_task_ids
+
+
+def test_aws_env_staging_batch_tasks_use_s3_staging_pool(aws_dag):
+    from dag_common import S3_STAGING_POOL
+
+    assert aws_dag.get_task("stage_rental_history_files_batch").pool == S3_STAGING_POOL
+    assert aws_dag.get_task("stage_failure_report_files_batch").pool == S3_STAGING_POOL
+
+
+def test_aws_env_emr_batch_tasks_use_entry_point_arguments_not_input_files_env(
+    aws_dag, monkeypatch
+):
+    """#255: INPUT_FILES는 sparkSubmitParameters의 공백 파싱 버그를 다시 겪을 수 있으니
+    entryPointArguments가 1차 전달 경로여야 한다. dag_common.run_emr_serverless_spark_job은
+    내부에서 boto3.client(...)를 직접 호출하므로, boto3 자체를 페이크로 바꿔 실제 EMR
+    Serverless start_job_run에 실린 jobDriver를 검사한다."""
+    import boto3
+
+    monkeypatch.setenv("EMR_SPARK_APPLICATION_ID", "app-id")
+    monkeypatch.setenv("EMR_SPARK_EXECUTION_ROLE_ARN", "role-arn")
+
+    captured_job_drivers = []
+
+    class _FakeEmrServerlessClient:
+        def start_job_run(self, **kwargs):
+            captured_job_drivers.append(kwargs["jobDriver"])
+            return {"jobRunId": "job-run-id"}
+
+        def get_job_run(self, **kwargs):
+            return {"jobRun": {"state": "SUCCESS"}}
+
+    monkeypatch.setattr(boto3, "client", lambda *a, **k: _FakeEmrServerlessClient())
+
+    rental_batch_task = aws_dag.get_task("initial_load_rental_history_batch")
+    rental_batch_task.python_callable(["s3://bucket/a.csv"])
+
+    failure_batch_task = aws_dag.get_task("initial_load_failure_report_batch")
+    failure_batch_task.python_callable(["s3://bucket/b.csv"])
+
+    assert len(captured_job_drivers) == 2
+    for job_driver, expected_files in zip(
+        captured_job_drivers, ['["s3://bucket/a.csv"]', '["s3://bucket/b.csv"]']
+    ):
+        spark_submit = job_driver["sparkSubmit"]
+        assert spark_submit["entryPointArguments"] == ["--input-files-json", expected_files]
+        assert "INPUT_FILES" not in spark_submit["sparkSubmitParameters"]

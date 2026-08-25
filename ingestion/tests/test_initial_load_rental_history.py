@@ -70,3 +70,23 @@ def test_process_one_input_file_reports_failure_for_missing_local_file(tmp_path)
     missing = tmp_path / "does_not_exist.csv"
     row_count, failed, skipped = job._process_one_input_file(spark=None, input_file=str(missing))
     assert (row_count, failed, skipped) == (0, True, False)
+
+
+def test_resolve_input_files_prefers_entry_point_argument():
+    """entryPointArguments(--input-files-json)가 있으면 그걸 우선한다 (#255)."""
+    files = job._resolve_input_files(["--input-files-json", '["a.csv", "b.csv"]'])
+    assert files == ["a.csv", "b.csv"]
+
+
+def test_resolve_input_files_falls_back_to_env_var(monkeypatch):
+    """entryPointArguments가 없으면 INPUT_FILES 환경변수로 내려간다(하위호환, #255)."""
+    monkeypatch.setenv("INPUT_FILES", '["c.csv"]')
+    files = job._resolve_input_files([])
+    assert files == ["c.csv"]
+
+
+def test_resolve_input_files_exits_when_neither_is_set(monkeypatch):
+    monkeypatch.delenv("INPUT_FILES", raising=False)
+    with pytest.raises(SystemExit) as exc_info:
+        job._resolve_input_files([])
+    assert exc_info.value.code == 1

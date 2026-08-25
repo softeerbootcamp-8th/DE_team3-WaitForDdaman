@@ -60,6 +60,14 @@ BRONZE_POOL = "bronze_ingest"
 # on-demand로 최대 400vCPU까지 자동 확장하므로 슬롯을 넘는 배치는 대기했다가 순서대로 돈다.
 EMR_INITIAL_LOAD_POOL = "emr_initial_load"
 
+# 초기 적재 S3 스테이징 업로드 전용 풀 (#255). BRONZE_POOL/EMR_INITIAL_LOAD_POOL과 분리하는
+# 이유: 이 태스크는 Airflow 워커(EC2 t4g.large, 2vCPU/8GB) 프로세스 안에서 boto3로 직접
+# 로컬 MD5 계산 + PutObject/CopyObject를 수행한다 - EMR 제출 태스크(가벼운 polling)와도,
+# PyArrow 연산(BRONZE_POOL)과도 자원 성격이 다르다. 슬롯을 낮게 잡아, 완전히 빈 S3에
+# ~40~47GB/114개 파일을 한 번에 올려야 하는 최초 적재 시나리오에서도 여러 배치가 동시에
+# MD5 해시+업로드를 돌려 워커 CPU/메모리/네트워크를 잠식하지 않게 한다.
+S3_STAGING_POOL = "s3_initial_load_staging"
+
 # 서울시 Open API 키별 동시성을 제어하는 전역 풀. rental_history는 키 1~3,
 # failure_report는 키 4를 사용하므로 최대 4개 날짜 Task만 동시에 API를 호출한다.
 SEOUL_API_POOL = "seoul_api"
@@ -116,6 +124,10 @@ def notify_slack_on_failure(context: dict) -> None:
 
 def is_aws_env() -> bool:
     return os.getenv("APP_ENV", "local") == "aws"
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes")
 
 
 def chunk_list(items: list, batch_size: int) -> list[list]:
@@ -197,6 +209,16 @@ def run_emr_serverless_spark_job(
     tags: dict[str, str] | None = None,
 ) -> str:
     """EMR Serverless Spark job을 제출하고 terminal 상태까지 polling한다."""
+    # AWS 분기 DAG의 staging/인자 전달 흐름을 로컬에서 확인할 때 사용한다.
+    # 이 모드에서는 boto3를 만들거나 EMR API를 호출하지 않는다.
+    if _env_flag("EMR_SERVERLESS_DRY_RUN"):
+        print(
+            "EMR Serverless dry-run: "
+            f"name={name} entry_point={entry_point} "
+            f"entry_point_arguments={entry_point_arguments or []}"
+        )
+        return f"dry-run:{name}"
+
     import boto3
 
     application_id = _required_env("EMR_SPARK_APPLICATION_ID")
