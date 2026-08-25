@@ -6,6 +6,7 @@ boto3는 endpoint_url만 다르면 LocalStack과 실제 AWS S3를 동일한 코�
 자격증명을 아예 넘기지 않는다(boto3가 기본 자격증명 체인을 사용).
 """
 import functools
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -87,6 +88,47 @@ def upload_file(local_path: Path, bucket: str, key: str) -> None:
     s3 = get_s3_client()
     s3.upload_file(str(local_path), bucket, key)
     logger.info("업로드 완료: %s -> s3://%s/%s", local_path, bucket, key)
+
+
+def _md5_hex(path: Path) -> str:
+    digest = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def head_object(bucket: str, key: str) -> Optional[dict]:
+    """key가 없으면 None. head_object 응답(Metadata 포함)을 그대로 반환한다."""
+    s3 = get_s3_client()
+    try:
+        return s3.head_object(Bucket=bucket, Key=key)
+    except ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "")
+        if error_code in ("404", "NoSuchKey"):
+            return None
+        raise
+
+
+def upload_file_if_changed(local_path: Path, bucket: str, key: str) -> bool:
+    """
+    같은 key에 내용이 동일한 파일이 이미 있으면 업로드를 스킵하고 재사용한다 (멱등).
+
+    S3 ETag는 멀티파트 업로드 시 각 파트 MD5의 조합 해시라서 로컬 파일 MD5와 직접
+    비교할 수 없다. 대신 업로드할 때 로컬 MD5를 커스텀 메타데이터로 함께 저장해두고,
+    다음 실행에서는 HEAD로 그 메타데이터만 비교한다 - 내용이 같으면 재업로드 없이
+    기존 객체를 그대로 재사용하고, 다르면(혹은 메타데이터가 없으면) 덮어쓴다.
+    """
+    local_md5 = _md5_hex(local_path)
+    existing = head_object(bucket, key)
+    if existing is not None and existing.get("Metadata", {}).get("content-md5") == local_md5:
+        logger.info("동일한 파일이 이미 존재해 업로드 스킵: s3://%s/%s", bucket, key)
+        return False
+
+    s3 = get_s3_client()
+    s3.upload_file(str(local_path), bucket, key, ExtraArgs={"Metadata": {"content-md5": local_md5}})
+    logger.info("업로드 완료(멱등 갱신): %s -> s3://%s/%s", local_path, bucket, key)
+    return True
 
 
 def to_spark_readable_path(local_path: Path, bucket: str, staging_prefix: str) -> str:
