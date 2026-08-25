@@ -16,5 +16,6 @@
 
 airflow/logs
 services/api/.venv
+ingestion/data
 
 *.md

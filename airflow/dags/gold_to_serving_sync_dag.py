@@ -33,6 +33,7 @@ from airflow.sdk import dag
 
 from dag_common import notify_slack_on_failure
 
+PYLIB_DIR = "/opt/airflow/pylib"
 SERVING_SYNC_DIR = "/opt/airflow/pipeline/serving_sync"
 INGESTION_DIR = "/opt/airflow/ingestion"
 
@@ -60,27 +61,32 @@ def _load_ingestion_env(env_path: str) -> None:
             os.environ[key.strip()] = value.strip()
 
 
-_load_ingestion_env(f"{INGESTION_DIR}/.env")
-
-# build_mart_*가 Spark/서브프로세스 없이 DuckDB로 직접 실행되므로(#172), PythonOperator가
-# 잡 모듈을 직접 import해서 호출할 수 있도록 ingestion과 serving_sync/jobs를 sys.path에
-# 얹는다. serving_sync/jobs 안의 모듈들은 `from station_risk_shared import ...`처럼
-# 서로를 bare import하므로, 패키지 루트가 아니라 jobs/ 디렉터리 자체를 얹어야 한다.
-if INGESTION_DIR not in sys.path:
-    sys.path.insert(0, INGESTION_DIR)
-if f"{SERVING_SYNC_DIR}/jobs" not in sys.path:
-    sys.path.insert(0, f"{SERVING_SYNC_DIR}/jobs")
-
-from build_mart_bike_risk_daily import run as _run_build_mart_bike_risk_daily  # noqa: E402
-from build_mart_station_daily import run as _run_build_mart_station_daily  # noqa: E402
-
-
 def _build_mart_bike_risk_daily(snapshot_date: str) -> None:
+    _load_ingestion_env(f"{INGESTION_DIR}/.env")
+    if PYLIB_DIR not in sys.path:
+        sys.path.insert(0, PYLIB_DIR)
+    if INGESTION_DIR not in sys.path:
+        sys.path.insert(0, INGESTION_DIR)
+    if f"{SERVING_SYNC_DIR}/jobs" not in sys.path:
+        sys.path.insert(0, f"{SERVING_SYNC_DIR}/jobs")
+
+    from build_mart_bike_risk_daily import run as _run_build_mart_bike_risk_daily
+
     os.environ["SNAPSHOT_DATE"] = snapshot_date
     _run_build_mart_bike_risk_daily()
 
 
 def _build_mart_station_daily(snapshot_date: str) -> None:
+    _load_ingestion_env(f"{INGESTION_DIR}/.env")
+    if PYLIB_DIR not in sys.path:
+        sys.path.insert(0, PYLIB_DIR)
+    if INGESTION_DIR not in sys.path:
+        sys.path.insert(0, INGESTION_DIR)
+    if f"{SERVING_SYNC_DIR}/jobs" not in sys.path:
+        sys.path.insert(0, f"{SERVING_SYNC_DIR}/jobs")
+
+    from build_mart_station_daily import run as _run_build_mart_station_daily
+
     os.environ["SNAPSHOT_DATE"] = snapshot_date
     _run_build_mart_station_daily()
 

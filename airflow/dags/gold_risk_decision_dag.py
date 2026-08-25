@@ -40,6 +40,7 @@ from airflow.sdk import dag
 
 from dag_common import notify_slack_on_failure
 
+PYLIB_DIR = "/opt/airflow/pylib"
 RISK_MODEL_DIR = "/opt/airflow/pipeline/risk_model"
 INGESTION_DIR = "/opt/airflow/ingestion"
 AIRFLOW_HOME_DIR = "/opt/airflow"
@@ -62,15 +63,17 @@ def _load_ingestion_env(env_path: str) -> None:
             os.environ[key.strip()] = value.strip()
 
 
-_load_ingestion_env(f"{INGESTION_DIR}/.env")
+def _watermark_ready(dataset: str, target_date: str, required_offset_days: int = 0) -> bool:
+    _load_ingestion_env(f"{INGESTION_DIR}/.env")
+    if PYLIB_DIR not in sys.path:
+        sys.path.insert(0, PYLIB_DIR)
+    if INGESTION_DIR not in sys.path:
+        sys.path.insert(0, INGESTION_DIR)
 
-# PythonSensor가 판정 함수를 직접 호출할 수 있도록 ingestion을 네임스페이스 패키지
-# 루트로 sys.path에 얹는다 (gold_dim_fact_dag.py와 동일한 패턴). config가 위에서
-# 로드한 ingestion/.env 값으로 평가되도록 반드시 _load_ingestion_env 다음에 import한다.
-if INGESTION_DIR not in sys.path:
-    sys.path.insert(0, INGESTION_DIR)
+    from jobs.check_silver_watermark import is_ready
 
-from jobs.check_silver_watermark import is_ready as watermark_ready  # noqa: E402
+    return is_ready(dataset=dataset, target_date=target_date, required_offset_days=required_offset_days)
+
 
 DAG_ID = "gold_risk_decision"
 
@@ -120,7 +123,7 @@ def gold_risk_decision():
     # 직접 호출한다 - 판정 로직(워터마크 비교) 자체는 그대로다.
     wait_for_silver_failure_report = PythonSensor(
         task_id="wait_for_silver_failure_report",
-        python_callable=watermark_ready,
+        python_callable=_watermark_ready,
         op_kwargs={"dataset": "failure_report", "target_date": snapshot_date_expr, "required_offset_days": 1},
         mode="reschedule",
         poke_interval=POKE_INTERVAL,

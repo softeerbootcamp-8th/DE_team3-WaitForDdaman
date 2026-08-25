@@ -20,6 +20,7 @@ from airflow.sdk import dag
 
 from dag_common import notify_slack_on_failure
 
+PYLIB_DIR = "/opt/airflow/pylib"
 INGESTION_DIR = "/opt/airflow/ingestion"
 
 
@@ -38,11 +39,17 @@ def _load_ingestion_env(env_path: str) -> None:
             os.environ[key.strip()] = value.strip()
 
 
-_load_ingestion_env(f"{INGESTION_DIR}/.env")
-if INGESTION_DIR not in sys.path:
-    sys.path.insert(0, INGESTION_DIR)
+def _check_watermark_staleness_callable():
+    _load_ingestion_env(f"{INGESTION_DIR}/.env")
+    if PYLIB_DIR not in sys.path:
+        sys.path.insert(0, PYLIB_DIR)
+    if INGESTION_DIR not in sys.path:
+        sys.path.insert(0, INGESTION_DIR)
 
-from jobs.check_watermark_staleness import run as check_watermark_staleness  # noqa: E402
+    from jobs.check_watermark_staleness import run as check_watermark_staleness
+
+    return check_watermark_staleness()
+
 
 default_args = {
     "retries": 1,  # S3 일시 장애 대비 - 그 이상 재시도해도 워터마크 값 자체는 안 바뀐다
@@ -66,7 +73,7 @@ default_args = {
 def watermark_staleness_check():
     PythonOperator(
         task_id="check_watermark_staleness",
-        python_callable=check_watermark_staleness,
+        python_callable=_check_watermark_staleness_callable,
     )
 
 
