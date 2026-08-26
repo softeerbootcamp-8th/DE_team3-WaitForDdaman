@@ -228,8 +228,11 @@ def run(input_files: list[str]) -> None:
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
+    logger.info("초기 적재 배치 시작: 파일 %d개", len(input_files))
+    logger.info("Spark 세션 및 Bronze 테이블 준비 시작")
     spark = build_spark_session("bronze-initial-load-rental-history")
     _ensure_bronze_table(spark)
+    logger.info("Spark 세션 및 Bronze 테이블 준비 완료")
 
     total_rows = 0
     failed_files: list[str] = []
@@ -239,13 +242,24 @@ def run(input_files: list[str]) -> None:
     # 파일마다 새 JobRun을 띄우던 시작 오버헤드를 없앤다(#249). 전체 파일을 한 DataFrame
     # 으로 합치지 않고 파일 단위로 읽고/쓰고/unpersist하므로, 파일 하나 실패가 나머지
     # 파일 처리를 막지 않는다.
-    for input_file in input_files:
+    for index, input_file in enumerate(input_files, start=1):
+        logger.info("[%d/%d] 파일 처리 시작: %s", index, len(input_files), input_file)
         row_count, failed, skipped = _process_one_input_file(spark, input_file)
         total_rows += row_count
         if failed:
             failed_files.append(input_file)
         if skipped:
             skipped_files.append(input_file)
+        status = "실패" if failed else "스킵" if skipped else "완료"
+        logger.info(
+            "[%d/%d] 파일 처리 %s: %s (%d행, 누적 %d행)",
+            index,
+            len(input_files),
+            status,
+            input_file,
+            row_count,
+            total_rows,
+        )
 
     logger.info(
         "배치 처리 종료: 파일 %d개, 총 %d행, 다른 데이터셋으로 스킵=%s, 스키마 실패=%s",
