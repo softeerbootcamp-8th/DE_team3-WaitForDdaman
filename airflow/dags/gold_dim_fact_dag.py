@@ -63,7 +63,7 @@ logical_date와 맞추려면 두 DAG의 스케줄 시각 차이를 그대로 exe
     - station_master(0 7 * * *) / station_active(0 7 * * *): 08:00 - 07:00 = 1시간
 
 ### silver.station_active (2026-08-17, 담당 팀원 작업 반영)
-더 이상 더미가 아니다 - `silver_station_active_daily` DAG(`staging/jobs/
+더 이상 더미가 아니다 - `silver_station_active` DAG(`staging/jobs/
 silver_station_active.py`)가 `bronze.station_active`에서 station_id만 추려
 매일 적재한다. `build_station_active`(gold)의 조인 로직은 station_active에서
 station_id만 쓰므로 이 잡의 실제 컬럼 스키마(snapshot_date, station_id 2개뿐)와
@@ -180,7 +180,7 @@ def _collection_priority_bash(job_module: str, extra_env: str = "") -> str:
 @dag(
     dag_id="gold_dim_fact",
     schedule="0 8 * * *",  # 매일 08:00 KST - 상류 Silver DAG(07:00~07:30)가 보통 끝난 뒤
-    start_date=pendulum.datetime(2026, 8, 17, tz="Asia/Seoul"),  # silver_station_active_daily 최초 가용일과 동일
+    start_date=pendulum.datetime(2026, 8, 17, tz="Asia/Seoul"),  # silver_station_active 최초 가용일과 동일
     catchup=False,
     max_active_runs=1,
     default_args=default_args,

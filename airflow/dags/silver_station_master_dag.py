@@ -58,7 +58,7 @@ def _staging_bash(job_module: str, extra_env: str = "") -> str:
 
 
 @dag(
-    dag_id="silver_station_master_daily",
+    dag_id="silver_station_master",
     schedule=[STATION_MASTER_BRONZE],  # 고정 시간이 아니라 Bronze 완료 이벤트로 트리거
     start_date=pendulum.datetime(2026, 8, 14, tz="Asia/Seoul"),
     catchup=False,  # 과거 스냅샷을 API로 소급 조회할 수 없다 - 위 doc 참고
@@ -67,7 +67,7 @@ def _staging_bash(job_module: str, extra_env: str = "") -> str:
     tags=["silver", "asset_triggered"],
     doc_md=__doc__,
 )
-def silver_station_master_daily():
+def silver_station_master():
     BashOperator(
         task_id="silver_station_master",
         bash_command=_staging_bash(SILVER_MODULE),
@@ -76,4 +76,4 @@ def silver_station_master_daily():
     )
 
 
-silver_station_master_daily()
+silver_station_master()
