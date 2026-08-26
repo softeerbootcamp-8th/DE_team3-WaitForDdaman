@@ -2,10 +2,10 @@
 초기 적재 워터마크 값 검증 - 사람이 입력한 *_watermark_date가 실제 Bronze에 적재된
 최대 날짜와 다르면 경고를 남긴다 (DAG를 실패시키지는 않음).
 
-왜 필요한가: bronze_initial_load_all_sources_dag.py의 *_watermark_date는 사람이 직접
+왜 필요한가: initial_load_dag.py의 *_watermark_date는 사람이 직접
 입력하는 값이다. *_pattern으로 적재 범위를 좁히면서 이 값을 같이 안 바꾸면,
 daily_batch/Silver가 실제로 적재하지 않은 기간을 "처리 완료"로 잘못 기록해서 그
-구간이 영구히 누락된다 (bronze_initial_load_all_sources_dag.py의 ⚠️ 참고). 이 잡은
+구간이 영구히 누락된다 (initial_load_dag.py의 ⚠️ 참고). 이 잡은
 그 어긋남을 사람이 놓치지 않도록 로그에 경고를 남기는 안전망이다.
 
 로컬 테스트에서는 데이터셋 자체가 비어 있을 수 있다(다른 팀원 소스만 적재하는 등) -

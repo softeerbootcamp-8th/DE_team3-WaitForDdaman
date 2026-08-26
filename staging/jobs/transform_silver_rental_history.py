@@ -715,7 +715,7 @@ def run() -> None:
     # #232: 백필 DAG가 청크를 dynamic task mapping으로 독립 실행할 때 쓰는 경로.
     # 워터마크를 읽지도 쓰지도 않는다 - 병렬로 도는 청크들이 서로 다른 시점의
     # 워터마크를 읽어 겹치거나, 워터마크를 여러 번 잘못된 순서로 쓰는 걸 막기 위함.
-    # 워터마크 전진은 airflow/dags/bronze_initial_load_all_sources_dag.py의 마무리
+    # 워터마크 전진은 airflow/dags/initial_load_dag.py의 마무리
     # 태스크(advance_silver_rental_history_watermark)가 연속 완료 구간까지만 담당한다.
     range_start = os.getenv("BACKFILL_RANGE_START")
     range_end = os.getenv("BACKFILL_RANGE_END")

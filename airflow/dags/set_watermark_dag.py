@@ -51,7 +51,7 @@ def _set_watermark_callable(params, **kwargs):
     schedule=None,
     start_date=pendulum.datetime(2026, 1, 1, tz="Asia/Seoul"),
     catchup=False,
-    tags=["independent", "manual"],
+    tags=["utils", "manual"],
     params={
         "watermark_date": "2026-06-30",
         "dataset": "rental_history",  # rental_history | failure_report | silver_rental_history | gold_dim_bike | bikeman_event | silver_bikeman_action

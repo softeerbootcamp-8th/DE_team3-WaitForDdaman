@@ -26,7 +26,7 @@ set_watermark.py와 동일하게 DATASET 환경변수로 대상을 분기한다 
 여기서 다운로드 직후 곧바로 S3에 순차 업로드까지 했는데, 빈 S3에 ~40~47GB/114개 파일을
 전부 올려야 하는 초기 상황에서는 이 태스크 하나가 몇 시간짜리가 되고, 재시도하면 이미
 올린 파일까지 처음부터 다시 순회해야 했다. 업로드는 jobs/stage_initial_load_files.py가
-배치 단위 Dynamic Task Mapping으로 별도로 맡는다(bronze_initial_load_all_sources_dag.py
+배치 단위 Dynamic Task Mapping으로 별도로 맡는다(initial_load_dag.py
 참고) - 다운로드/압축 해제 캐싱(ensure_backfill_files, 위 문단)은 그대로 이 잡에 남는다.
 
 사용법:

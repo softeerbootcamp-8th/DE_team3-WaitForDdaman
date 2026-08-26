@@ -107,10 +107,10 @@ Iceberg 테이블을 읽는 부분(`_baseline`/`_delta`/`_latest_snapshot` 등)�
 둘 다 데이터 내용(쿼리 결과)은 바꾸지 않고 물리 파일/스냅샷 이력만 정리하므로 언제
 다시 돌려도 안전(멱등)하다.
 
-- `jobs/compact_gold_tables.py`: 위 4개 테이블에 대해 `expire_snapshots`(7일보다 오래된
+- `jobs/compact_iceberg_tables.py`: 위 4개 테이블에 대해 `expire_snapshots`(7일보다 오래된
   스냅샷 만료, 단 최소 3개는 나이와 무관하게 항상 보존 - 롤백 여지)를 먼저 돌리고
   `rewrite_data_files`를 그 뒤에 돌린다. 테이블이 아직 없으면 조용히 건너뛴다.
-- DAG: `gold_maintenance` (`airflow/dags/gold_maintenance_dag.py`) - 매주 일요일
+- DAG: `iceberg_maintenance` (`airflow/dags/iceberg_maintenance_dag.py`) - 매주 일요일
   03:00 KST. daily 배치(`gold_dim_fact`, 08:00 KST)와 분리한 이유는 파일/스냅샷이
   하루에 1개씩만 늘어나 매일 돌릴 필요가 없고, 유지보수 실패가 daily 배치 SLA에
   영향을 주지 않게 하기 위함(자세한 설계는 두 파일의 docstring 참고).
@@ -119,5 +119,5 @@ Iceberg 테이블을 읽는 부분(`_baseline`/`_delta`/`_latest_snapshot` 등)�
 # 로컬에서 수동 실행
 cd pipeline/collection_priority
 export PYTHONPATH=../..:../../ingestion:$PYTHONPATH
-python -m jobs.compact_gold_tables
+python -m jobs.compact_iceberg_tables
 ```

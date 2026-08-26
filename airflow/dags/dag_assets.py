@@ -37,7 +37,7 @@ FAILURE_REPORT_BRONZE = Asset("failure_report_bronze")
 
 # bikeman_event Bronze 적재가 성공적으로 끝났음을 나타내는 Asset.
 # bronze_daily_batch_all_sources_dag.py의 daily_batch_bikeman_event 태스크가
-# outlets로 이 Asset을 갱신하고, silver_bikeman_action_daily_dag.py가
+# outlets로 이 Asset을 갱신하고, silver_bikeman_action_dag.py가
 # 이 Asset의 갱신을 스케줄 트리거로 사용한다.
 BIKEMAN_EVENT_BRONZE = Asset("bikeman_event_bronze")
 

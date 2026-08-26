@@ -1,4 +1,4 @@
-"""통합 Raw 예비 수집 DAG (raw_preliminary_all_sources) 회귀 테스트."""
+"""통합 Raw 예비 수집 DAG (raw_preliminary) 회귀 테스트."""
 
 import ast
 import sys
@@ -24,7 +24,7 @@ def _dag_folder() -> Path:
 
 
 def _dag_file() -> Path:
-    return _dag_folder() / "raw_preliminary_all_sources_dag.py"
+    return _dag_folder() / "raw_preliminary_dag.py"
 
 
 @pytest.fixture(scope="module")
@@ -35,12 +35,12 @@ def preliminary_dag():
     if folder not in sys.path:
         sys.path.insert(0, folder)
     dag_bag = DagBag(folder)
-    _assert_imported(dag_bag, "raw_preliminary_all_sources_dag.py")
-    return dag_bag.dags["raw_preliminary_all_sources"]
+    _assert_imported(dag_bag, "raw_preliminary_dag.py")
+    return dag_bag.dags["raw_preliminary"]
 
 
-def test_raw_preliminary_all_sources_dag_structure(preliminary_dag):
-    assert preliminary_dag.dag_id == "raw_preliminary_all_sources"
+def test_raw_preliminary_dag_structure(preliminary_dag):
+    assert preliminary_dag.dag_id == "raw_preliminary"
     task_ids = set(preliminary_dag.task_dict.keys())
     assert "collect_rental_history_preliminary_raw" in task_ids
     assert "collect_failure_report_preliminary_raw" in task_ids

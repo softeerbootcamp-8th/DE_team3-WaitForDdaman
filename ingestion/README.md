@@ -143,7 +143,7 @@ LocalStack/AWS 환경은 Iceberg warehouse와 JDBC 카탈로그가 완전히 비
 DAG ID:
 
 ```text
-bronze_initial_load_all_sources
+initial_load
 ```
 
 실행 용도:
@@ -184,7 +184,7 @@ Airflow UI에서 `Trigger DAG w/ config`를 사용할 경우 예시:
 DAG ID:
 
 ```text
-bronze_historical_reconciliation
+bronze_catchup_all_sources
 ```
 
 매일 00:30에 `rental_history`와 `failure_report`의 Bronze 워터마크 다음 날짜부터

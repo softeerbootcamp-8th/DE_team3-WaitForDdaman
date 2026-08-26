@@ -70,11 +70,11 @@ done
 # (3) check_gold_dim_fact.py / check_silver_gold.py - 가드 없이 모듈 최상단에서
 #     즉시 build_spark_session() + 실제 카탈로그 테이블 read를 한다. 실행하면
 #     실제 S3/RDS 접속을 시도해 멈추거나 애매하게 실패하므로 실행하지 않고
-#     이미지 안에 파일이 있는지 + 문법이 유효한지만 확인한다. compact_gold_tables.py도
+#     이미지 안에 파일이 있는지 + 문법이 유효한지만 확인한다. compact_iceberg_tables.py도
 #     실제 실행하면 카탈로그 프로시저를 호출하므로 같은 방식으로 확인한다.
 #     (수동 검증 스크립트라 실제 실행 검증은 실 환경에서 한다.)
 for entry in \
-  /opt/app/pipeline/collection_priority/jobs/compact_gold_tables.py \
+  /opt/app/pipeline/collection_priority/jobs/compact_iceberg_tables.py \
   /opt/app/airflow/scripts/check_gold_dim_fact.py \
   /opt/app/airflow/scripts/check_silver_gold.py
 do

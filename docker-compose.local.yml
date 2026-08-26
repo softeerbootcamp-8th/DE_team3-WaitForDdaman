@@ -76,11 +76,12 @@ services:
     restart: always
 
   localstack:
-    image: localstack/localstack:latest
+    image: localstack/localstack:2026.06.0
     container_name: localstack
     ports:
       - "4566:4566"
     environment:
+      - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN}
       - SERVICES=s3
       - DEFAULT_REGION=ap-northeast-2
       - DEBUG=0

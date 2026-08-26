@@ -67,7 +67,7 @@ default_args = {
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
-    tags=["independent", "monitoring"],
+    tags=["utils", "daily_batch"],
     doc_md=__doc__,
 )
 def watermark_staleness_check():

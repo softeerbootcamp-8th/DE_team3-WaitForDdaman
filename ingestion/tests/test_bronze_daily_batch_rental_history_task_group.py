@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 DAG_ID = "bronze_daily_batch_all_sources"
-GROUP = "rental_history"
+GROUP = "daily_batch_rental_history"
 CHAIN = [
     f"{GROUP}.collect_final_raw",
     f"{GROUP}.select_final_or_preliminary",
