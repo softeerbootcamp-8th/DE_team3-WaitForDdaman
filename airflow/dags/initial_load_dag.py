@@ -153,7 +153,7 @@ default_args = {
 
 
 @dag(
-    dag_id="bronze_initial_load_all_sources",
+    dag_id="initial_load",
     schedule=None,  # 초기 적재는 반복 실행이 아니라 필요할 때 한 번 트리거하는 작업
     start_date=pendulum.datetime(2026, 1, 1, tz="Asia/Seoul"),
     catchup=False,
@@ -163,7 +163,7 @@ default_args = {
     # 슬롯 수가 실제 동시성 제약 역할을 한다 (#249, "왜 병렬을 2개로 제한하는가" 문단 참고).
     max_active_tasks=2 if not is_aws_env() else 10,
     default_args=default_args,
-    tags=["bronze", "independent", "manual"],
+    tags=["bronze", "manual"],
     params={
         "rental_history_dir": f"{INGESTION_DIR}/data/rental_history",
         "rental_history_pattern": "*",
@@ -195,7 +195,7 @@ default_args = {
     },
     doc_md=__doc__,
 )
-def bronze_initial_load_all_sources():
+def initial_load():
     # 신규 환경에서도 초기 적재 태스크가 테이블 없음으로 실패하지 않도록
     # 모든 파일 탐색/적재보다 먼저 Bronze Iceberg 테이블을 멱등 생성한다.
     create_bronze_tables = BashOperator(
@@ -293,7 +293,7 @@ def bronze_initial_load_all_sources():
                 log_group_name="/emr-serverless/bronze-initial-load",
                 log_stream_name_prefix="rental-history",
                 tags={
-                    "dag_id": "bronze_initial_load_all_sources",
+                    "dag_id": "initial_load",
                     "task_id": "initial_load_rental_history_batch",
                     "dataset": "rental_history",
                 },
@@ -396,7 +396,7 @@ def bronze_initial_load_all_sources():
                 log_group_name="/emr-serverless/bronze-initial-load",
                 log_stream_name_prefix="failure-report",
                 tags={
-                    "dag_id": "bronze_initial_load_all_sources",
+                    "dag_id": "initial_load",
                     "task_id": "initial_load_failure_report_batch",
                     "dataset": "failure_report",
                 },
@@ -609,4 +609,4 @@ def bronze_initial_load_all_sources():
     create_bronze_tables >> [list_rental_history_files, list_failure_report_files]
 
 
-bronze_initial_load_all_sources()
+initial_load()

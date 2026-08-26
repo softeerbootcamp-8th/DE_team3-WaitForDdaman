@@ -143,7 +143,7 @@ LocalStack/AWS 환경은 Iceberg warehouse와 JDBC 카탈로그가 완전히 비
 DAG ID:
 
 ```text
-bronze_initial_load_all_sources
+initial_load
 ```
 
 실행 용도:

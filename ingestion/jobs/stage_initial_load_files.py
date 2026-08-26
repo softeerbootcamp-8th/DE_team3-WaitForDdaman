@@ -2,7 +2,7 @@
 Bronze 초기 적재 - 로컬 입력 파일을 S3 초기 적재 스테이징 프리픽스로 배치 업로드한다 (#255)
 
 jobs/list_input_files.py는 다운로드(+캐시)와 압축 해제까지만 하고 로컬 파일 경로 목록을
-돌려준다. S3 업로드는 이 잡이 별도로 맡는다 - DAG(bronze_initial_load_all_sources_dag.py)
+돌려준다. S3 업로드는 이 잡이 별도로 맡는다 - DAG(initial_load_dag.py)
 가 그 목록을 배치로 잘라(dag_common.chunk_list) Dynamic Task Mapping으로 배치마다 이
 스크립트를 별도 프로세스로 실행한다. 완전히 빈 S3에서 ~40~47GB/114개 파일을 전부 올려야
 하는 초기 상황을 다운로드 태스크 하나가 몇 시간 동안 순차로 처리하게 두지 않으면서도,

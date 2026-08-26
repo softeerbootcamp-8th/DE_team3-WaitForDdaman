@@ -12,7 +12,7 @@ gold.bike_location/station_active/fact_station_inventory/bike_last_action은
 컴팩션은 daily 배치의 SLA와 무관하고, 하루에 1~2개씩만 늘어나는 파일을 매일
 정리할 필요는 없으므로 주간 1회로 충분하다 - gold_dim_fact에 태스크를 얹으면
 daily 배치가 컴팩션 실패에 영향받게 되므로 분리했다(자세한 이유는
-pipeline/collection_priority/jobs/compact_gold_tables.py docstring 참고).
+pipeline/collection_priority/jobs/compact_iceberg_tables.py docstring 참고).
 
 ### 스케줄
 매주 일요일 03:00 KST - daily 배치(08:00 KST)와 겹치지 않는 새벽 시간대,
@@ -43,42 +43,42 @@ def _compact_bash() -> str:
     return (
         f"cd {COLLECTION_PRIORITY_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
         f"PYTHONPATH={INGESTION_DIR}:$PYTHONPATH PYTHONDONTWRITEBYTECODE=1 "
-        f"{PYTHON} -m jobs.compact_gold_tables"
+        f"{PYTHON} -m jobs.compact_iceberg_tables"
     )
 
 
 @dag(
-    dag_id="gold_maintenance",
+    dag_id="iceberg_maintenance",
     schedule="0 3 * * 0",  # 매주 일요일 03:00 KST
     start_date=pendulum.datetime(2026, 8, 17, tz="Asia/Seoul"),
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
-    tags=["gold", "independent", "weekly_batch"],
+    tags=["utils", "weekly_batch"],
     doc_md=__doc__,
 )
-def gold_maintenance():
+def iceberg_maintenance():
     if is_aws_env():
-        @task(task_id="compact_gold_tables", execution_timeout=timedelta(hours=1))
-        def compact_gold_tables_emr() -> str:
+        @task(task_id="compact_iceberg_tables", execution_timeout=timedelta(hours=1))
+        def compact_iceberg_tables_emr() -> str:
             return run_emr_serverless_spark_job(
-                entry_point="local:///opt/app/pipeline/collection_priority/jobs/compact_gold_tables.py",
-                name="gold-compact-tables",
-                log_group_name="/emr-serverless/gold-maintenance",
-                log_stream_name_prefix="compact-gold-tables",
+                entry_point="local:///opt/app/pipeline/collection_priority/jobs/compact_iceberg_tables.py",
+                name="iceberg-compact-tables",
+                log_group_name="/emr-serverless/iceberg-maintenance",
+                log_stream_name_prefix="compact-iceberg-tables",
                 tags={
-                    "dag_id": "gold_maintenance",
-                    "task_id": "compact_gold_tables",
+                    "dag_id": "iceberg_maintenance",
+                    "task_id": "compact_iceberg_tables",
                 },
             )
 
-        compact_gold_tables_emr()
+        compact_iceberg_tables_emr()
     else:
         BashOperator(
-            task_id="compact_gold_tables",
+            task_id="compact_iceberg_tables",
             bash_command=_compact_bash(),
             execution_timeout=timedelta(hours=1),
         )
 
 
-gold_maintenance()
+iceberg_maintenance()

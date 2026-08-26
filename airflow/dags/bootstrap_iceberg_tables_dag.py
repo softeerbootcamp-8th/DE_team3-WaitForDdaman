@@ -28,7 +28,7 @@ from dag_common import BRONZE_POOL
     catchup=False,
     max_active_runs=1,
     default_args=DEFAULT_ARGS,
-    tags=["bronze", "manual", "bootstrap"],
+    tags=["bronze", "manual"],
     doc_md=__doc__,
 )
 def bootstrap_iceberg_tables():

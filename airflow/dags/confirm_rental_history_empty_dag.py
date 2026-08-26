@@ -47,7 +47,7 @@ def _confirm_empty_callable(target_date_str: str, confirmed_by: str, reason: str
     start_date=pendulum.datetime(2026, 1, 1, tz="Asia/Seoul"),
     catchup=False,
     max_active_runs=1,
-    tags=["bronze", "silver", "manual", "recovery"],
+    tags=["bronze", "manual"],
     params={
         "target_date": "",
         "confirmed_by": "",

@@ -36,7 +36,7 @@ Bronze / Silver 생성
   - `transform_silver_rental_history`만 실행 (2026-08-17부터 `build_gold_dim_bike`는 `gold_dim_fact`로 이관됨)
   - 매일 07:30 KST(Bronze 06:00 시작 이후로 고정 오프셋 - 실제 의존관계 아님)
 
-- DAG: `silver_station_active_daily` (`airflow/dags/silver_station_active_dag.py`)
+- DAG: `silver_station_active` (`airflow/dags/silver_station_active_dag.py`)
   - 매일 07:00 KST (Bronze 06:00 이후 고정 오프셋)
   - catchup 없음 (API가 과거 스냅샷을 소급 조회 불가)
 
@@ -69,5 +69,5 @@ SNAPSHOT_DATE=2026-08-14 python -m jobs.silver_station_active   # 특정 날짜 
 | 의미 | 그 날 station_id가 있으면 = 그 날 실시간 대여정보 API 응답에 실제로 잡힌 대여소 (운영 중 최종 판정은 Gold 몫) |
 | NULL 처리 | station_id 없는/중복 행은 Silver에서 이미 제거됨 |
 | 재실행 동작 | 같은 snapshot_date 파티션을 덮어씀(`common/iceberg_io.py`의 `overwrite_partition`), 멱등 |
-| 적재 완료 시점 | `silver_station_active_daily` DAG, 매일 07:00 KST |
+| 적재 완료 시점 | `silver_station_active` DAG, 매일 07:00 KST |
 | 다른 속성 필요시 | `silver.station_master`를 `station_id`로 조인 |

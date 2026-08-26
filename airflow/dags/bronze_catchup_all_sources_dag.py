@@ -73,7 +73,7 @@ def _current_run_id() -> str:
     max_active_runs=1,
     max_active_tasks=5,
     default_args=DEFAULT_ARGS,
-    tags=["bronze", "catchup", "rental_history", "failure_report"],
+    tags=["bronze", "daily_batch"],
     doc_md=__doc__,
 )
 def bronze_catchup_all_sources():
