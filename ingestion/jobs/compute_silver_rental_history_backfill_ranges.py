@@ -52,20 +52,32 @@ from common.silver_rental_history_completion import (
 )
 from common.watermark import read_watermark
 from config.watermark_keys import DATASET_WATERMARK_KEYS
+from jobs.rental_history_snapshot_policy import parse_max_days
 
 logger = logging.getLogger(__name__)
 
 SILVER_WATERMARK_KEY = DATASET_WATERMARK_KEYS["silver_rental_history"]
 DEFAULT_CHUNK_DAYS = 31
-DEFAULT_TOTAL_DAYS_CAP = 3650
+
+# 기본은 상한 없음. 예전 기본값 3650(10년)은 초기 적재를 조용히 잘랐다 - 2015-01-01
+# 시작 계획이 2024-12-28에서 끊겨 118청크가 전부 성공하고 DAG도 success로 끝났는데
+# Bronze(2026-06-30)까지 1년 반이 남았고, 워터마크를 직접 보기 전엔 알 수 없었다.
+# 청크가 marker로 독립 재시작되므로(#232 이후) 계획이 길어도 실패 범위가 번지지 않는다.
+# 한 실행을 일부러 짧게 끊고 싶으면 TOTAL_DAYS_CAP에 숫자를 넣는다.
+DEFAULT_TOTAL_DAYS_CAP = None
 
 
 def build_ranges(
-    silver_watermark: date, bronze_watermark: date, chunk_days: int, total_days_cap: int
+    silver_watermark: date, bronze_watermark: date, chunk_days: int, total_days_cap: int | None
 ) -> list[dict]:
+    """Silver 워터마크 다음 날부터 Bronze 상한까지를 chunk_days 크기로 자른다.
+
+    total_days_cap이 None이면 상한을 걸지 않고 Bronze 워터마크까지 전부 계획에 넣는다.
+    """
     start = silver_watermark + timedelta(days=1)
-    capped_end = start + timedelta(days=total_days_cap - 1)
-    end = min(bronze_watermark, capped_end)
+    end = bronze_watermark
+    if total_days_cap is not None:
+        end = min(end, start + timedelta(days=total_days_cap - 1))
 
     ranges = []
     cursor = start
@@ -126,7 +138,9 @@ def run(chunk_days: int, total_days_cap: int) -> dict:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    # TOTAL_DAYS_CAP은 빈 값이면 "상한 없음"이다 - MAX_DAYS_PER_RUN과 같은 규칙을 쓰려고
+    # parse_max_days를 그대로 재사용한다(DAG params 기본값도 빈 문자열이라 이 경로를 탄다).
     run(
         chunk_days=int(os.getenv("CHUNK_DAYS") or DEFAULT_CHUNK_DAYS),
-        total_days_cap=int(os.getenv("TOTAL_DAYS_CAP") or DEFAULT_TOTAL_DAYS_CAP),
+        total_days_cap=parse_max_days(os.getenv("TOTAL_DAYS_CAP")) or DEFAULT_TOTAL_DAYS_CAP,
     )
