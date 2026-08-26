@@ -26,6 +26,7 @@ from common.api_client import (
     fetch_failure_reports_by_date,
     strip_pagination_meta,
 )
+from common.cutoff_utils import parse_collection_cutoff
 from common.iceberg_io import overwrite_partition
 from common.s3_utils import ensure_bucket, put_json
 from common.watermark import read_watermark, write_watermark
@@ -40,6 +41,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 WATERMARK_KEY = BRONZE_FAILURE_REPORT
+COMPLETION_PREFIX = "_meta/completion/bronze_failure_report"
 
 ARROW_SCHEMA = pa.schema([
     pa.field("bike_no", pa.string()),
@@ -115,19 +117,63 @@ def _process_one_day(target_date: date) -> int:
     return row_count
 
 
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if not normalized:
+        return default
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise ValueError(f"{name} must be 'true' or 'false': {value!r}")
+
+
+def _write_completion_marker(
+    bucket: str,
+    target_date: date,
+    status: str,
+    row_count: int,
+    started_at: str,
+    error: str | None = None,
+) -> dict:
+    target_value = target_date.isoformat()
+    marker = {
+        "dataset": "failure_report",
+        "target_date": target_value,
+        "status": status,
+        "row_count": row_count,
+        "started_at": started_at,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "dag_run_id": os.getenv("DAG_RUN_ID", "unknown"),
+        "source": "seoul_open_api",
+        "error": error,
+    }
+    put_json(bucket, f"{COMPLETION_PREFIX}/target_date={target_value}/completion.json", marker)
+    return marker
+
+
 def run() -> None:
-    if config.SETTINGS.seoul_api_key == "sample":
+    api_key = getattr(config.SETTINGS, "seoul_api_key1", None) or getattr(config.SETTINGS, "seoul_api_key", "")
+    if api_key == "sample":
         logger.warning(
             "SEOUL_API_KEY가 'sample'(데모 키)입니다. data.seoul.go.kr에서 발급받은 "
             "실제 인증키로 .env를 교체하지 않으면 API 호출이 계속 실패합니다."
         )
 
-    ensure_bucket(config.SETTINGS.raw_bucket)
+    bucket = config.SETTINGS.raw_bucket
+    ensure_bucket(bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
+    cutoff = parse_collection_cutoff(os.getenv("COLLECTION_CUTOFF_AT"))
+    as_of_date = cutoff.date()
+
+    t0_enabled = _parse_bool_env("FAILURE_REPORT_T0_ENABLED", default=False)
     last_processed = read_watermark(watermark_key=WATERMARK_KEY)
     start_date = last_processed + timedelta(days=1)
-    end_date = date.today() - timedelta(days=1)
+    end_date = as_of_date - timedelta(days=1)
 
     max_days = os.getenv("MAX_DAYS_PER_RUN")
     if max_days:
@@ -139,19 +185,31 @@ def run() -> None:
             )
             end_date = capped_end
 
-    if start_date > end_date:
-        logger.info("처리할 신규 날짜 없음 (워터마크=%s)", last_processed)
-        return
+    if start_date <= end_date:
+        current = start_date
+        while current <= end_date:
+            started_at = datetime.now(timezone.utc).isoformat()
+            try:
+                row_count = _process_one_day(current)
+                status = "COMPLETE_EMPTY" if row_count == 0 else "COMPLETE"
+                _write_completion_marker(bucket, current, status, row_count, started_at)
+                write_watermark(current, watermark_key=WATERMARK_KEY)
+            except (SchemaValidationError, SeoulApiError, SeoulApiTransientError) as e:
+                logger.error("%s 처리 실패, 배치 중단: %s", current, e)
+                _write_completion_marker(bucket, current, "FAILED", 0, started_at, error=str(e))
+                sys.exit(1)
+            current += timedelta(days=1)
+    else:
+        logger.info("처리할 신규 확정 날짜 없음 (워터마크=%s)", last_processed)
 
-    current = start_date
-    while current <= end_date:
+    if t0_enabled:
+        logger.info("FAILURE_REPORT_T0_ENABLED=true 적용 - 기준일 당일(%s) 파티션 적재 시작 (워터마크 미갱신)", as_of_date)
         try:
-            _process_one_day(current)
-            write_watermark(current, watermark_key=WATERMARK_KEY)
+            _process_one_day(as_of_date)
+            logger.info("기준일 당일(%s) 고장신고 파티션 적재 완료", as_of_date)
         except (SchemaValidationError, SeoulApiError, SeoulApiTransientError) as e:
-            logger.error("%s 처리 실패, 배치 중단: %s", current, e)
+            logger.error("기준일 당일(%s) 고장신고 T0 적재 실패: %s", as_of_date, e)
             sys.exit(1)
-        current += timedelta(days=1)
 
 
 if __name__ == "__main__":

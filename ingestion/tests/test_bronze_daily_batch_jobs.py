@@ -14,6 +14,7 @@ from common.s3_utils import get_s3_client, put_json
 from jobs.daily_batch_bikeman_event import _build_arrow_table as build_bikeman_event_arrow
 from jobs.daily_batch_bikeman_event import _process_one_day as process_bikeman_event
 from jobs.daily_batch_failure_report import _build_arrow_table as build_failure_report_arrow
+from jobs.daily_batch_failure_report import _parse_bool_env as parse_failure_report_bool_env
 from jobs.daily_batch_failure_report import _process_one_day as process_failure_report
 from jobs.daily_batch_rental_history import _build_arrow_table as build_rental_history_arrow
 from jobs.daily_batch_rental_history import _process_one_day as process_rental_history
@@ -283,3 +284,16 @@ def test_bikeman_event_arrow_matches_iceberg_timestamp_types():
     assert table.schema.field("occurred_at").type == expected
     assert table.schema.field("received_at").type == expected
     assert table.schema.field("ingested_at").type == expected
+
+
+def test_failure_report_parse_bool_env(monkeypatch):
+    monkeypatch.delenv("FAILURE_REPORT_T0_ENABLED", raising=False)
+    assert parse_failure_report_bool_env("FAILURE_REPORT_T0_ENABLED", default=False) is False
+    assert parse_failure_report_bool_env("FAILURE_REPORT_T0_ENABLED", default=True) is True
+
+    monkeypatch.setenv("FAILURE_REPORT_T0_ENABLED", "true")
+    assert parse_failure_report_bool_env("FAILURE_REPORT_T0_ENABLED") is True
+
+    monkeypatch.setenv("FAILURE_REPORT_T0_ENABLED", "false")
+    assert parse_failure_report_bool_env("FAILURE_REPORT_T0_ENABLED") is False
+

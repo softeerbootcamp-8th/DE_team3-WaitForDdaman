@@ -36,6 +36,7 @@ from dag_common import (
     load_env_file,
 )
 
+INGESTION_DIR = os.getenv("INGESTION_DIR", "/opt/airflow/ingestion")
 TARGET_DATE = "{{ data_interval_end.in_timezone('Asia/Seoul').subtract(days=2).strftime('%Y-%m-%d') }}"
 
 
@@ -44,6 +45,15 @@ def _parse_dates(raw_json: str) -> list[str]:
     if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
         raise ValueError(f"gap 목록 형식이 올바르지 않음: {values!r}")
     return values
+
+
+def _current_run_id() -> str:
+    try:
+        from airflow.operators.python import get_current_context
+
+        return get_current_context()["run_id"]
+    except Exception:
+        return os.getenv("AIRFLOW_CTX_DAG_RUN_ID", "unknown")
 
 
 @dag(
@@ -121,8 +131,8 @@ def bronze_historical_reconciliation():
                 "SNAPSHOT_TYPE": "FINAL",
                 "RENTAL_HISTORY_T0_ENABLED": "false",
                 "RENTAL_HISTORY_FALLBACK_ENABLED": "false",
-                "DAG_RUN_ID": os.getenv("AIRFLOW_CTX_DAG_RUN_ID", "unknown"),
-                "PYTHONPATH": "/opt/airflow/ingestion:/opt/airflow/pylib",
+                "DAG_RUN_ID": _current_run_id(),
+                "PYTHONPATH": f"{INGESTION_DIR}:/opt/airflow/pylib:{os.getenv('PYTHONPATH', '')}",
             }
         )
         if api_key_slot is not None:
@@ -148,14 +158,15 @@ def bronze_historical_reconciliation():
         started_at = pendulum.now("UTC").to_iso8601_string()
         env = _rental_history_env(target_date, api_key_slot)
         env["BACKFILL_STARTED_AT"] = started_at
-        cwd = "/opt/airflow/ingestion"
+        cwd = INGESTION_DIR
         commands = [
             [sys.executable, "-m", "jobs.collect_rental_history_raw"],
             [sys.executable, "-m", "jobs.select_rental_history_snapshot"],
         ]
-        results = [subprocess.run(command, cwd=cwd, env=env, check=False) for command in commands]
-        if results[-1].returncode != 0:
-            raise RuntimeError(f"rental_history {target_date} 준비(수집/선택) 실패")
+        for command in commands:
+            res = subprocess.run(command, cwd=cwd, env=env, check=False)
+            if res.returncode != 0:
+                raise RuntimeError(f"rental_history {target_date} 준비(수집/선택) 실패: {' '.join(command)}")
         return {"target_date": target_date, "started_at": started_at}
 
     @task(
@@ -185,14 +196,25 @@ def bronze_historical_reconciliation():
         """
         target_date = request["target_date"]
         env = _rental_history_env(target_date, api_key_slot=None)
-        cwd = "/opt/airflow/ingestion"
-        commands = [
+        cwd = INGESTION_DIR
+
+        promote_res = subprocess.run(
             [sys.executable, "-m", "jobs.promote_rental_history_raw"],
+            cwd=cwd,
+            env=env,
+            check=False,
+        )
+        marker_res = subprocess.run(
             [sys.executable, "-m", "jobs.write_rental_history_completion_marker"],
-        ]
-        results = [subprocess.run(command, cwd=cwd, env=env, check=False) for command in commands]
-        if results[-1].returncode != 0:
-            raise RuntimeError(f"rental_history {target_date} 처리 실패")
+            cwd=cwd,
+            env=env,
+            check=False,
+        )
+        if promote_res.returncode != 0 or marker_res.returncode != 0:
+            raise RuntimeError(
+                f"rental_history {target_date} promote 처리 실패 "
+                f"(promote={promote_res.returncode}, marker={marker_res.returncode})"
+            )
         return target_date
 
     @task(
@@ -211,13 +233,13 @@ def bronze_historical_reconciliation():
             {
                 "SEOUL_API_KEY": key,
                 "TARGET_DATE": target_date,
-                "DAG_RUN_ID": os.getenv("AIRFLOW_CTX_DAG_RUN_ID", "unknown"),
-                "PYTHONPATH": "/opt/airflow/ingestion:/opt/airflow/pylib",
+                "DAG_RUN_ID": _current_run_id(),
+                "PYTHONPATH": f"{INGESTION_DIR}:/opt/airflow/pylib:{os.getenv('PYTHONPATH', '')}",
             }
         )
         result = subprocess.run(
             [sys.executable, "-m", "jobs.catchup_failure_report_date"],
-            cwd="/opt/airflow/ingestion",
+            cwd=INGESTION_DIR,
             env=env,
             check=False,
         )
