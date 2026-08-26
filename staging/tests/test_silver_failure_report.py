@@ -176,3 +176,126 @@ def test_validate_allows_duplicate_unique_key():
 def test_evaluate_partial_load(bronze, prev_silver, expected_stop):
     stop, _ = evaluate_partial_load(bronze, prev_silver)
     assert stop is expected_stop
+
+
+# ---------------------------------------------------------------------------
+# run()의 워터마크 읽기 순서 (#286)
+# ---------------------------------------------------------------------------
+
+
+class _FakeCatalog:
+    """load_table(BRONZE)만 의미 있게 동작하는 최소 catalog 스텁.
+
+    Bronze 테이블을 읽는 순간 Bronze 워터마크를 전진시킨다 - 실행 중에 catch-up의
+    advance_failure_report_watermark나 06:00 일배치가 워터마크를 올리는 상황을
+    재현하는 장치다. 이게 없으면 run()이 워터마크를 언제 읽는지 테스트가 구분하지
+    못한다(호출이 한 번뿐이면 어느 시점에 읽어도 같은 값이 나온다).
+    """
+
+    def __init__(self, bronze: pa.Table, calls: list, state: dict):
+        self._bronze = bronze
+        self._calls = calls
+        self._state = state
+
+    def load_table(self, identifier):
+        self._calls.append(f"load_table:{identifier}")
+        if identifier == ADVANCING_ON_BRONZE_READ[0]:
+            self._state["watermark"] = ADVANCING_ON_BRONZE_READ[1]
+        return _FakeTable(self._bronze)
+
+
+class _FakeTable:
+    def __init__(self, table: pa.Table):
+        self._table = table
+
+    def scan(self, **_kwargs):
+        return self
+
+    def to_arrow(self) -> pa.Table:
+        return self._table
+
+
+WATERMARK_BEFORE_BRONZE_READ = "2026-08-20"
+# (Bronze를 읽는 순간 워터마크가 이 값으로 전진한다, 전진 후 값)
+ADVANCING_ON_BRONZE_READ = ("bronze.failure_report", "2026-08-24")
+
+
+@pytest.fixture
+def run_harness(monkeypatch):
+    """run()을 Spark/S3 없이 돌리고 호출 순서를 기록한다.
+
+    Bronze 테이블을 읽는 순간 Bronze 워터마크가 전진하므로, run()이 그 전에 읽었는지
+    후에 읽었는지가 기록된 값으로 드러난다.
+    """
+    from jobs import silver_failure_report as mod
+
+    calls: list[str] = []
+    written: list[tuple] = []
+    state = {"watermark": WATERMARK_BEFORE_BRONZE_READ}
+
+    def fake_read_watermark(watermark_key=None, **_kwargs):
+        value = state["watermark"]
+        calls.append(f"read_watermark:{value}")
+        return value
+
+    def fake_write_watermark(value, watermark_key=None, **_kwargs):
+        calls.append(f"write_watermark:{value}")
+        written.append((value, watermark_key))
+
+    def fake_overwrite_all(_table, _rows):
+        calls.append("overwrite_all")
+
+    monkeypatch.setattr(
+        mod, "build_iceberg_catalog", lambda: _FakeCatalog(bronze_table(), calls, state)
+    )
+    monkeypatch.setattr(mod, "read_watermark", fake_read_watermark)
+    monkeypatch.setattr(mod, "write_watermark", fake_write_watermark)
+    monkeypatch.setattr(mod, "overwrite_all", fake_overwrite_all)
+    monkeypatch.setattr(mod, "_silver_row_count", lambda _catalog: 1)
+    monkeypatch.setattr(mod, "_ensure_silver_table", lambda _catalog: object())
+    return mod, calls, written
+
+
+def test_silver_watermark_uses_value_read_before_bronze(run_harness):
+    """Silver에 기록되는 값은 Bronze를 읽은 시점의 워터마크여야 한다.
+
+    overwrite 이후에 다시 읽으면, 그 사이 catch-up이나 일배치가 Bronze 워터마크를
+    전진시켰을 때 Silver가 자기 테이블에 없는 날짜까지 완료로 선언한다.
+    """
+    mod, _calls, written = run_harness
+
+    mod.run()
+
+    # Bronze 읽기 전 값이어야 한다. 전진 후 값(2026-08-24)이면 Silver 테이블에 없는
+    # 날짜까지 완료로 선언하는 과대 보고다.
+    assert written == [(WATERMARK_BEFORE_BRONZE_READ, mod.SILVER_FAILURE_REPORT)]
+
+
+def test_watermark_is_read_before_bronze_and_written_after_overwrite(run_harness):
+    """순서 자체를 고정한다 - 읽기는 Bronze 앞, 쓰기는 overwrite 뒤."""
+    mod, calls, _written = run_harness
+
+    mod.run()
+
+    read_idx = calls.index(f"read_watermark:{WATERMARK_BEFORE_BRONZE_READ}")
+    bronze_idx = calls.index(f"load_table:{mod.BRONZE_TABLE}")
+    overwrite_idx = calls.index("overwrite_all")
+    write_idx = calls.index(f"write_watermark:{WATERMARK_BEFORE_BRONZE_READ}")
+
+    assert read_idx < bronze_idx, calls
+    assert overwrite_idx < write_idx, calls
+
+
+def test_watermark_not_written_when_overwrite_fails(run_harness, monkeypatch):
+    """부분 실패에서 워터마크를 전진시키지 않는다는 계약은 그대로 유지된다."""
+    mod, _calls, written = run_harness
+
+    def boom(_table, _rows):
+        raise RuntimeError("commit conflict")
+
+    monkeypatch.setattr(mod, "overwrite_all", boom)
+
+    with pytest.raises(RuntimeError):
+        mod.run()
+
+    assert written == []

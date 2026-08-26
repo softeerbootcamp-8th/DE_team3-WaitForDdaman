@@ -282,6 +282,17 @@ def _ensure_silver_table(catalog):
 def run() -> None:
     catalog = build_iceberg_catalog()
 
+    # Bronze 테이블을 읽기 "전에" Bronze 워터마크를 고정한다 (#286).
+    # 이 값은 성공 후 Silver 워터마크에 그대로 기록되므로, 아래 read보다 늦게 읽으면
+    # 그 사이 다른 writer(bronze_catchup_all_sources의 advance_failure_report_watermark,
+    # 06:00 일배치, 수동 set_watermark)가 Bronze 워터마크를 전진시켰을 때 Silver가
+    # 자기 테이블에 없는 날짜까지 "처리 완료"로 선언한다. 과소 보고는 다음 실행이
+    # 흡수하므로 안전하지만(전량 재구축), 과대 보고는 하류 check_silver_watermark를
+    # 통과시켜 Gold가 없는 데이터로 돌게 한다 - 부등호 방향을 여기서 고정한다.
+    # initial_load_dag의 planner가 bronze_watermark_at_start를 시작 시점에 고정하는
+    # 것과 같은 이유다.
+    bronze_watermark = read_watermark(watermark_key=BRONZE_FAILURE_REPORT)
+
     bronze_table = catalog.load_table(BRONZE_TABLE).scan(selected_fields=BRONZE_FIELDS).to_arrow()
     bronze_count = len(bronze_table)
     logger.info("bronze.failure_report: %d행", bronze_count)
@@ -311,9 +322,9 @@ def run() -> None:
     row_count = len(silver_arrow)
     overwrite_all(silver_table, silver_arrow)
 
-    # overwrite가 끝난 뒤에만 갱신 - 이 시점의 Bronze 워터마크까지 Silver에
-    # 반영됐다는 의미로 그대로 이어받는다
-    bronze_watermark = read_watermark(watermark_key=BRONZE_FAILURE_REPORT)
+    # overwrite가 끝난 뒤에만 쓴다 - 부분 실패에서 워터마크를 전진시키지 않는다는
+    # 계약(common/watermark.py)은 그대로다. 다만 쓰는 값은 여기서 다시 읽지 않고
+    # Bronze를 읽기 전에 고정해둔 값이다(위 주석 참고).
     write_watermark(bronze_watermark, watermark_key=SILVER_FAILURE_REPORT)
 
     logger.info("전량 덮어쓰기 완료: %d행 (Silver 워터마크=%s)", row_count, bronze_watermark)
