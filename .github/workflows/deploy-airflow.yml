@@ -1,0 +1,107 @@
+name: Deploy Airflow
+
+on:
+  push:
+    branches:
+      - production
+    paths:
+      - "airflow/**"
+      - "ingestion/**"
+      - "staging/**"
+      - "pipeline/**"
+      - "config/**"
+      - "docker-compose.prod.yml"
+      - ".github/workflows/deploy-airflow.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-northeast-2
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy Airflow
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Airflow Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: airflow/Dockerfile.prod
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.login-ecr.outputs.registry }}/waitforddaman-airflow:latest
+          cache-from: type=gha,scope=airflow
+          cache-to: type=gha,mode=max,scope=airflow
+
+      - name: Get runner public IP
+        id: runner-ip
+        run: echo "ip=$(curl -sf --retry 3 https://checkip.amazonaws.com | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Open SSH for this runner
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ secrets.SSH_SECURITY_GROUP_ID }} \
+            --protocol tcp --port 22 \
+            --cidr ${{ steps.runner-ip.outputs.ip }}/32
+          sleep 5
+
+      - name: Deploy Airflow to EC2
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          # docker-compose.prod.yml 동기화
+          for i in {1..5}; do
+            scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key docker-compose.prod.yml ${{ secrets.EC2_SSH_USER }}@${{ secrets.EC2_HOST }}:/opt/waitforddaman/docker-compose.prod.yml && break || sleep 3
+          done
+
+          # Airflow 전용 컨테이너만 순차 Pull 및 안전 갱신
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key ${{ secrets.EC2_SSH_USER }}@${{ secrets.EC2_HOST }} "bash -s" << 'EOF'
+            set -e
+            cd /opt/waitforddaman
+            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            export ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.ap-northeast-2.amazonaws.com"
+            export IMAGE_TAG="latest"
+            aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+            echo "==> Pulling latest Airflow image"
+            docker compose -f docker-compose.prod.yml pull airflow-scheduler
+            echo "==> Recreating Airflow services"
+            docker compose -f docker-compose.prod.yml up -d --force-recreate airflow-init airflow-apiserver airflow-scheduler airflow-dag-processor airflow-triggerer
+            docker image prune -a -f --filter "until=24h" || docker image prune -f
+            docker compose -f docker-compose.prod.yml ps
+          EOF
+
+          rm -f ~/.ssh/deploy_key
+
+      - name: Close SSH for this runner
+        if: always() && steps.runner-ip.outputs.ip != ''
+        run: |
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ secrets.SSH_SECURITY_GROUP_ID }} \
+            --protocol tcp --port 22 \
+            --cidr ${{ steps.runner-ip.outputs.ip }}/32

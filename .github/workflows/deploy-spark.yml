@@ -1,0 +1,60 @@
+name: Deploy Spark (EMR)
+
+on:
+  push:
+    branches:
+      - production
+    paths:
+      - "spark/**"
+      - ".github/workflows/deploy-spark.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-northeast-2
+
+jobs:
+  build-and-update-emr:
+    name: Build & Update EMR Spark
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push EMR Spark Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: spark/Dockerfile.prod
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.login-ecr.outputs.registry }}/waitforddaman-emr-spark-prod:latest
+          cache-from: type=gha,scope=emr-spark-prod
+          cache-to: type=gha,mode=max,scope=emr-spark-prod
+
+      - name: Update EMR Serverless application image
+        run: |
+          APP_ID="00g87apnd47p1r2p"
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/waitforddaman-emr-spark-prod:latest"
+          echo "==> Updating EMR Serverless application ($APP_ID) to $IMAGE_URI"
+          aws emr-serverless update-application \
+            --application-id "$APP_ID" \
+            --image-configuration imageUri="$IMAGE_URI" \
+            --region ${{ env.AWS_REGION }}
