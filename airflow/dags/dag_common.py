@@ -20,19 +20,34 @@ STAGING_DIR = "/opt/airflow/staging"  # staging/jobs/ 잡(Silver 등) 실행 위
 INGESTION_PYTHON = "python"
 
 
-def load_env_file(env_path: str = "/opt/airflow/.env") -> None:
-    """BashOperator가 source하던 .env 값을 TaskFlow/Python 태스크에서도 볼 수 있게 한다."""
-    if not os.path.exists(env_path):
-        return
-    with open(env_path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            if not os.environ.get(key):
-                os.environ[key] = value.strip()
+# .env가 컨테이너 안에 마운트되는 경로는 compose 파일마다 다르다.
+#   docker-compose.yml / .local.yml -> ./.env:/opt/airflow/.env
+#   docker-compose.prod.yml         -> ./.env:/opt/airflow/ingestion/.env
+# 운영은 후자만 마운트하는데 load_env_file이 /opt/airflow/.env만 보고 있어서,
+# BashOperator(`cd ingestion && source .env`)는 키를 보는데 TaskFlow Python
+# 태스크는 아무 값도 못 보는 상태였다 - 파일이 없으면 조용히 return하기 때문에
+# 운영에서만 "SEOUL_API_KEY1가 설정되지 않았습니다"로 뒤늦게 터졌다.
+# 두 경로를 모두 훑고, 이미 설정된 키는 덮어쓰지 않는다.
+ENV_FILE_CANDIDATES = ("/opt/airflow/.env", "/opt/airflow/ingestion/.env")
+
+
+def load_env_file(env_path: str | None = None) -> None:
+    """BashOperator가 source하던 .env 값을 TaskFlow/Python 태스크에서도 볼 수 있게 한다.
+
+    env_path를 주면 그 경로만, 주지 않으면 ENV_FILE_CANDIDATES를 순서대로 읽는다.
+    """
+    for path in (env_path,) if env_path else ENV_FILE_CANDIDATES:
+        if not os.path.exists(path):
+            continue
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                if not os.environ.get(key):
+                    os.environ[key] = value.strip()
 
 
 load_env_file()
@@ -71,6 +86,14 @@ S3_STAGING_POOL = "s3_initial_load_staging"
 # 서울시 Open API 키별 동시성을 제어하는 전역 풀. rental_history는 키 1~3,
 # failure_report는 키 4를 사용하므로 최대 4개 날짜 Task만 동시에 API를 호출한다.
 SEOUL_API_POOL = "seoul_api"
+
+# 위 SEOUL_API_POOL을 원천별로 쪼갠 것. 한 풀을 공유하면 rental prepare(3)와 failure
+# catchup(1)의 max_active_tis_per_dag 합이 우연히 slot 수와 같을 때만 굶지 않는데,
+# Airflow 풀에는 태스크별 예약(reservation)이 없어서 어느 한쪽 설정만 바뀌어도 균형이
+# 깨진다(rental 3개가 슬롯을 다 먹으면 failure가 무한 대기). 원천별 풀로 나눠 키 배분
+# (rental 1~3 / failure 4)과 슬롯을 1:1로 묶어 구조적으로 보장한다.
+RENTAL_HISTORY_API_POOL = "rental_history_api"
+FAILURE_REPORT_API_POOL = "failure_report_api"
 
 # rental_history 날짜별 backfill/reconciliation의 promote(Bronze Iceberg commit) 전용 풀.
 # prepare(수집/선택) 단계는 SEOUL_API_POOL로 최대 3개 날짜가 동시에 도는 게 정상이지만,
