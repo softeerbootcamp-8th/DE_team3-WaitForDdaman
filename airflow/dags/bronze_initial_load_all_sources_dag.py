@@ -490,19 +490,22 @@ def bronze_initial_load_all_sources():
     # 모두 이번 초기 적재 결과를 반영한 뒤에 실행해야 한다 - set_bronze_ingestion_watermark_*
     # (상한)과 bootstrap_silver_watermark_*(하한) 둘 다에 의존해야 한다.
     # transform_silver_rental_history.py 한 번 호출은 daily와 동일하게 chunk_days(기본
-    # 31일)까지만 처리한다 - 몇 년치를 한 Spark 세션에서 캐시+윈도우dedup+커밋하다 OOM 나는
-    # 걸 막기 위함(Bronze를 파일 단위로 쪼갠 것과 같은 이유). 대신 이 태스크가 그 잡을
-    # total_days_cap/chunk_days번 순차 반복 호출해서 몇 년치 백로그를 한 태스크 안에서
-    # 다 처리한다. 잡 자체(다른 DAG와 공유)는 손대지 않고, 반복 호출만 이 DAG 쪽에서 한다.
-    # 잡의 로그 문구("처리할 신규 날짜 없음")로 Bronze 워터마크까지 다 따라잡았음을 감지하면
-    # 남은 반복을 조기 종료한다 - 안 잡혀도(로그 문구가 바뀌는 등) 정답이 달라지진 않고
-    # 남은 반복이 전부 no-op으로 끝날 뿐이라 안전하다.
+    # 31일)까지만 처리한다 - 몇 년치를 한 프로세스에서 읽고 dedup하고 커밋하다 OOM 나는
+    # 걸 막기 위함(Bronze를 파일 단위로 쪼갠 것과 같은 이유).
     # #232: 기존엔 bash for-loop가 transform_silver_rental_history.py를 반복 호출하며
     # 매번 스스로 다음 구간을 정했다 - 한 반복 실패가 루프 전체를 멈추고, 반복들이
     # 서로 의존해 병렬화도 안 됐다. 이제는 (1) 전체 청크 목록을 한 번에 계산하고
-    # (2) 청크별로 독립된 Airflow 태스크 인스턴스로 펼쳐서(.expand()) 실행하고
-    # (3) 전부 성공했을 때만 워터마크를 한 번에 전진시킨다 - 실패한 청크만 골라
-    # 재시도할 수 있고, 나머지 청크는 그 실패에 영향받지 않는다.
+    # (2) 청크별로 독립된 Airflow 태스크 인스턴스로 펼쳐서(.expand()) 실행한다 -
+    # 실패한 청크만 골라 재시도할 수 있고, 나머지 청크는 그 실패에 영향받지 않는다.
+    #
+    # 여기에 두 가지를 더 얹는다.
+    #   (a) 청크가 성공하면 S3에 COMPLETE marker를 남기고, planner는 marker가 있는 청크를
+    #       pending_ranges에서 빼버린다 - 118개 중 117개가 성공하고 하나만 실패했을 때
+    #       새 DAG Run이 117개를 다시 계산하지 않는다.
+    #   (b) 마무리 태스크가 ALL_SUCCESS가 아니라 ALL_DONE으로 돈다. 예전엔 청크가 하나만
+    #       실패해도 워터마크가 전혀 전진하지 않아 성공한 청크의 결과가 통째로 버려졌다.
+    #       이제는 연속으로 COMPLETE인 마지막 청크 끝까지만 전진시키고, 공백이 있으면
+    #       그 사실을 남긴 채 태스크를 실패시킨다.
     compute_rental_history_backfill_ranges = BashOperator(
         task_id="compute_rental_history_backfill_ranges",
         bash_command=bash_job(
@@ -516,11 +519,35 @@ def bronze_initial_load_all_sources():
     )
 
     @task(task_id="parse_rental_history_backfill_ranges")
-    def parse_rental_history_backfill_ranges(raw_json: str) -> list[dict]:
+    def parse_rental_history_backfill_ranges(raw_json: str) -> dict:
+        """planner의 계획 객체(all_ranges/pending_ranges/contract_version)를 그대로 넘긴다."""
         return json.loads(raw_json)
 
-    rental_history_backfill_ranges = parse_rental_history_backfill_ranges(
+    rental_history_backfill_plan = parse_rental_history_backfill_ranges(
         compute_rental_history_backfill_ranges.output
+    )
+
+    @task(task_id="build_rental_history_backfill_commands")
+    def build_rental_history_backfill_commands(plan: dict) -> list[str]:
+        """pending_ranges만 청크 실행 커맨드로 펼친다 (완료 청크는 Task Instance조차 안 만든다).
+
+        BRONZE_WATERMARK_AT_START는 청크마다 같은 값이지만 계획에만 있으므로 여기서
+        커맨드 문자열에 박아 넣는다 - 청크 잡이 marker에 감사 정보로 남긴다. dag_run_id는
+        BashOperator가 넣어주는 AIRFLOW_CTX_DAG_RUN_ID를 잡이 직접 읽으므로 여기서 넘기지
+        않는다(매핑된 bash_command의 Jinja 재렌더링에 기대지 않기 위함).
+        """
+        bronze_at_start = plan.get("bronze_watermark_at_start", "")
+        return [
+            bash_staging_job(
+                "transform_silver_rental_history",
+                f"BACKFILL_RANGE_START='{r['start']}' BACKFILL_RANGE_END='{r['end']}' "
+                f"BRONZE_WATERMARK_AT_START='{bronze_at_start}' ",
+            )
+            for r in plan.get("pending_ranges") or []
+        ]
+
+    rental_history_backfill_commands = build_rental_history_backfill_commands(
+        rental_history_backfill_plan
     )
 
     load_silver_rental_history_chunk = BashOperator.partial(
@@ -528,49 +555,31 @@ def bronze_initial_load_all_sources():
         execution_timeout=timedelta(hours=1),  # 청크 1개(최대 31일) 기준 - 순차 6시간에서 축소
         pool=SILVER_POOL,
         # pyiceberg SqlCatalog는 커밋 재시도가 없다 - 매핑 인스턴스를 동시에 띄우면
-        # silver.rental_history/silver.rental_history_quarantine에 대한 동시
-        # overwrite_partition 커밋이 충돌해 CommitFailedException으로 재시도를
-        # 소진할 수 있다. 일회성 백필이라 청크 wall-clock 시간이 병목이 아니므로
-        # 매핑 인스턴스를 직렬화해 동시 쓰기 경합 자체를 없앤다 (#232).
+        # silver.rental_history/silver.rental_history_quarantine에 대한 동시 커밋이
+        # 충돌해 CommitFailedException으로 재시도를 소진할 수 있다. 청크당 커밋을 최대
+        # 31회에서 2회로 줄였어도(범위 단일 커밋) 충돌 가능성 자체는 남으므로, 먼저 같은
+        # 직렬 조건에서 효과를 실측한 뒤에 병렬화를 별도로 다룬다 (#232).
         max_active_tis_per_dag=1,
-    ).expand(
-        bash_command=rental_history_backfill_ranges.map(
-            lambda r: bash_staging_job(
-                "transform_silver_rental_history",
-                f"BACKFILL_RANGE_START='{r['start']}' BACKFILL_RANGE_END='{r['end']}' ",
-            )
-        )
-    )
+    ).expand(bash_command=rental_history_backfill_commands)
 
-    @task(task_id="max_rental_history_backfill_range_end", trigger_rule="all_success")
-    def max_rental_history_backfill_range_end(ranges: list[dict]) -> str | None:
-        """청크가 하나도 없으면(이미 다 처리됨) None - 마무리 태스크가 건너뛴다."""
-        if not ranges:
-            return None
-        return max(r["end"] for r in ranges)
-
-    rental_history_backfill_max_end = max_rental_history_backfill_range_end(
-        rental_history_backfill_ranges
-    )
-
-    # trigger_rule="all_success": load_silver_rental_history_chunk의 모든 매핑 인스턴스가
-    # 성공해야만 실행된다 - common/watermark.py의 "부분 실패 시 갱신 금지" 불변식을
-    # 유지한다. 청크가 0개(처리할 신규 구간 없음)면 WATERMARK_DATE가 빈 문자열이 되므로
-    # set_watermark.py가 그대로 실패한다 - 그 경우엔 애초에 이 태스크가 워터마크를
-    # 바꿀 필요가 없으므로 skip 조건을 bash에서 직접 처리한다.
+    # trigger_rule="all_done": 청크가 하나라도 실패하면 실행되지 않던 예전 마무리 태스크는,
+    # 118개 중 117개가 성공해도 워터마크를 전혀 전진시키지 않아 다음 Run이 전부 재계산하게
+    # 만들었다. 이 잡은 실패한 청크가 있어도 돌면서 연속 COMPLETE marker 구간까지만
+    # 워터마크를 올리고, 공백이 있으면 스스로 실패해 DAG를 실패 상태로 남긴다 -
+    # "부분 실패 시 갱신 금지" 불변식은 "연속 완료 구간을 넘어서 갱신 금지"로 지켜진다.
+    #
+    # 계획 JSON은 planner의 XCom 원문(한 줄 JSON)을 그대로 넘긴다. parse 태스크의 XCom을
+    # 쓰면 dict가 Python repr(작은따옴표)로 렌더링돼 JSON도 아니고 셸 인용도 깨진다.
     finalize_rental_history_backfill_watermark = BashOperator(
         task_id="finalize_rental_history_backfill_watermark",
-        bash_command=f"""
-set -e
-END_DATE="{{{{ ti.xcom_pull(task_ids='max_rental_history_backfill_range_end') }}}}"
-if [ -z "$END_DATE" ]; then
-    echo "[finalize_rental_history_backfill_watermark] 처리할 신규 구간 없음 - 워터마크 변경 없이 종료"
-    exit 0
-fi
-{bash_job("set_watermark", "DATASET=silver_rental_history WATERMARK_DATE=$END_DATE ")}
-""",
-        trigger_rule="all_success",
-        execution_timeout=timedelta(minutes=5),
+        bash_command=bash_job(
+            "advance_silver_rental_history_watermark",
+            "SILVER_BACKFILL_PLAN='"
+            "{{ ti.xcom_pull(task_ids=\"compute_rental_history_backfill_ranges\") }}' ",
+        ),
+        trigger_rule="all_done",
+        retries=0,  # 청크 공백으로 인한 실패는 재시도해도 같은 결과다 - 사람이 봐야 한다
+        execution_timeout=timedelta(minutes=10),
     )
 
     # failure_report: silver_failure_report.py는 워터마크로 구간을 자르지 않고 매번 Bronze
@@ -591,7 +600,7 @@ fi
     [
         set_bronze_ingestion_watermark_rental_history, bootstrap_silver_watermark_rental_history,
     ] >> compute_rental_history_backfill_ranges
-    load_silver_rental_history_chunk >> rental_history_backfill_max_end >> finalize_rental_history_backfill_watermark
+    load_silver_rental_history_chunk >> finalize_rental_history_backfill_watermark
     failure_report >> check_watermark_date_failure_report >> set_bronze_ingestion_watermark_failure_report
     set_bronze_ingestion_watermark_failure_report >> load_silver_failure_report
     create_bronze_tables >> [list_rental_history_files, list_failure_report_files]

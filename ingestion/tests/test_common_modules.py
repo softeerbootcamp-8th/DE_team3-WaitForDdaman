@@ -9,7 +9,7 @@ from moto import mock_aws
 
 import config as config_module
 from common.duckdb_io import query_arrow
-from common.iceberg_io import append, overwrite_all, overwrite_partition
+from common.iceberg_io import append, overwrite_all, overwrite_partition, replace_range
 from common.partition_listing import (
     get_table_data_prefix,
     list_partitions,
@@ -120,6 +120,138 @@ def test_iceberg_io_overwrite_all():
     overwrite_all("silver.failure_report", sample_arrow, catalog=mock_catalog)
 
     mock_table.overwrite.assert_called_once_with(sample_arrow)
+
+
+# ------------------------------------------------------------------------------
+# iceberg_io.replace_range Tests (Silver 대여이력 범위 단일 커밋)
+# ------------------------------------------------------------------------------
+def _range_rows(*dates: str) -> pa.Table:
+    return pa.table({
+        "v": [f"row-{d}" for d in dates],
+        "rent_date_partition": list(dates),
+    })
+
+
+def test_replace_range_non_empty_calls_overwrite_once():
+    """31일 구간이 overwrite() 한 번(= snapshot 1개)으로 반영돼야 한다."""
+    mock_table = MagicMock()
+    mock_table.name.return_value = "silver.rental_history"
+    rows = _range_rows("2018-05-25", "2018-06-01", "2018-06-24")
+
+    replace_range(mock_table, rows, "rent_date_partition", "2018-05-25", "2018-06-24")
+
+    mock_table.overwrite.assert_called_once()
+    args, kwargs = mock_table.overwrite.call_args
+    assert args[0] is rows
+    assert "overwrite_filter" in kwargs
+    mock_table.delete.assert_not_called()
+
+
+def test_replace_range_empty_calls_delete_not_overwrite():
+    """0행이면 빈 Arrow를 overwrite()에 넘기지 않고 delete()로 구간만 비운다."""
+    mock_table = MagicMock()
+    mock_table.name.return_value = "silver.rental_history"
+    empty = pa.table(
+        {"v": pa.array([], pa.string()), "rent_date_partition": pa.array([], pa.string())}
+    )
+
+    replace_range(mock_table, empty, "rent_date_partition", "2018-05-25", "2018-06-24")
+
+    mock_table.delete.assert_called_once()
+    assert "delete_filter" in mock_table.delete.call_args.kwargs
+    mock_table.overwrite.assert_not_called()
+
+
+def test_replace_range_rejects_start_after_end():
+    mock_table = MagicMock()
+    with pytest.raises(ValueError, match="start_value가 end_value보다 큼"):
+        replace_range(
+            mock_table, _range_rows("2018-06-24"), "rent_date_partition",
+            "2018-06-24", "2018-05-25",
+        )
+    mock_table.overwrite.assert_not_called()
+    mock_table.delete.assert_not_called()
+
+
+def test_replace_range_rejects_rows_outside_declared_range():
+    """범위 밖 행이 섞이면 커밋 전에 막는다 - 통과하면 marker의 의미가 깨진다."""
+    mock_table = MagicMock()
+    mock_table.name.return_value = "silver.rental_history"
+    rows = _range_rows("2018-06-01", "2018-07-01")
+
+    with pytest.raises(ValueError, match="선언 범위 밖의 행"):
+        replace_range(mock_table, rows, "rent_date_partition", "2018-05-25", "2018-06-24")
+    mock_table.overwrite.assert_not_called()
+
+
+def test_replace_range_rejects_null_partition_values():
+    mock_table = MagicMock()
+    mock_table.name.return_value = "silver.rental_history"
+    rows = pa.table({"v": ["a"], "rent_date_partition": pa.array([None], pa.string())})
+
+    with pytest.raises(ValueError, match="null인 행"):
+        replace_range(mock_table, rows, "rent_date_partition", "2018-05-25", "2018-06-24")
+
+
+def _range_test_table(tmp_path):
+    """실제 Iceberg 커밋 경로로 범위 교체를 검증하기 위한 sqlite SqlCatalog 테이블.
+
+    MagicMock으로는 "필터를 넘겼다"까지만 확인된다 - 선언 범위 밖 파티션이 실제로
+    남는지는 스냅샷을 다시 읽어봐야 알 수 있어서 여기서만 진짜 카탈로그를 쓴다.
+    """
+    from pyiceberg.catalog.sql import SqlCatalog
+    from pyiceberg.partitioning import PartitionField, PartitionSpec
+    from pyiceberg.schema import Schema
+    from pyiceberg.transforms import IdentityTransform
+    from pyiceberg.types import NestedField, StringType
+
+    warehouse = tmp_path / "warehouse"
+    warehouse.mkdir()
+    catalog = SqlCatalog(
+        "range_test",
+        uri=f"sqlite:///{tmp_path}/catalog.db",
+        warehouse=f"file://{warehouse}",
+    )
+    catalog.create_namespace("silver")
+    return catalog.create_table(
+        "silver.range_probe",
+        schema=Schema(
+            NestedField(1, "v", StringType(), required=False),
+            NestedField(2, "rent_date_partition", StringType(), required=False),
+        ),
+        partition_spec=PartitionSpec(
+            PartitionField(source_id=2, field_id=1000, transform=IdentityTransform(),
+                           name="rent_date_partition")
+        ),
+    )
+
+
+def _partition_values(table) -> list[str]:
+    return sorted(row["rent_date_partition"] for row in table.scan().to_arrow().to_pylist())
+
+
+def test_replace_range_preserves_partitions_outside_the_range(tmp_path):
+    """구간 안은 이번 결과로 완전히 교체하고, 구간 밖 파티션은 건드리지 않는다."""
+    table = _range_test_table(tmp_path)
+    table.append(_range_rows("2018-05-24", "2018-05-25", "2018-06-10", "2018-06-25"))
+
+    replace_range(table, _range_rows("2018-06-01"), "rent_date_partition",
+                  "2018-05-25", "2018-06-24")
+
+    assert _partition_values(table) == ["2018-05-24", "2018-06-01", "2018-06-25"]
+
+
+def test_replace_range_empty_clears_only_the_declared_range(tmp_path):
+    """이번 결과가 0행이면 구간 안 과거 행이 남지 않는다 (marker가 '완전 교체'를 뜻하려면 필수)."""
+    table = _range_test_table(tmp_path)
+    table.append(_range_rows("2018-05-24", "2018-06-10", "2018-06-25"))
+
+    empty = pa.table(
+        {"v": pa.array([], pa.string()), "rent_date_partition": pa.array([], pa.string())}
+    )
+    replace_range(table, empty, "rent_date_partition", "2018-05-25", "2018-06-24")
+
+    assert _partition_values(table) == ["2018-05-24", "2018-06-25"]
 
 
 # ------------------------------------------------------------------------------
