@@ -34,7 +34,14 @@ _ARROW_METHOD = (
 # Spark는 서브프로세스 OOM이 나도 워커가 살아남는 격리막이었지만, 인프로세스 전환 뒤엔
 # 그 격리가 없어져 워커(호스트) 전체가 단일 장애점이 된다 - #144가 예견했으나 완료조건
 # 미충족인 채 방치됐다가 #285에서 재확인됨. 이 헬퍼로 모든 연결에 상한을 강제한다.
-_DEFAULT_MEMORY_LIMIT = "3GB"
+#
+# #285에서 잡은 최초 기본값(3GB)은 워커가 t4g.xlarge(16GB)라는 잘못된 가정으로
+# 계산됐다 - 실제 워커는 다른 파일들(docker-compose.prod.yml, initial_load_dag.py 등)이
+# 일관되게 명시하는 t4g.large(8GB)다. 8GB 박스에서는 3 x 3GB = 9GB만으로도 OS/Airflow
+# 오버헤드를 빼기 전에 이미 물리 메모리를 초과해 OOM이 재발했다. 2GB로 낮춰
+# 3 x 2GB = 6GB로 잡아야 나머지 ~2GB가 OS/Airflow(webserver/scheduler/triggerer/worker)
+# 오버헤드 예산으로 남는다.
+_DEFAULT_MEMORY_LIMIT = "2GB"
 _DEFAULT_THREADS = "2"
 
 
@@ -42,9 +49,9 @@ def connect(database: str = ":memory:") -> duckdb.DuckDBPyConnection:
     """memory_limit/threads가 강제된 duckdb 커넥션을 반환한다 (#285).
 
     상한값은 DUCKDB_MEMORY_LIMIT/DUCKDB_THREADS 환경변수로 오버라이드할 수 있다 -
-    t4g.xlarge(16GB) 기준 BRONZE_POOL(1) + SILVER_POOL(1) + GOLD_POOL(1)이 동시에
-    최대로 돌아도(3 x 3GB = 9GB) OS/Airflow 자체 오버헤드를 뺀 예산 안에 들어오도록
-    기본값(3GB)을 잡았다.
+    t4g.large(8GB) 기준 BRONZE_POOL(1) + SILVER_POOL(1) + GOLD_POOL(1)이 동시에
+    최대로 돌아도(3 x 2GB = 6GB) OS/Airflow 자체 오버헤드를 뺀 예산 안에 들어오도록
+    기본값(2GB)을 잡았다.
     """
     con = duckdb.connect(database)
     memory_limit = os.environ.get("DUCKDB_MEMORY_LIMIT", _DEFAULT_MEMORY_LIMIT)
