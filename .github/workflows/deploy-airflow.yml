@@ -14,6 +14,10 @@ on:
       - ".github/workflows/deploy-airflow.yml"
   workflow_dispatch:
 
+concurrency:
+  group: production-ec2-deployment
+  cancel-in-progress: false
+
 permissions:
   id-token: write
   contents: read
@@ -75,26 +79,28 @@ jobs:
           echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
-          # docker-compose.prod.yml 동기화
+          # docker-compose.prod.yml 동기화 (재시도)
           for i in {1..5}; do
             scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key docker-compose.prod.yml ${{ secrets.EC2_SSH_USER }}@${{ secrets.EC2_HOST }}:/opt/waitforddaman/docker-compose.prod.yml && break || sleep 3
           done
 
-          # Airflow 전용 컨테이너만 순차 Pull 및 안전 갱신
-          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key ${{ secrets.EC2_SSH_USER }}@${{ secrets.EC2_HOST }} "bash -s" << 'EOF'
-            set -e
-            cd /opt/waitforddaman
-            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-            export ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.ap-northeast-2.amazonaws.com"
-            export IMAGE_TAG="latest"
-            aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin "$ECR_REGISTRY"
-            echo "==> Pulling latest Airflow image"
-            docker compose -f docker-compose.prod.yml pull airflow-scheduler
-            echo "==> Recreating Airflow services"
-            docker compose -f docker-compose.prod.yml up -d --force-recreate airflow-init airflow-apiserver airflow-scheduler airflow-dag-processor airflow-triggerer
-            docker image prune -a -f --filter "until=24h" || docker image prune -f
-            docker compose -f docker-compose.prod.yml ps
-          EOF
+          # Airflow 전용 컨테이너만 순차 Pull 및 안전 갱신 (재시도)
+          for i in {1..5}; do
+            ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key ${{ secrets.EC2_SSH_USER }}@${{ secrets.EC2_HOST }} "bash -s" << 'EOF' && break || sleep 3
+              set -e
+              cd /opt/waitforddaman
+              ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+              export ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.ap-northeast-2.amazonaws.com"
+              export IMAGE_TAG="latest"
+              aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+              echo "==> Pulling latest Airflow image"
+              docker compose -f docker-compose.prod.yml pull airflow-scheduler
+              echo "==> Recreating Airflow services"
+              docker compose -f docker-compose.prod.yml up -d --force-recreate airflow-init airflow-apiserver airflow-scheduler airflow-dag-processor airflow-triggerer
+              docker image prune -a -f --filter "until=24h" || docker image prune -f
+              docker compose -f docker-compose.prod.yml ps
+            EOF
+          done
 
           rm -f ~/.ssh/deploy_key
 
