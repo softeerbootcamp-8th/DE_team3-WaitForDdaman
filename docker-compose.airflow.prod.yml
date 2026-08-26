@@ -1,4 +1,4 @@
-# Airflow 파이프라인 프로덕션 구성 (Airflow 전용 EC2)
+# Airflow 파이프라인 프로덕션 구성 (Airflow 전용 EC2) - deploy trigger 2026-08-26
 x-airflow-common:
   &airflow-common
   image: ${ECR_REGISTRY}/waitforddaman-airflow:${IMAGE_TAG:-latest}
