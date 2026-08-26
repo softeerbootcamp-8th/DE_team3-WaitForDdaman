@@ -153,18 +153,11 @@ jobs:
           sleep 5
 
       # docker-compose.prod.yml은 시크릿을 담지 않는 파일(.env 참조만 있음)이라
-      # git이 source of truth여야 한다 - .env.prod와 달리 매번 자동으로 동기화해도
-      # 안전하다. 이 파일 자체가 바뀌지 않은 배포에서는 scp가 그냥 덮어쓰기라
-      # 무해하다(멱등).
-      - name: Sync docker-compose.prod.yml to EC2
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          for i in {1..5}; do
-            scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key docker-compose.prod.yml ${{ secrets.EC2_SSH_USER }}@${{ secrets.EC2_HOST }}:/opt/waitforddaman/docker-compose.prod.yml && break || sleep 3
-          done
-          rm -f ~/.ssh/deploy_key
+      # git이 source of truth여야 한다. 별도 scp 스텝 대신 base64 payload로
+      # ssh-action에 직접 넘겨 동기화하므로 네트워크/배너 교환 타임아웃 실패가 없다.
+      - name: Prepare docker-compose.prod.yml payload
+        id: compose-payload
+        run: echo "content=$(base64 docker-compose.prod.yml | tr -d '\n')" >> "$GITHUB_OUTPUT"
 
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1
@@ -173,10 +166,11 @@ jobs:
           username: ${{ secrets.EC2_SSH_USER }}
           key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
           command_timeout: 10m
-          envs: ECR_REGISTRY,IMAGE_TAG
+          envs: ECR_REGISTRY,IMAGE_TAG,COMPOSE_PAYLOAD
           script: |
             set -e
             cd /opt/waitforddaman
+            echo "$COMPOSE_PAYLOAD" | base64 -d > docker-compose.prod.yml
             if [ -z "$ECR_REGISTRY" ]; then
               ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
               ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.ap-northeast-2.amazonaws.com"
@@ -197,6 +191,7 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
+          COMPOSE_PAYLOAD: ${{ steps.compose-payload.outputs.content }}
 
       - name: Update EMR Serverless application image
         continue-on-error: true
