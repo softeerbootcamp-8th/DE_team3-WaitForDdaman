@@ -233,7 +233,10 @@ def gold_dim_fact():
     )
     build_bike_location = BashOperator(
         task_id="build_bike_location",
-        bash_command=_collection_priority_bash("build_bike_location", "SNAPSHOT_DATE='{{ ds }}' "),
+        bash_command=_collection_priority_bash(
+            "build_bike_location",
+            "SNAPSHOT_DATE=\"{{ data_interval_end.in_timezone('Asia/Seoul').strftime('%Y-%m-%d') }}\" ",
+        ),
         env={
             "RENTAL_HISTORY_T0_ENABLED": T0_ENABLED_TEMPLATE,
         },
