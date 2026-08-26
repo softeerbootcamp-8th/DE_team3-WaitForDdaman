@@ -152,46 +152,37 @@ jobs:
             --cidr ${{ steps.runner-ip.outputs.ip }}/32
           sleep 5
 
-      # docker-compose.prod.yml은 시크릿을 담지 않는 파일(.env 참조만 있음)이라
-      # git이 source of truth여야 한다. 별도 scp 스텝 대신 base64 payload로
-      # ssh-action에 직접 넘겨 동기화하므로 네트워크/배너 교환 타임아웃 실패가 없다.
-      - name: Prepare docker-compose.prod.yml payload
-        id: compose-payload
-        run: echo "content=$(base64 docker-compose.prod.yml | tr -d '\n')" >> "$GITHUB_OUTPUT"
+      # docker-compose.prod.yml 동기화 및 원격 배포를 표준 ssh/scp로 실행.
+      # 3rd-party 액션(drone-ssh)의 AcceptEnv 환경변수 크기 초과로 인한 EOF 실패를 원천 차단한다.
+      - name: Deploy to EC2
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
 
-      - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_SSH_USER }}
-          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
-          command_timeout: 10m
-          envs: ECR_REGISTRY,IMAGE_TAG,COMPOSE_PAYLOAD
-          script: |
+          # 1. docker-compose.prod.yml 파일 전송 (재시도 루프)
+          for i in {1..5}; do
+            scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key docker-compose.prod.yml ${{ secrets.EC2_SSH_USER }}@${{ secrets.EC2_HOST }}:/opt/waitforddaman/docker-compose.prod.yml && break || sleep 3
+          done
+
+          # 2. 원격 배포 명령어 실행
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key ${{ secrets.EC2_SSH_USER }}@${{ secrets.EC2_HOST }} "bash -s" << 'EOF'
             set -e
             cd /opt/waitforddaman
-            echo "$COMPOSE_PAYLOAD" | base64 -d > docker-compose.prod.yml
-            if [ -z "$ECR_REGISTRY" ]; then
-              ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-              ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.ap-northeast-2.amazonaws.com"
-            fi
-            export ECR_REGISTRY
-            export IMAGE_TAG="${IMAGE_TAG:-latest}"
-            # EC2는 자체 인스턴스 IAM 역할로 ECR pull한다(GitHub OIDC와는 별개 경로)
-            aws ecr get-login-password --region ap-northeast-2 \
-              | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+            ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+            export ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.ap-northeast-2.amazonaws.com"
+            export IMAGE_TAG="latest"
+            aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin "$ECR_REGISTRY"
             echo "==> Pulling images sequentially (web -> api -> airflow) to avoid I/O freeze"
             docker compose -f docker-compose.prod.yml pull web
             docker compose -f docker-compose.prod.yml pull api
             docker compose -f docker-compose.prod.yml pull airflow-scheduler
-            # up -d --force-recreate로 최신 이미지로 컨테이너를 강제 교체한다.
             docker compose -f docker-compose.prod.yml up -d --force-recreate
             docker image prune -a -f --filter "until=24h" || docker image prune -f
             docker compose -f docker-compose.prod.yml ps
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
-          COMPOSE_PAYLOAD: ${{ steps.compose-payload.outputs.content }}
+          EOF
+
+          rm -f ~/.ssh/deploy_key
 
       - name: Update EMR Serverless application image
         continue-on-error: true
