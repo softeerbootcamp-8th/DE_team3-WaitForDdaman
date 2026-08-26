@@ -75,6 +75,34 @@ def test_returns_empty_when_silver_caught_up():
     assert ranges == []
 
 
+def test_no_cap_reaches_the_bronze_watermark():
+    """cap을 주지 않으면 Bronze 상한까지 전부 계획에 들어가야 한다.
+
+    운영 회귀: 기본 cap 3650일 때문에 2015-01-01 시작 계획이 2024-12-28에서 잘렸다.
+    118청크가 전부 성공하고 DAG도 success로 끝났는데 Silver 워터마크는 2024-12-28,
+    Bronze는 2026-06-30이라 1년 반이 조용히 남았다 - "다 끝난 것처럼 보이는" 실패였다.
+    """
+    ranges = compute_ranges.build_ranges(
+        silver_watermark=date(2014, 12, 31),
+        bronze_watermark=date(2026, 6, 30),
+        chunk_days=31,
+        total_days_cap=None,
+    )
+
+    assert ranges[0]["start"] == "2015-01-01"
+    assert ranges[-1]["end"] == "2026-06-30"
+
+
+def test_cap_none_and_cap_number_agree_when_cap_is_large_enough():
+    """cap이 구간보다 크면 무제한과 같은 결과여야 한다 (cap 의미가 상한일 뿐임을 고정)."""
+    kwargs = dict(
+        silver_watermark=date(2017, 1, 1), bronze_watermark=date(2017, 6, 30), chunk_days=31
+    )
+    assert compute_ranges.build_ranges(total_days_cap=None, **kwargs) == (
+        compute_ranges.build_ranges(total_days_cap=3650, **kwargs)
+    )
+
+
 def test_total_days_cap_limits_total_span():
     ranges = compute_ranges.build_ranges(
         silver_watermark=date(2017, 1, 1),

@@ -188,7 +188,10 @@ default_args = {
         # 반복 호출한다 - 한 번의 Spark 잡이 다년치를 한 번에 캐시/처리하다 OOM 나는 걸
         # 피하기 위함(Bronze 초기 적재를 파일 단위로 쪼갠 것과 같은 이유).
         "rental_history_silver_chunk_days": "31",
-        "rental_history_silver_total_days_cap": "3650",
+        # 빈 값 = 상한 없음(Bronze 워터마크까지 전부). 예전 기본값 3650(10년)은 초기
+        # 적재를 조용히 잘랐다 - 계획이 2024-12-28에서 끊겼는데 청크는 전부 성공하고
+        # DAG도 success로 끝나서, 남은 1년 반을 워터마크를 직접 보기 전엔 알 수 없었다.
+        "rental_history_silver_total_days_cap": "",
     },
     doc_md=__doc__,
 )
