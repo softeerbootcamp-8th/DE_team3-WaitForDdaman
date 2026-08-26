@@ -51,18 +51,27 @@ class SqlEngine:
             return self._spark.sql(text)
         return query_arrow(self._con, text)
 
-    def read_table(self, table_ref: str, register_as: str):
+    def read_table(self, table_ref: str, register_as: str, row_filter=None):
         """Iceberg 테이블을 읽어 register_as 이름으로 등록한다.
 
         Spark는 카탈로그에 이미 붙어 있으므로 spark.table()로 바로 읽고,
         DuckDB는 Spark 세션이 없으므로 pyiceberg로 직접 스캔한다
         (silver_failure_report.py 등 Silver DuckDB 잡과 동일한 방식).
+
+        row_filter(pyiceberg BooleanExpression)를 주면 DuckDB 경로에서 스캔 단계의
+        partition pruning으로 넘긴다 - build_bike_features_daily.py의 _suspended_bike_days()가
+        이미 쓰는 패턴과 동일. Spark 경로는 현재 호출자가 없어 그대로 둔다.
         """
         if self.dialect == "spark":
             df = self._spark.table(table_ref)
         else:
             from common.iceberg_catalog import build_iceberg_catalog
 
-            df = build_iceberg_catalog().load_table(table_ref).scan().to_arrow()
+            table = build_iceberg_catalog().load_table(table_ref)
+            # pyiceberg row_filter 기본값은 AlwaysTrue()라 None을 그대로 넘기면
+            # BindVisitor가 "Cannot visit unsupported expression: None"으로 죽는다
+            # (실측 확인) - 안 줬을 때는 scan()의 자체 기본값을 쓰게 한다.
+            scan = table.scan(row_filter=row_filter) if row_filter is not None else table.scan()
+            df = scan.to_arrow()
         self.register(register_as, df)
         return df

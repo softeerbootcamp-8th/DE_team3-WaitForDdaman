@@ -99,9 +99,9 @@ def _rental_transform(engine: SqlEngine, cfg):
     return engine.sql(sql)
 
 
-def read_rental(engine: SqlEngine, cfg):
+def read_rental(engine: SqlEngine, cfg, row_filter=None):
     table_ref = _table_ref(engine, cfg, "sources.rental_history")
-    engine.read_table(table_ref, "rental_raw")
+    engine.read_table(table_ref, "rental_raw", row_filter=row_filter)
     return _rental_transform(engine, cfg)
 
 

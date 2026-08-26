@@ -9,9 +9,32 @@ import duckdb
 
 from common.duckdb_io import connect
 import pandas as pd
+import pyarrow as pa
 import pytest
+from pyiceberg.expressions import GreaterThanOrEqual
 
 from pipeline.train_risk_model.sql_engine import SqlEngine
+
+
+class _FakeIcebergTable:
+    def __init__(self, arrow_table: pa.Table):
+        self._arrow_table = arrow_table
+        self.scan_calls: list = []
+
+    def scan(self, row_filter=None):
+        self.scan_calls.append(row_filter)
+        return self
+
+    def to_arrow(self) -> pa.Table:
+        return self._arrow_table
+
+
+class _FakeCatalog:
+    def __init__(self, table: _FakeIcebergTable):
+        self._table = table
+
+    def load_table(self, table_ref: str) -> _FakeIcebergTable:
+        return self._table
 
 
 @pytest.fixture(scope="module")
@@ -70,3 +93,28 @@ def test_sql_result_can_be_registered_for_next_step():
     step2 = engine.sql("SELECT bike_id FROM step1 WHERE trips2 > 8")
 
     assert step2.to_pydict() == {"bike_id": ["B2"]}
+
+
+def test_read_table_duckdb_forwards_row_filter(monkeypatch):
+    fake_table = _FakeIcebergTable(pa.table({"bike_id": pa.array([], type=pa.string())}))
+    monkeypatch.setattr(
+        "common.iceberg_catalog.build_iceberg_catalog", lambda: _FakeCatalog(fake_table)
+    )
+    engine = SqlEngine.for_duckdb(connect())
+    row_filter = GreaterThanOrEqual("rent_date_partition", "2026-08-01")
+
+    engine.read_table("silver.rental_history", "rental_raw", row_filter=row_filter)
+
+    assert fake_table.scan_calls == [row_filter]
+
+
+def test_read_table_duckdb_without_row_filter_scans_everything(monkeypatch):
+    fake_table = _FakeIcebergTable(pa.table({"bike_id": pa.array([], type=pa.string())}))
+    monkeypatch.setattr(
+        "common.iceberg_catalog.build_iceberg_catalog", lambda: _FakeCatalog(fake_table)
+    )
+    engine = SqlEngine.for_duckdb(connect())
+
+    engine.read_table("silver.rental_history", "rental_raw")
+
+    assert fake_table.scan_calls == [None]
