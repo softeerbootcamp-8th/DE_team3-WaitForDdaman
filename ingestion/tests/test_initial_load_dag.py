@@ -1,4 +1,4 @@
-"""bronze_initial_load_all_sources DAG 구조 테스트 (#232 - dynamic task mapping 재구성,
+"""initial_load DAG 구조 테스트 (#232 - dynamic task mapping 재구성,
 #249 - EMR 초기 적재 파일당 JobRun -> 배치당 JobRun)."""
 
 import os
@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-DAG_ID = "bronze_initial_load_all_sources"
-DAG_FILE = "bronze_initial_load_all_sources_dag.py"
+DAG_ID = "initial_load"
+DAG_FILE = "initial_load_dag.py"
 
 
 def _dag_folder() -> str:

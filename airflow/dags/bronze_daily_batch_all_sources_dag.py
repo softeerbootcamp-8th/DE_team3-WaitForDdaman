@@ -48,7 +48,7 @@ bikeman은 워터마크로 며칠 밀려도 따라잡는다).
 - 기본값은 RENTAL_HISTORY_FALLBACK_ENABLED=false, RENTAL_HISTORY_T0_ENABLED=false다.
   이 상태의 처리 범위·실패 의미는 기존 단일 태스크와 같고, 예비 관측본은 쓰지 않는다.
 - 대여이력과 고장신고의 대규모 gap은 00:30
-  bronze_historical_reconciliation에서 날짜별 mapped task로 자동 처리한다.
+  bronze_daily_catchup에서 날짜별 mapped task로 자동 처리한다.
 
 ### 원천별 성격
 | 소스 | 조회 방식 | 증분 기준 | 재처리 |
@@ -64,7 +64,7 @@ bikeman만 lookback이 있는 이유: 오프라인 작업 후 몰아서 제출�
 3일치를 다시 계산해 overwritePartitions로 덮어쓰므로 DAG 레벨에서는 신경 쓸 게 없다.
 
 ### 최초 실행 전 필수 절차
-- 대여이력/고장신고: 초기 적재 DAG(bronze_initial_load_all_sources)가 성공 직후 워터마크를 찍는다
+- 대여이력/고장신고: 초기 적재 DAG(initial_load)가 성공 직후 워터마크를 찍는다
 - bikeman_event: 파일 백필이 없으므로 set_watermark DAG로 서비스 시작 전날을 1회 찍는다
       dataset=bikeman_event, watermark_date=2026-06-29
 - 대여소정보: 워터마크 자체가 없다 (증분 기준이 될 컬럼이 없음)
@@ -144,7 +144,7 @@ FETCH_STATION_ACTIVE_RAW_LAMBDA = "fetch_station_active_raw"
     max_active_runs=1,  # 두 run이 같은 파티션을 동시에 덮어쓰는 것 방지
     max_active_tasks=2,  # 로컬 LocalStack 동시 쓰기 부하 제한
     default_args=DEFAULT_ARGS,
-    tags=["bronze"],
+    tags=["bronze", "daily_batch"],
     params={
         "max_days_per_run": DEFAULT_MAX_DAYS_PER_RUN,
     },
@@ -164,6 +164,11 @@ def bronze_daily_batch_all_sources():
     daily_batch_station_master = BashOperator(
         task_id="daily_batch_station_master",
         bash_command=bash_job("daily_batch_station_master"),
+        # SNAPSHOT_DATE를 안 넘기면 daily_batch_station_master.py가 date.today()로
+        # fallback한다 - 재시도가 자정(KST)을 넘기면 이 run이 대표하는 논리 날짜({{ ds }})
+        # 대신 실제 실행 시각의 날짜로 잘못된 파티션에 적재된다.
+        env={"SNAPSHOT_DATE": "{{ ds }}"},
+        append_env=True,
         execution_timeout=timedelta(minutes=30),
         outlets=[STATION_MASTER_BRONZE],
         pool=BRONZE_POOL,
@@ -173,7 +178,7 @@ def bronze_daily_batch_all_sources():
 
     # 대여이력: 하루치가 시간 단위 24회 호출 + 페이징이라 가장 오래 걸린다.
     # 이 원천만 예비 관측본 fallback이 필요해 단계별 태스크로 쪼갠다 (위 doc 참고).
-    with TaskGroup(group_id="rental_history"):
+    with TaskGroup(group_id="daily_batch_rental_history"):
         collect_final_raw = BashOperator(
             task_id="collect_final_raw",
             bash_command=bash_job("collect_rental_history_raw"),
@@ -291,7 +296,7 @@ def bronze_daily_batch_all_sources():
 
     # bikeman(따맨) 이벤트: 우리 자체 Postgres에서 직접 조회. 공공 API가 아니지만
     # Bronze 관점에서는 "이벤트를 생성하는 원천"으로 동등하게 취급해 여기 포함한다.
-    # outlets - 이 태스크가 성공하면 silver_bikeman_action_daily가 고정 시간이 아니라
+    # outlets - 이 태스크가 성공하면 silver_bikeman_action가 고정 시간이 아니라
     # 이 이벤트를 받아 트리거된다 (실패/스킵 시에는 발생하지 않는다).
     BashOperator(
         task_id="daily_batch_bikeman_event",
@@ -319,6 +324,10 @@ def bronze_daily_batch_all_sources():
     daily_batch_station_active = BashOperator(
         task_id="daily_batch_station_active",
         bash_command=bash_job("daily_batch_station_active"),
+        # daily_batch_station_master와 동일한 이유 - SNAPSHOT_DATE를 명시해 재시도가
+        # 자정(KST)을 넘겨도 이 run의 논리 날짜({{ ds }}) 파티션에 적재되게 한다.
+        env={"SNAPSHOT_DATE": "{{ ds }}"},
+        append_env=True,
         execution_timeout=timedelta(minutes=30),
         outlets=[STATION_ACTIVE_BRONZE],
         pool=BRONZE_POOL,

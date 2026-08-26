@@ -1,7 +1,7 @@
 """
 silver_rental_history 백필 청크 계획 계산 (#232)
 
-bronze_initial_load_all_sources_dag.py의 load_silver_rental_history 태스크가
+initial_load_dag.py의 load_silver_rental_history 태스크가
 기존에는 bash for-loop로 transform_silver_rental_history.py를 반복 호출하며 매
 반복마다 잡이 스스로 워터마크를 읽어 다음 구간을 정했다 - 이 방식은 한 반복이
 실패하면 루프 전체가 멈추고(#232), 반복들이 서로 의존해 병렬화할 수 없었다.

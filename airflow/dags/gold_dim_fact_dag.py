@@ -25,7 +25,7 @@ station_active / bikeman_action, 총 4개다(failure_report는 bike_features
 전용이라 이 DAG 범위에서 제외됨). 이 4개는 서로 다른 3개 DAG + 1개 Asset
 트리거 DAG에서 나온다.
 
-    - bikeman_action: silver_bikeman_action_daily가 Asset(bikeman_event_bronze)
+    - bikeman_action: silver_bikeman_action가 Asset(bikeman_event_bronze)
       트리거라 logical_date가 매일 정해진 시각으로 정렬되지 않는다.
       ExternalTaskSensor의 execution_delta 매칭 전제(고정 스케줄)가 깨지므로,
       대신 실제 워터마크 파일을 직접 확인하는 BashSensor를 쓴다
@@ -184,7 +184,7 @@ def _collection_priority_bash(job_module: str, extra_env: str = "") -> str:
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
-    tags=["gold"],
+    tags=["gold", "daily_batch"],
     params={
         "max_days_per_run": "",  # build_dim_bike 백필용
     },

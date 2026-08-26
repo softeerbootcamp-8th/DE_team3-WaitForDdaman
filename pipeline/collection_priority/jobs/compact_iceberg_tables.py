@@ -71,7 +71,7 @@ remove_orphan_files는 Iceberg 기본값(3일 이내 생성 파일 보호)을 �
 
 ### 왜 gold_dim_fact가 아니라 별도 DAG인가
 daily 배치마다 매번 돌리면(파일/스냅샷이 하루에 1개씩만 늘어나는데) 배보다
-배꼽이 커진다. 주간 1회면 충분하므로 별도 스케줄(gold_maintenance, 매주 일요일)로
+배꼽이 커진다. 주간 1회면 충분하므로 별도 스케줄(iceberg_maintenance, 매주 일요일)로
 분리한다 - 실패해도 다음 주에 다시 시도하면 되고, daily 배치의 SLA에 영향을 주지 않는다.
 
 ### 멱등성 / 안전성
@@ -80,7 +80,7 @@ daily 배치마다 매번 돌리면(파일/스냅샷이 하루에 1개씩만 늘
 테이블이 아직 생성 전이면(최초 배포 직후 등) 조용히 건너뛴다.
 
 사용법:
-    python -m jobs.compact_gold_tables
+    python -m jobs.compact_iceberg_tables
 """
 import logging
 from datetime import datetime, timedelta, timezone

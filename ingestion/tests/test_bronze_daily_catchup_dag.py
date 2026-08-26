@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-DAG_ID = "bronze_historical_reconciliation"
-DAG_FILE = "bronze_historical_reconciliation_dag.py"
+DAG_ID = "bronze_daily_catchup"
+DAG_FILE = "bronze_daily_catchup_dag.py"
 
 
 def _dag_folder() -> str:

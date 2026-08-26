@@ -51,7 +51,7 @@ def _staging_bash(job_module: str, extra_env_str: str = "") -> str:
 
 
 @dag(
-    dag_id="silver_bikeman_action_daily",
+    dag_id="silver_bikeman_action",
     schedule=[BIKEMAN_EVENT_BRONZE],  # 고정 시간이 아니라 Bronze 완료 이벤트로 트리거
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Seoul"),
     catchup=False,
@@ -63,7 +63,7 @@ def _staging_bash(job_module: str, extra_env_str: str = "") -> str:
     },
     doc_md=__doc__,
 )
-def silver_bikeman_action_daily():
+def silver_bikeman_action():
     BashOperator(
         task_id="silver_bikeman_action",
         bash_command=_staging_bash("silver_bikeman_action", "MAX_DAYS_PER_RUN='{{ params.max_days_per_run }}' "),
@@ -76,4 +76,4 @@ def silver_bikeman_action_daily():
     )
 
 
-silver_bikeman_action_daily()
+silver_bikeman_action()

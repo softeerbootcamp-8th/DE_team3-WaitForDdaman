@@ -11,12 +11,12 @@ Silver 워터마크 부트스트랩 - Bronze 초기 적재가 커버한 실제 �
 
 ⚠️ 원래는 초기 적재 직후 1회만 실행해야 하는 잡이었다 - daily_batch처럼 매일 도는 잡에
 넣으면 정상 진행 중인 워터마크를 매번 (bronze MIN - 1일)로 되돌려버리기 때문이다.
-bronze_initial_load_all_sources_dag.py는 재트리거가 가능한 DAG(수동 1회성이지만 파일을
+initial_load_dag.py는 재트리거가 가능한 DAG(수동 1회성이지만 파일을
 빠뜨렸을 때 등 다시 트리거할 수 있음)라, "1회만"을 사람이 지키는 것에만 의존할 수 없다 -
 그래서 이미 워터마크가 설정돼 있으면(재실행으로 판단) 아무것도 안 하고 건너뛴다.
 read_watermark()는 없으면 backfill_start_date로 폴백해버려서 "진짜 없음"과 "폴백값"을
 구분 못 하므로, get_json()으로 키 존재 자체를 직접 확인한다.
-bronze_initial_load_all_sources_dag.py에서만 태스크로 연결한다.
+initial_load_dag.py에서만 태스크로 연결한다.
 
 Spark를 안 쓴다 (2026-08-22 변경) - MIN 하나 뽑는데 Spark JVM을 통째로 띄울 필요가
 없다. pyiceberg로 매니페스트(파티션 메타데이터)만 읽어서 훨씬 가볍게 조회한다

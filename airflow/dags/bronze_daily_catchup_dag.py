@@ -57,17 +57,17 @@ def _current_run_id() -> str:
 
 
 @dag(
-    dag_id="bronze_historical_reconciliation",
+    dag_id="bronze_daily_catchup",
     schedule="30 0 * * *",
     start_date=pendulum.datetime(2026, 1, 1, tz="Asia/Seoul"),
     catchup=False,
     max_active_runs=1,
     max_active_tasks=5,
     default_args=DEFAULT_ARGS,
-    tags=["bronze", "reconciliation", "rental_history", "failure_report"],
+    tags=["bronze", "daily_batch"],
     doc_md=__doc__,
 )
-def bronze_historical_reconciliation():
+def bronze_daily_catchup():
     common_env = {
         "RECONCILIATION_TARGET_DATE": TARGET_DATE,
         "DAG_RUN_ID": "{{ run_id }}",
@@ -285,4 +285,4 @@ def bronze_historical_reconciliation():
     failure_requests >> advance_failure
 
 
-bronze_historical_reconciliation()
+bronze_daily_catchup()

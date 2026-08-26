@@ -2,7 +2,7 @@
 Gold DAG(gold_dim_fact)의 wait_for_silver 단계 - bikeman_action 준비 확인용
 
 ### 왜 ExternalTaskSensor를 안 쓰는가
-silver_bikeman_action_daily DAG는 고정 cron이 아니라 Asset(bikeman_event_bronze)
+silver_bikeman_action DAG는 고정 cron이 아니라 Asset(bikeman_event_bronze)
 트리거라 logical_date가 매일 정해진 시각으로 정렬되지 않는다. ExternalTaskSensor는
 "이 DAG의 logical_date - execution_delta = 대상 DAG의 logical_date"로 매칭하는데,
 Asset 트리거 DAG는 이 계산이 통하지 않아 대상 DagRun을 못 찾고 계속 실패할 위험이

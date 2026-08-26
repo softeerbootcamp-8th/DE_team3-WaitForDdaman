@@ -23,16 +23,16 @@ PRELIMINARY_SCHEDULE = os.getenv(
 
 
 @dag(
-    dag_id="raw_preliminary_all_sources",
+    dag_id="raw_preliminary",
     schedule=PRELIMINARY_SCHEDULE,
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Seoul"),
     catchup=False,
     max_active_runs=1,
     default_args=DEFAULT_ARGS,
-    tags=["raw", "preliminary"],
+    tags=["raw", "daily_batch"],
     doc_md=__doc__,
 )
-def raw_preliminary_all_sources():
+def raw_preliminary():
     collect_rental_history = BashOperator(
         task_id="collect_rental_history_preliminary_raw",
         bash_command=bash_job("collect_rental_history_raw"),
@@ -58,4 +58,4 @@ def raw_preliminary_all_sources():
     [collect_rental_history, collect_failure_report]
 
 
-raw_preliminary_all_sources()
+raw_preliminary()

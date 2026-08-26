@@ -54,7 +54,7 @@ def _bash(job_module: str) -> str:
     catchup=False,
     max_active_runs=1,
     default_args=DEFAULT_ARGS,
-    tags=["dq", "asset_triggered", "silver"],
+    tags=["dq", "asset_triggered"],
     doc_md=__doc__,
 )
 def dq_rental_history():
