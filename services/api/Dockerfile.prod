@@ -1,0 +1,13 @@
+# build context: repo root (필요: main.py가 `services.api.app...` 절대 임포트를 사용)
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY services/api/requirements.txt services/api/requirements.txt
+RUN pip install --no-cache-dir -r services/api/requirements.txt
+
+COPY services/api services/api
+
+EXPOSE 8000
+
+CMD ["uvicorn", "services.api.app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

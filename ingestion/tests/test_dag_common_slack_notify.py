@@ -100,9 +100,6 @@ def test_collection_cutoff_at_template_safe_when_data_interval_end_undefined():
     parsed = parse_collection_cutoff(rendered)
     assert parsed.tzinfo == KST
     assert parsed.hour == 12
-
-
-
 @pytest.mark.parametrize(
     "module_name",
     [
