@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: production-ec2-deployment
+  group: deploy-api
   cancel-in-progress: false
 
 permissions:
@@ -62,8 +62,8 @@ jobs:
           aws ec2 authorize-security-group-ingress \
             --group-id ${{ secrets.SSH_SECURITY_GROUP_ID }} \
             --protocol tcp --port 22 \
-            --cidr ${{ steps.runner-ip.outputs.ip }}/32
-          sleep 5
+            --cidr ${{ steps.runner-ip.outputs.ip }}/32 || true
+          sleep 10
 
       - name: Deploy API to EC2
         run: |
@@ -73,8 +73,8 @@ jobs:
 
           DEPLOY_CMD="cd /opt/waitforddaman && ACCOUNT_ID=\$(aws sts get-caller-identity --query Account --output text) && export ECR_REGISTRY=\"\${ACCOUNT_ID}.dkr.ecr.ap-northeast-2.amazonaws.com\" && export IMAGE_TAG=\"latest\" && aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin \"\$ECR_REGISTRY\" && echo '==> Pulling and restarting API container' && docker compose -f docker-compose.prod.yml pull api && docker compose -f docker-compose.prod.yml up -d api && (docker image prune -a -f --filter 'until=24h' || docker image prune -f) && docker compose -f docker-compose.prod.yml ps api"
 
-          for i in {1..5}; do
-            ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key ${{ secrets.EC2_SSH_USER }}@${{ secrets.EC2_HOST }} "$DEPLOY_CMD" && break || sleep 3
+          for i in {1..6}; do
+            ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ${{ secrets.EC2_SSH_USER }}@${{ secrets.EC2_HOST }} "$DEPLOY_CMD" && break || sleep 5
           done
 
           rm -f ~/.ssh/deploy_key
@@ -85,4 +85,4 @@ jobs:
           aws ec2 revoke-security-group-ingress \
             --group-id ${{ secrets.SSH_SECURITY_GROUP_ID }} \
             --protocol tcp --port 22 \
-            --cidr ${{ steps.runner-ip.outputs.ip }}/32
+            --cidr ${{ steps.runner-ip.outputs.ip }}/32 || true
