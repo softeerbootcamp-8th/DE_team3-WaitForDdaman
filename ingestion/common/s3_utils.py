@@ -138,10 +138,9 @@ def upload_file_if_changed(local_path: Path, bucket: str, key: str) -> bool:
     """
     같은 key에 내용이 동일한 파일이 이미 있으면 업로드를 스킵하고 재사용한다 (멱등).
 
-    S3 ETag는 멀티파트 업로드 시 각 파트 MD5의 조합 해시라서 로컬 파일 MD5와 직접
-    비교할 수 없다. 대신 업로드할 때 로컬 MD5를 커스텀 메타데이터로 함께 저장해두고,
-    다음 실행에서는 HEAD로 그 메타데이터만 비교한다 - 내용이 같으면 재업로드 없이
-    기존 객체를 그대로 재사용하고, 다르면(혹은 메타데이터가 없으면) 덮어쓴다.
+    S3가 제공하는 CRC32 체크섬을 우선 비교한다. 체크섬이 없는 기존 객체 또는
+    S3 호환 스토리지는 저장된 MD5 메타데이터를 사용하고, 단일 파트 객체에 한해서는
+    ETag(MD5)도 대체 비교한다. 멀티파트 ETag는 로컬 MD5와 비교하지 않는다.
     """
     existing = head_object(bucket, key)
     s3 = get_s3_client()
@@ -179,6 +178,14 @@ def upload_file_if_changed(local_path: Path, bucket: str, key: str) -> bool:
         local_md5 = _md5_hex(local_path)
         if existing.get("Metadata", {}).get("content-md5") == local_md5:
             logger.info("동일한 파일이 이미 존재해 업로드 스킵(MD5 fallback): s3://%s/%s", bucket, key)
+            return False
+
+        # S3 호환 스토리지는 ChecksumCRC32/메타데이터를 반환하지 않을 수 있다.
+        # 단일 파트 객체의 ETag는 파일 MD5와 같지만, 멀티파트 ETag(<md5>-<part_count>)는
+        # 비교할 수 없으므로 제외한다.
+        remote_etag = str(existing.get("ETag", "")).strip('"')
+        if remote_etag and "-" not in remote_etag and remote_etag == local_md5:
+            logger.info("동일한 파일이 이미 존재해 업로드 스킵(ETag MD5 fallback): s3://%s/%s", bucket, key)
             return False
 
     s3.upload_file(
