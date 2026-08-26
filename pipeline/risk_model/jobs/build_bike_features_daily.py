@@ -127,6 +127,22 @@ def _suspended_bike_days(catalog, target_date: date, window_days: int) -> pa.Tab
     return table.scan(row_filter=row_filter, selected_fields=("bike_id", "snapshot_date")).to_arrow()
 
 
+def _rental_scan_row_filter(target_date: date, window_days: int):
+    """rental_history 스캔을 [target_date - window_days, target_date) 구간으로 좁힌다.
+
+    build_usage_features()의 JOIN 경계(d.rent_date >= as_of - window_days AND
+    d.rent_date < a.as_of)와 동일 - 이 범위 밖 rental은 어차피 다운스트림에서 버려지므로
+    스캔 단계에서 미리 잘라낸다(_suspended_bike_days와 동일한 partition pruning 패턴).
+    rent_date_partition은 identity 파티션 문자열 컬럼(YYYY-MM-DD)이다.
+    """
+    start_str = (target_date - timedelta(days=window_days)).strftime("%Y-%m-%d")
+    end_str = target_date.strftime("%Y-%m-%d")
+    return And(
+        GreaterThanOrEqual("rent_date_partition", start_str),
+        LessThan("rent_date_partition", end_str),
+    )
+
+
 _EXCLUDE_SUSPENDED_SQL = """
     SELECT r.*
     FROM rent r
@@ -181,7 +197,8 @@ def _build_features(catalog, con, cfg, target_date: date, t0_enabled: bool = Fal
     engine = SqlEngine.for_duckdb(con)
     window_days = int(cfg.get_path("run.window_days", 14))
 
-    rent = apply_trip_filters(engine, read_rental(engine, cfg), cfg)
+    rental_filter = _rental_scan_row_filter(target_date, window_days)
+    rent = apply_trip_filters(engine, read_rental(engine, cfg, row_filter=rental_filter), cfg)
     suspended = _suspended_bike_days(catalog, target_date, window_days)
     filtered_rent = _exclude_suspended_rental_days(rent, suspended)
 

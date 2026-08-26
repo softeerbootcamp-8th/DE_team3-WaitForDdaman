@@ -8,8 +8,13 @@ build_dim_bike.py의 _compute_new_bikes()와 동일한 DuckDB 기반 패턴.
 from datetime import date, datetime, timezone
 
 import pyarrow as pa
+from pyiceberg.expressions import And, GreaterThanOrEqual, LessThan
 
-from jobs.build_bike_features_daily import _exclude_suspended_rental_days, _parse_bool_env
+from jobs.build_bike_features_daily import (
+    _exclude_suspended_rental_days,
+    _parse_bool_env,
+    _rental_scan_row_filter,
+)
 
 
 def utc(*args) -> datetime:
@@ -68,6 +73,26 @@ def test_empty_suspended_keeps_all_rentals():
     result = _exclude_suspended_rental_days(rent, suspended).to_pylist()
 
     assert {r["bike_id"] for r in result} == {"SPB-001", "SPB-002"}
+
+
+def test_rental_scan_row_filter_matches_window_days():
+    """[target_date - window_days, target_date) - build_usage_features()의 JOIN 경계와 동일해야 한다."""
+    result = _rental_scan_row_filter(date(2026, 8, 20), window_days=14)
+
+    assert result == And(
+        GreaterThanOrEqual("rent_date_partition", "2026-08-06"),
+        LessThan("rent_date_partition", "2026-08-20"),
+    )
+
+
+def test_rental_scan_row_filter_excludes_target_date_itself():
+    """target_date 당일은 포함하지 않는다 (window_days=1이어도 시작일=종료일 전날)."""
+    result = _rental_scan_row_filter(date(2026, 1, 1), window_days=1)
+
+    assert result == And(
+        GreaterThanOrEqual("rent_date_partition", "2025-12-31"),
+        LessThan("rent_date_partition", "2026-01-01"),
+    )
 
 
 def test_parse_bool_env_handles_failure_report_t0(monkeypatch):
