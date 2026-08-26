@@ -7,7 +7,9 @@ Silver DAG - 공공자전거 고장신고 내역 (bronze.failure_report -> silve
     failure_type  STRING      (trim)
 
 파티션: reg_date_partition (identity, yyyy-MM-dd = date(reg_dttm))
-        ⚠️ 이름은 브론즈와 같지만 의미가 다르다 - 브론즈는 '적재일', 실버는 '고장 등록일'.
+        ⚠️ 이름은 브론즈와 같지만 의미가 다르다 - 브론즈는 'API 요청일', 실버는 '고장 등록일'.
+        API가 요청일 기준 최대 31일치를 돌려주므로(#304) 브론즈 요청일 파티션 하나에
+        실버 등록일 파티션이 여러 개 섞여 나오고 같은 신고가 요청일마다 중복으로 온다.
         Gold 담당자와의 인터페이스 계약이다 (#143에서 days(reg_dttm) hidden 파티션에서
         바뀜 - pyiceberg가 transform 파티션 쓰기에 제약이 있어 identity로 통일).
         자세한 배경은 staging/jobs/silver_failure_report.py docstring 참고.
@@ -23,11 +25,16 @@ bronze_daily_batch_all_sources DAG의 daily_batch_failure_report 태스크가 �
 (실패/스킵 시에는 발생하지 않음) outlets로 FAILURE_REPORT_BRONZE Asset을 갱신하고,
 이 DAG는 그 갱신을 스케줄 트리거로 사용한다.
 
-### 단일 DAG (전체 재처리)
+### 단일 DAG (sliding window 재처리 + backlog 증분)
 daily/backfill을 나누지 않는다 - silver는 결국 브론즈에 쌓인 걸 정제만 하면 되는
-레이어라, 매일 1회 브론즈 전체를 다시 읽어 실버 전체를 INSERT OVERWRITE로 교체한다
-(catchup=False, 날짜 구간 파라미터 없음). 전체 재처리라 daily(MERGE INTO, append-only)
-처럼 브론즈가 나중에 정정돼도 실버에 반영이 안 되는 문제가 없다 - self-healing.
+레이어다(catchup=False, 날짜 구간 파라미터 없음). 잡은 매 실행
+
+  - 실제 신고일 기준 최근 31일 sliding window를 다시 계산해 파티션을 교체하고,
+  - 그 아래에 남은 backlog 구간만 증분으로 처리하며 Silver 워터마크를 전진시킨다.
+
+최근 구간을 매번 다시 만들기 때문에, 브론즈가 나중에 정정되거나 신고가 늦게
+도착해도 실버에 반영된다 - self-healing. 자세한 이유는
+staging/jobs/silver_failure_report.py docstring 참고 (#288, #304).
 
 ### 단일 태스크 (#82: 5단계 분할 -> 통합)
 원래 check -> transform -> validate -> overwrite -> metrics 5단계로 분할돼 있었으나,

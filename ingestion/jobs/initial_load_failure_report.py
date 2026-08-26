@@ -67,6 +67,8 @@ def _ensure_bronze_table(spark) -> None:
             reg_dttm STRING,
             failure_type STRING,
             reg_date_partition STRING,
+            requested_date STRING,
+            observed_at TIMESTAMP,
             source_file STRING,
             ingested_at TIMESTAMP
         )
@@ -147,8 +149,13 @@ def _process_one_file(spark, raw_path: Path, workdir: Path):
     select_exprs = build_select_exprs(actual_columns)
     mapped_df = raw_df.select(*select_exprs)
 
+    # 파일 백필에는 API 요청이라는 개념이 없다 - requested_date/observed_at은 NULL로 둔다.
+    # 그래서 이 경로의 reg_date_partition만은 "실제 신고일"이고, Silver는 requested_date가
+    # 없으면 파티션 값을 요청일로 폴백해 읽는다(#304).
     bronze_df = (
         mapped_df.withColumn("reg_date_partition", _derive_date_partition(mapped_df, "reg_dttm"))
+        .withColumn("requested_date", F.lit(None).cast("string"))
+        .withColumn("observed_at", F.lit(None).cast("timestamp"))
         .withColumn("source_file", F.lit(raw_path.name))
         .withColumn("ingested_at", F.current_timestamp())
     )
