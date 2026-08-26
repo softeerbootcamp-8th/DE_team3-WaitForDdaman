@@ -7,6 +7,7 @@ boto3는 endpoint_url만 다르면 LocalStack과 실제 AWS S3를 동일한 코�
 """
 import functools
 import hashlib
+import base64
 import json
 import logging
 import os
@@ -110,6 +111,17 @@ def _md5_hex(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _crc32_base64(path: Path) -> str:
+    """S3 ChecksumCRC32 응답 형식(base64)과 같은 전체 파일 CRC32를 계산한다."""
+    import zlib
+
+    checksum = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            checksum = zlib.crc32(chunk, checksum)
+    return base64.b64encode(checksum.to_bytes(4, "big")).decode("ascii")
+
+
 def head_object(bucket: str, key: str) -> Optional[dict]:
     """key가 없으면 None. head_object 응답(Metadata 포함)을 그대로 반환한다."""
     s3 = get_s3_client()
@@ -131,14 +143,50 @@ def upload_file_if_changed(local_path: Path, bucket: str, key: str) -> bool:
     다음 실행에서는 HEAD로 그 메타데이터만 비교한다 - 내용이 같으면 재업로드 없이
     기존 객체를 그대로 재사용하고, 다르면(혹은 메타데이터가 없으면) 덮어쓴다.
     """
-    local_md5 = _md5_hex(local_path)
     existing = head_object(bucket, key)
-    if existing is not None and existing.get("Metadata", {}).get("content-md5") == local_md5:
-        logger.info("동일한 파일이 이미 존재해 업로드 스킵: s3://%s/%s", bucket, key)
-        return False
-
     s3 = get_s3_client()
-    s3.upload_file(str(local_path), bucket, key, ExtraArgs={"Metadata": {"content-md5": local_md5}})
+
+    # 신규 객체는 S3가 업로드 스트림에서 CRC32를 계산하게 한다. 로컬 MD5를 먼저
+    # 계산하지 않아 대용량 파일의 디스크 전체 1회 읽기를 줄인다.
+    if existing is None:
+        s3.upload_file(
+            str(local_path),
+            bucket,
+            key,
+            ExtraArgs={"ChecksumAlgorithm": "CRC32", "ChecksumType": "FULL_OBJECT"},
+        )
+        logger.info("업로드 완료(신규, S3 CRC32): %s -> s3://%s/%s", local_path, bucket, key)
+        return True
+
+    local_size = local_path.stat().st_size
+    if existing.get("ContentLength") != local_size:
+        s3.upload_file(
+            str(local_path),
+            bucket,
+            key,
+            ExtraArgs={"ChecksumAlgorithm": "CRC32", "ChecksumType": "FULL_OBJECT"},
+        )
+        logger.info("업로드 완료(크기 변경): %s -> s3://%s/%s", local_path, bucket, key)
+        return True
+
+    remote_crc32 = existing.get("ChecksumCRC32")
+    if remote_crc32:
+        if _crc32_base64(local_path) == remote_crc32:
+            logger.info("동일한 파일이 이미 존재해 업로드 스킵(CRC32): s3://%s/%s", bucket, key)
+            return False
+    else:
+        # 전환기 호환: 구버전 객체에는 CRC32가 없고 content-md5만 있을 수 있다.
+        local_md5 = _md5_hex(local_path)
+        if existing.get("Metadata", {}).get("content-md5") == local_md5:
+            logger.info("동일한 파일이 이미 존재해 업로드 스킵(MD5 fallback): s3://%s/%s", bucket, key)
+            return False
+
+    s3.upload_file(
+        str(local_path),
+        bucket,
+        key,
+        ExtraArgs={"ChecksumAlgorithm": "CRC32", "ChecksumType": "FULL_OBJECT"},
+    )
     logger.info("업로드 완료(멱등 갱신): %s -> s3://%s/%s", local_path, bucket, key)
     return True
 
