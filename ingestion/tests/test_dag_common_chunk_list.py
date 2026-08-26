@@ -41,3 +41,26 @@ def test_preserves_order():
 def test_invalid_batch_size_raises(batch_size):
     with pytest.raises(ValueError):
         dag_common.chunk_list(["a"], batch_size=batch_size)
+
+
+def test_chunks_files_by_count_and_total_size_preserving_input_order():
+    sizes = {"a": 3, "b": 2, "c": 4, "d": 1}
+    batches = dag_common.chunk_files_by_size(
+        ["a", "b", "c", "d"], max_files=3, max_bytes=5, size_fn=sizes.__getitem__
+    )
+    assert batches == [["a", "b"], ["c", "d"]]
+
+
+def test_large_file_is_alone_even_when_over_size_limit():
+    sizes = {"large": 10, "small": 1}
+    batches = dag_common.chunk_files_by_size(
+        ["large", "small"], max_files=6, max_bytes=4, size_fn=sizes.__getitem__
+    )
+    assert batches == [["large"], ["small"]]
+
+
+def test_invalid_size_limits_raise():
+    with pytest.raises(ValueError):
+        dag_common.chunk_files_by_size(["a"], max_files=0, max_bytes=1, size_fn=lambda _: 1)
+    with pytest.raises(ValueError):
+        dag_common.chunk_files_by_size(["a"], max_files=1, max_bytes=0, size_fn=lambda _: 1)

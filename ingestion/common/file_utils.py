@@ -8,6 +8,7 @@
 """
 import logging
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -87,8 +88,8 @@ def expand_archives(paths: list[Path], workdir: Path) -> list[Path]:
     Dynamic Task Mapping이 zip 파일 하나가 아니라 그 안의 개별 파일(월) 단위로 태스크를
     나눌 수 있게 하기 위함 - unzip_if_needed가 이미 압축 여부를 판별해 알맞은 리스트를
     반환하므로 그 결과를 이어 붙이기만 하면 된다."""
-    expanded = []
-    for path in paths:
-        expanded.extend(unzip_if_needed(path, workdir))
-    return expanded
-
+    # ZIP별 압축 해제는 서로 독립적이다. 2 vCPU 워커에서 디스크 경쟁을 과도하게
+    # 만들지 않도록 archive 단위 동시성을 2개로 제한한다.
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = executor.map(lambda path: unzip_if_needed(path, workdir), paths)
+        return [item for result in results for item in result]

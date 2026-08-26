@@ -179,6 +179,34 @@ def chunk_list(items: list, batch_size: int) -> list[list]:
     return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
 
 
+def chunk_files_by_size(
+    items: list,
+    max_files: int,
+    max_bytes: int,
+    size_fn=os.path.getsize,
+) -> list[list]:
+    """입력 순서를 유지하며 파일 수/누적 바이트 중 먼저 도달하는 기준으로 묶는다."""
+    if max_files < 1:
+        raise ValueError(f"max_files는 1 이상이어야 합니다: {max_files}")
+    if max_bytes < 1:
+        raise ValueError(f"max_bytes는 1 이상이어야 합니다: {max_bytes}")
+
+    batches: list[list] = []
+    current: list = []
+    current_bytes = 0
+    for item in items:
+        item_bytes = int(size_fn(item))
+        if current and (len(current) >= max_files or current_bytes + item_bytes > max_bytes):
+            batches.append(current)
+            current = []
+            current_bytes = 0
+        current.append(item)
+        current_bytes += item_bytes
+    if current:
+        batches.append(current)
+    return batches
+
+
 def _required_env(name: str) -> str:
     value = os.getenv(name)
     if not value:

@@ -20,6 +20,7 @@ seq는 파일마다 부여된 내부 DB 일련번호라 파일명에서 계산�
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Union
 
@@ -132,9 +133,18 @@ def ensure_backfill_files(dataset_id: str, dest_dir: Union[str, Path], file_patt
     remote_files = _list_remote_files(dataset_id)
     matched = {name: seq for name, seq in remote_files.items() if fnmatch.fnmatch(name, file_pattern)}
 
+    pending = []
     for name, seq in sorted(matched.items()):
         if (dest_dir / name).exists():
             logger.info("이미 존재해 다운로드 스킵: %s", name)
-            continue
+        else:
+            pending.append((name, seq))
+
+    def download(item: tuple[str, str]) -> None:
+        name, seq = item
         logger.info("다운로드 시작: %s (dataset=%s, seq=%s)", name, dataset_id, seq)
         _download_one(dataset_id, seq, name, dest_dir)
+
+    # 네트워크 대기 시간을 겹치되 API rate limit과 2 vCPU 워커를 고려해 2개로 제한한다.
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(download, pending))
