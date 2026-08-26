@@ -82,6 +82,27 @@ def test_replaces_localhost_with_airflow_base_url(monkeypatch):
     assert "localhost:8080" not in text
 
 
+def test_collection_cutoff_at_template_safe_when_data_interval_end_undefined():
+    """Asset-triggered 실행처럼 data_interval_end가 정의되지 않은 Jinja 컨텍스트에서도 템플릿 렌더링이 성공한다."""
+    import jinja2
+    import pendulum
+    from common.cutoff_utils import parse_collection_cutoff, KST
+
+    template = jinja2.Template(dag_common.COLLECTION_CUTOFF_AT_TEMPLATE)
+
+    # Asset-triggered 케이스 (data_interval_end 없음, run_after 존재)
+    class DummyRun:
+        conf = {}
+        run_after = pendulum.datetime(2026, 8, 26, 3, 16, 9, tz="UTC")
+
+    rendered = template.render(dag_run=DummyRun())
+    assert rendered == "2026-08-26T03:16:09+00:00"
+    parsed = parse_collection_cutoff(rendered)
+    assert parsed.tzinfo == KST
+    assert parsed.hour == 12
+
+
+
 @pytest.mark.parametrize(
     "module_name",
     [

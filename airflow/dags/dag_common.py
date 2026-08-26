@@ -87,12 +87,10 @@ SILVER_POOL = "silver_process"
 
 # 대여이력 Raw 수집/선택/승격은 실제 프로세스 시작 시각이 아니라 "논리 실행 시각"으로
 # 판단해야 한다 (같은 DAGRun의 재시도가 같은 window/같은 key를 보게 하기 위함).
-# 예약 실행은 data_interval_end, 수동 실행은 dag_run.conf.collection_cutoff_at을 쓴다.
-# 예비 DAG와 일 배치 DAG가 서로 다른 규칙을 쓰면 selection이 조용히 어긋나므로 여기서 공유한다.
 COLLECTION_CUTOFF_AT_TEMPLATE = (
-    '{{ dag_run.conf.get("collection_cutoff_at") '
-    'if dag_run and dag_run.conf.get("collection_cutoff_at") '
-    'else data_interval_end.in_timezone("Asia/Seoul").isoformat() }}'
+    '{{ (dag_run.conf.get("collection_cutoff_at") if (dag_run is defined and dag_run and dag_run.conf and dag_run.conf.get("collection_cutoff_at")) else None) '
+    'or (data_interval_end.isoformat() if (data_interval_end is defined and data_interval_end) else None) '
+    'or (dag_run.run_after.isoformat() if (dag_run is defined and dag_run and dag_run.run_after) else None) }}'
 )
 
 # ==============================================================================
