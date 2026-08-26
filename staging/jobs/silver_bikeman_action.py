@@ -22,7 +22,7 @@ from pyiceberg.types import NestedField, StringType, TimestamptzType
 
 import config
 from common.cutoff_utils import parse_collection_cutoff
-from common.duckdb_io import query_arrow
+from common.duckdb_io import connect, query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import append, overwrite_partition
 from common.s3_utils import ensure_bucket
@@ -121,7 +121,7 @@ FROM bronze_bikeman_action
 
 
 def _connect() -> duckdb.DuckDBPyConnection:
-    con = duckdb.connect(":memory:")
+    con = connect()
     con.execute("SET TimeZone='UTC'")
     return con
 

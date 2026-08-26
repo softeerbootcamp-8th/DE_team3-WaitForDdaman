@@ -8,6 +8,8 @@ from __future__ import annotations
 from datetime import date, datetime
 
 import duckdb
+
+from common.duckdb_io import connect
 import pandas as pd
 import pytest
 
@@ -79,7 +81,7 @@ def _spark_engine(spark):
 
 
 def _duckdb_engine():
-    return SqlEngine.for_duckdb(duckdb.connect(":memory:"))
+    return SqlEngine.for_duckdb(connect())
 
 
 def _spark_rent(spark):

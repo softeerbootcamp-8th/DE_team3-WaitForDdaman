@@ -38,7 +38,7 @@ from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOpe
 from airflow.providers.standard.sensors.python import PythonSensor
 from airflow.sdk import dag
 
-from dag_common import notify_slack_on_failure
+from dag_common import GOLD_POOL, notify_slack_on_failure
 
 PYLIB_DIR = "/opt/airflow/pylib"
 RISK_MODEL_DIR = "/opt/airflow/pipeline/risk_model"
@@ -135,6 +135,9 @@ def gold_risk_decision():
     # 2. build_bike_features_daily - Silver(rental_history/failure_report)만 있으면 됨.
     # rental_history는 트리거 소스인 gold_dim_fact가 이미 대기했으므로, 여기선
     # failure_report 대기 뒤에만 실행하면 된다.
+    # pool=GOLD_POOL: gold_dim_fact_dag의 build_* 태스크들과 워커 메모리 가드를
+    # 공유한다 - 이 체인 자체는 순차 실행이지만, 다른 DAG런/gold_dim_fact_dag와
+    # 겹칠 때 DuckDB 쿼리가 동시에 무제약으로 도는 걸 막는다 (#144/#285).
     build_bike_features_daily = BashOperator(
         task_id="build_bike_features_daily",
         bash_command=_bash("build_bike_features_daily", f"SNAPSHOT_DATE='{snapshot_date_expr}' "),
@@ -143,6 +146,7 @@ def gold_risk_decision():
         },
         append_env=True,
         execution_timeout=timedelta(minutes=30),
+        pool=GOLD_POOL,
     )
 
     # 3. run_risk_scoring_model + build_fact_bike_risk
@@ -152,6 +156,7 @@ def gold_risk_decision():
         task_id="run_risk_scoring_model",
         bash_command=_bash("build_fact_bike_risk", f"SNAPSHOT_DATE='{snapshot_date_expr}' "),
         execution_timeout=timedelta(minutes=30),
+        pool=GOLD_POOL,
     )
 
     # 4. build_fact_bike_decision
@@ -159,6 +164,7 @@ def gold_risk_decision():
         task_id="build_fact_bike_decision",
         bash_command=_bash("build_fact_bike_decision", f"SNAPSHOT_DATE='{snapshot_date_expr}' "),
         execution_timeout=timedelta(minutes=30),
+        pool=GOLD_POOL,
     )
 
     # 5. gold_to_serving_sync 트리거 - wait_for_completion=False로 걸어 sync 실패가

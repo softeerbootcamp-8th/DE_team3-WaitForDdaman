@@ -22,6 +22,27 @@ completion marker 기록을 한 태스크에서 끝낸다 - 날짜당 볼륨이 
 없고, 단계를 쪼개면 중간 산출물만 늘어난다.
 
 API 풀을 원천별로 나눈 이유는 dag_common.py의 RENTAL_HISTORY_API_POOL 주석 참고.
+
+### 왜 워터마크 전진 태스크가 Bronze Asset을 발행하는가 (#286)
+예전엔 이 DAG이 Bronze 공백을 채우고 워터마크까지 전진시킨 뒤 그냥 끝났다. 두 Bronze
+Asset의 producer가 bronze_daily_batch_all_sources 하나뿐이었고 outlets는 태스크 성공
+시에만 발행되므로, 일배치가 실패한 날은 catch-up이 Bronze를 정상 복구해도 Silver가
+그 사실을 알 수 없어 Silver/Gold가 계속 멈춰 있었다 - 일배치 실패가 곧 공백의
+원인이라, 복구가 가장 필요한 상황에서 복구 경로가 하류까지 닫히지 않았다.
+
+Asset을 mapped 태스크가 아니라 이 두 태스크에 붙이는 이유:
+  - 의미가 정확히 일치한다. Bronze 워터마크가 전진한 시점 = Silver가 볼 게 생긴 시점.
+  - 원천별 1회만 발행된다. mapped 태스크에 붙이면 날짜 수만큼 Silver가 트리거된다.
+  - 실패 시 발행되지 않는 게 이미 보장돼 있다. trigger_rule=ALL_DONE으로 항상 실행되지만
+    공백이 남으면 RECONCILIATION_FAIL_ON_INCOMPLETE=true가 태스크를 실패시키고,
+    outlets는 성공 시에만 발행된다. 별도 조건 로직이 필요 없다.
+
+Silver를 이 DAG에서 직접 처리하지 않는다(initial_load_dag의 planner/청크/finalizer
+복제). Silver 워터마크의 완료 정의가 두 개로 갈리고, silver.rental_history 커밋 경로가
+세 개가 되어 격리가 SILVER_POOL 슬롯 수에만 의존하기 때문이다. Asset만 발행하면
+silver_rental_history DAG의 max_active_runs=1이 직렬화를 보장한다. rental_history는
+Asset extra 없이 발행되고, silver_rental_history_dag의 resolve_bronze_promotion_metadata가
+그걸 이미 "확정 구간만 처리"로 해석한다 - Silver 쪽 변경은 없다.
 """
 from __future__ import annotations
 
@@ -36,6 +57,7 @@ from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag, task
 from airflow.task.trigger_rule import TriggerRule
 
+from dag_assets import FAILURE_REPORT_BRONZE, RENTAL_HISTORY_BRONZE
 from dag_common import (
     BRONZE_RENTAL_HISTORY_COMMIT_POOL,
     DEFAULT_ARGS,
@@ -289,6 +311,7 @@ def bronze_catchup_all_sources():
         env=common_env,
         append_env=True,
         trigger_rule=TriggerRule.ALL_DONE,
+        outlets=[RENTAL_HISTORY_BRONZE],
     )
     advance_failure = BashOperator(
         task_id="advance_failure_report_watermark",
@@ -301,6 +324,7 @@ def bronze_catchup_all_sources():
         env=common_env,
         append_env=True,
         trigger_rule=TriggerRule.ALL_DONE,
+        outlets=[FAILURE_REPORT_BRONZE],
     )
 
     rental_promoted >> advance_rental

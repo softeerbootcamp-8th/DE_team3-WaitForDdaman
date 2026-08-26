@@ -39,7 +39,7 @@ from pyiceberg.schema import Schema
 from pyiceberg.types import DoubleType, IntegerType, NestedField, StringType, DateType
 
 import config
-from common.duckdb_io import query_arrow
+from common.duckdb_io import connect, query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import overwrite_all
 from common.s3_utils import ensure_bucket
@@ -90,7 +90,7 @@ def _join_active_stations(
 ) -> pa.Table:
     """station_master(마스터 데이터)와 station_active(운영 중 여부)를 조인한다 -
     카탈로그 없이 두 PyArrow Table만으로 동작하는 순수 로직이라 단위 테스트가 가능하다."""
-    conn = con or duckdb.connect(":memory:")
+    conn = con or connect()
     conn.register("station_master", master_table)
     conn.register("active_ids", active_ids_table)
     return query_arrow(conn, _JOIN_SQL, [snapshot_date])
@@ -109,7 +109,7 @@ def _latest_snapshot(catalog, table_identifier: str) -> pa.Table:
     """MAX(snapshot_date) 스냅샷만 남긴다 - 대여소 수만큼(수백~수천 건)이라
     전체를 읽어 DuckDB에서 필터링해도 부담이 없다."""
     full = catalog.load_table(table_identifier).scan().to_arrow()
-    con = duckdb.connect(":memory:")
+    con = connect()
     con.register("t", full)
     return query_arrow(con, "SELECT * FROM t WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM t)")
 
@@ -117,7 +117,7 @@ def _latest_snapshot(catalog, table_identifier: str) -> pa.Table:
 def build_station_active(catalog, snapshot_date: str) -> pa.Table:
     master_table = _latest_snapshot(catalog, STATION_MASTER_TABLE)
 
-    con = duckdb.connect(":memory:")
+    con = connect()
     active_ids_table = _latest_snapshot(catalog, STATION_ACTIVE_SILVER_TABLE)
     con.register("active_raw", active_ids_table)
     active_ids = query_arrow(con, "SELECT DISTINCT station_id FROM active_raw")

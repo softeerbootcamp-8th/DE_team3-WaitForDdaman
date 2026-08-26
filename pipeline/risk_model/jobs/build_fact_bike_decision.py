@@ -32,7 +32,7 @@ from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import DateType, NestedField, StringType
 
 import config
-from common.duckdb_io import query_arrow
+from common.duckdb_io import connect, query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import overwrite_partition
 from common.s3_utils import ensure_bucket
@@ -84,7 +84,7 @@ def _validate_fact_bike_decision(table: pa.Table, risk_table: pa.Table) -> None:
     )
 
     # 참조 무결성: 오늘자 fact_bike_decision의 모든 bike_id는 오늘자 fact_bike_risk에도 있어야 한다.
-    conn = duckdb.connect(":memory:")
+    conn = connect()
     conn.register("decision", table)
     conn.register("risk", risk_table)
     orphan_count = query_arrow(
@@ -143,7 +143,7 @@ _DECIDE_ACTIONS_SQL = """
 def _decide_actions(
     risk_table: pa.Table, location_table: pa.Table, inventory_table: pa.Table, target_date: date
 ) -> pa.Table:
-    conn = duckdb.connect(":memory:")
+    conn = connect()
     conn.register("risk", risk_table)
     conn.register("location", location_table)
     conn.register("inventory", inventory_table)

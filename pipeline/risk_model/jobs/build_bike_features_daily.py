@@ -45,7 +45,7 @@ from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import DateType, DoubleType, IntegerType, NestedField, StringType
 
 import config
-from common.duckdb_io import query_arrow
+from common.duckdb_io import connect, query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import overwrite_partition
 from common.s3_utils import ensure_bucket
@@ -142,7 +142,7 @@ def _exclude_suspended_rental_days(rent_table: pa.Table, suspended_table: pa.Tab
     rent_table은 다른 날짜 이력을 그대로 유지한다 - 이 자전거 자체를 오늘 추론 대상에서
     빼는 게 아니라, 모순이 발생한 그 하루치 대여 레코드만 걸러내는 것이다.
     """
-    conn = duckdb.connect(":memory:")
+    conn = connect()
     conn.register("rent", rent_table)
     conn.register("suspended", suspended_table)
     return query_arrow(conn, _EXCLUDE_SUSPENDED_SQL)
@@ -237,7 +237,7 @@ def run() -> None:
     target_date = date.fromisoformat(snapshot_date_str) if snapshot_date_str else date.today()
     t0_enabled = _parse_bool_env("FAILURE_REPORT_T0_ENABLED", default=False)
 
-    con = duckdb.connect(":memory:")
+    con = connect()
     try:
         _process_date(catalog, gold_table, con, cfg, target_date, t0_enabled=t0_enabled)
     except QualityCheckError as e:

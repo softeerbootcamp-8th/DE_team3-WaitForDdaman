@@ -33,7 +33,7 @@ from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import DateType, DoubleType, IntegerType, NestedField, StringType
 
 import config
-from common.duckdb_io import query_arrow
+from common.duckdb_io import connect, query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import overwrite_partition
 from common.s3_utils import ensure_bucket
@@ -102,7 +102,7 @@ def build_mart_station_daily(
     con: duckdb.DuckDBPyConnection | None = None,
 ) -> pa.Table:
     """카탈로그 없이 세 PyArrow Table만으로 동작하는 순수 로직이라 단위 테스트가 가능하다."""
-    conn = con or duckdb.connect(":memory:")
+    conn = con or connect()
     conn.register("station_active", station_active_table)
     conn.register("inventory", inventory_table)
     conn.register("station_risk", station_risk_table)

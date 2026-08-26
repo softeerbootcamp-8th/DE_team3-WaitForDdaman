@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 import duckdb
+
+from common.duckdb_io import connect
 import pyarrow as pa
 
 logger = logging.getLogger(__name__)
@@ -157,7 +159,7 @@ class QualityCheck:
         """
         PyArrow Table, Pandas DataFrame, DuckDB Relation 등을 입력받아 검증을 실행합니다.
         """
-        conn = con or duckdb.connect(":memory:")
+        conn = con or connect()
 
         # 입력 데이터 등록
         if isinstance(data, (pa.Table, pa.RecordBatch)):
