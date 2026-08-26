@@ -22,7 +22,6 @@ from jobs.silver_failure_report import (
     SILVER_COLUMNS,
     SILVER_PARTITION_SPEC,
     SILVER_SCHEMA,
-    _split_partition_mismatch,
     resolve_confirmed_range,
     transform,
     validate,
@@ -32,8 +31,8 @@ from jobs.silver_failure_report import (
 def mod_default_max_days() -> int:
     return DEFAULT_MAX_DAYS_PER_RUN
 
-# Bronze는 선언 신고일(PARTITION_COLUMN)도 갖는다 - transform이 유도 신고일과 비교할
-# 기준으로 통과시킨다(#288).
+# Bronze는 API 요청일(PARTITION_COLUMN)도 갖는다 - transform이 요청일을 함께 뽑아
+# quarantine 구간 교체 키로 쓴다(#288, #304).
 BRONZE_COLUMNS = ["bike_no", "reg_dttm", "failure_type", PARTITION_COLUMN]
 
 DEFAULT_ROW = {
@@ -218,7 +217,13 @@ def test_confirmed_range_default_cap_is_applied_when_env_is_empty():
 
 
 # ---------------------------------------------------------------------------
-# 신고일 불일치 quarantine (#288)
+# 요청일 != 신고일 (#304)
+#
+# #288은 유도 신고일이 Bronze 파티션(선언 신고일)과 다른 행을 전부 quarantine으로
+# 격리했다. API가 요청일 기준 최대 31일치를 돌려준다는 게 확인되면서(#304) 그 전제가
+# 무너졌다 - 불일치는 이상이 아니라 이 원천의 정상 동작이다. 이제 Silver는 실제
+# 신고일 기준 sliding window로 처리하고, quarantine은 cutoff보다 미래인 행만 받는다.
+# window/중복 제거/구간 교체 자체는 test_silver_failure_report_sliding_window.py 참고.
 # ---------------------------------------------------------------------------
 
 
@@ -228,293 +233,55 @@ def _with_declared(*overrides) -> pa.Table:
     return transform_with_declared(bronze_table(*overrides))
 
 
-def test_matching_rows_stay_in_main_table():
-    clean, quarantined = _split_partition_mismatch(_with_declared({}))
+def test_declared_date_prefers_the_explicit_requested_date_column():
+    """신규 수집분은 requested_date를 싣는다 - 파티션 값보다 그쪽이 우선이다."""
+    from jobs.silver_failure_report import REQUESTED_DATE_COLUMN, transform_with_declared
 
-    assert len(clean) == 1
-    assert len(quarantined) == 0
-    assert clean.column_names == SILVER_COLUMNS
+    bronze = pa.table({
+        "bike_no": pa.array(["SPB-1"], type=pa.string()),
+        "reg_dttm": pa.array(["2026-08-21 09:00:00"], type=pa.string()),
+        "failure_type": pa.array(["페달"], type=pa.string()),
+        PARTITION_COLUMN: pa.array(["2026-07-25"], type=pa.string()),
+        REQUESTED_DATE_COLUMN: pa.array(["2026-07-26"], type=pa.string()),
+    })
+    row = transform_with_declared(bronze).to_pylist()[0]
+
+    assert row[DECLARED_COLUMN] == "2026-07-26"
+    assert row[PARTITION_COLUMN] == "2026-08-21"   # 유도 신고일은 그대로
 
 
-def test_mismatched_row_goes_to_quarantine():
-    """선언 신고일과 유도 신고일이 다른 행은 본 테이블에 남지 않는다.
+def test_declared_date_falls_back_to_the_partition_for_backfilled_rows():
+    """파일 백필분에는 requested_date가 없다(NULL) - 파티션 값으로 폴백한다."""
+    row = _with_declared(
+        {"reg_dttm": "2026-08-21 09:00:00", PARTITION_COLUMN: "2026-08-21"}
+    ).to_pylist()[0]
 
-    이 행을 남기면 Bronze 파티션 D에서 Silver 파티션 D'로 옮겨가 구간 교체가
-    부정확해진다(구간 밖이면 중복 누적, 구간 안이면 삭제 후 미복원).
-    """
+    assert row[DECLARED_COLUMN] == "2026-08-21"
+
+
+def test_report_date_different_from_the_request_date_is_no_longer_quarantined():
+    """31일 응답에서는 이게 정상이다 - 격리하면 데이터 대부분이 본 테이블에서 사라진다."""
+    from jobs.silver_failure_report import _split_future_rows
+
     table = _with_declared(
-        {"reg_dttm": "2026-08-21 09:00:00", PARTITION_COLUMN: "2026-08-21"},   # 일치
-        {"reg_dttm": "2026-08-19 23:00:00", PARTITION_COLUMN: "2026-08-21"},   # 불일치
+        {"reg_dttm": "2026-08-21 09:00:00", PARTITION_COLUMN: "2026-07-25"},
+        {"reg_dttm": "2026-09-10 09:00:00", PARTITION_COLUMN: "2026-07-25"},
     )
+    kept, quarantined = _split_future_rows(table, date(2026, 9, 30))
 
-    clean, quarantined = _split_partition_mismatch(table)
-
-    assert [r[PARTITION_COLUMN] for r in clean.to_pylist()] == ["2026-08-21"]
-    assert len(quarantined) == 1
-    row = quarantined.to_pylist()[0]
-    assert row[PARTITION_COLUMN] == "2026-08-19"      # 유도
-    assert row[DECLARED_COLUMN] == "2026-08-21"       # 선언 - quarantine 구간 교체 키
-    assert row["quarantine_reason"] == "derived_reg_date != declared_reg_date"
-    assert row["quarantined_at"] is not None
+    assert len(kept) == 2
+    assert len(quarantined) == 0
 
 
 def test_quarantine_schema_is_fixed():
-    """감사 테이블 스키마를 고정한다 - 원본 컬럼 + 선언 신고일 + 사유/시각."""
-    _clean, quarantined = _split_partition_mismatch(
-        _with_declared({"reg_dttm": "2026-08-19 23:00:00", PARTITION_COLUMN: "2026-08-21"})
+    """감사 테이블 스키마를 고정한다 - 원본 컬럼 + 요청일 + 사유/시각."""
+    from jobs.silver_failure_report import _split_future_rows
+
+    _kept, quarantined = _split_future_rows(
+        _with_declared({"reg_dttm": "2026-09-10 09:00:00", PARTITION_COLUMN: "2026-07-25"}),
+        date(2026, 8, 26),
     )
     assert quarantined.schema == QUARANTINE_ARROW_SCHEMA
-
-
-def test_unparseable_reg_dttm_is_treated_as_mismatch_not_silently_kept():
-    """유도 신고일이 null이면 어느 파티션에 속하는지 알 수 없어 본 테이블에 못 넣는다."""
-    table = _with_declared({"reg_dttm": "깨진값", PARTITION_COLUMN: "2026-08-21"})
-
-    clean, quarantined = _split_partition_mismatch(table)
-
-    assert len(clean) == 0
-    assert len(quarantined) == 1
-
-
-# ---------------------------------------------------------------------------
-# run() 오케스트레이션 (#288)
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def run_harness(monkeypatch):
-    """run()을 S3/Iceberg 없이 돌리고 구간 처리·워터마크 호출을 기록한다."""
-    from jobs import silver_failure_report as mod
-
-    processed: list[tuple] = []
-    written: list[tuple] = []
-    state = {
-        "bronze_wm": date(2026, 8, 24),
-        "silver_wm": date(2026, 8, 20),
-        "bronze_max": date(2026, 8, 24),
-        "fail_on": None,
-    }
-
-    def fake_read_watermark(watermark_key=None, **_kwargs):
-        if watermark_key == mod.BRONZE_FAILURE_REPORT:
-            return state["bronze_wm"]
-        if watermark_key == mod.SILVER_FAILURE_REPORT:
-            return state["silver_wm"]
-        raise AssertionError(f"예상하지 못한 워터마크 키: {watermark_key}")
-
-    def fake_process_range(_catalog, _silver, start_date, end_date):
-        processed.append((start_date, end_date))
-        if state["fail_on"] == (start_date, end_date):
-            raise mod.SilverFailureReportError("의도된 실패")
-        return {"bronze_row_count": 1, "silver_row_count": 1, "quarantine_row_count": 0}
-
-    monkeypatch.setattr(mod, "build_iceberg_catalog", lambda: object())
-    monkeypatch.setattr(mod, "_ensure_silver_table", lambda _catalog: object())
-    monkeypatch.setattr(mod, "read_watermark", fake_read_watermark)
-    monkeypatch.setattr(
-        mod, "write_watermark",
-        lambda value, watermark_key=None, **_k: written.append((value, watermark_key)),
-    )
-    monkeypatch.setattr(mod, "_process_range", fake_process_range)
-    monkeypatch.setattr(mod, "bronze_max_partition", lambda _catalog: state["bronze_max"])
-    monkeypatch.delenv("MAX_DAYS_PER_RUN", raising=False)
-    return mod, state, processed, written
-
-
-def test_run_processes_confirmed_range_and_advances_watermark(run_harness):
-    mod, _state, processed, written = run_harness
-
-    mod.run()
-
-    assert processed == [(date(2026, 8, 21), date(2026, 8, 24))]
-    assert written == [(date(2026, 8, 24), mod.SILVER_FAILURE_REPORT)]
-
-
-def test_run_advances_to_processed_end_not_bronze_watermark(run_harness):
-    """상한에 걸려 뒷부분을 남겼으면 처리한 구간 끝까지만 전진해야 한다.
-
-    Bronze 워터마크를 그대로 복사하면 처리하지 않은 날짜를 완료로 선언한다 - 증분에서는
-    그 구간이 다시 처리되지 않으므로 영구 공백이 된다.
-    """
-    mod, _state, processed, written = run_harness
-    os.environ["MAX_DAYS_PER_RUN"] = "2"
-    try:
-        mod.run()
-    finally:
-        del os.environ["MAX_DAYS_PER_RUN"]
-
-    assert processed[0] == (date(2026, 8, 21), date(2026, 8, 22))
-    assert written == [(date(2026, 8, 22), mod.SILVER_FAILURE_REPORT)]
-
-
-def test_run_processes_unconfirmed_tail_without_advancing_watermark(run_harness):
-    """Bronze 워터마크보다 뒤에 있는 파티션(당일 T0)은 처리하되 워터마크는 그대로."""
-    mod, state, processed, written = run_harness
-    state["bronze_max"] = date(2026, 8, 26)   # Bronze WM(8/24)보다 뒤 = 미확정
-
-    mod.run()
-
-    assert processed == [
-        (date(2026, 8, 21), date(2026, 8, 24)),   # 확정
-        (date(2026, 8, 25), date(2026, 8, 26)),   # 미확정 tail
-    ]
-    # tail 처리가 워터마크를 올리지 않는다 - 확정 구간 끝 한 번만 기록된다.
-    assert written == [(date(2026, 8, 24), mod.SILVER_FAILURE_REPORT)]
-
-
-def test_run_skips_tail_when_bronze_has_nothing_unconfirmed(run_harness):
-    mod, state, processed, _written = run_harness
-    state["bronze_max"] = date(2026, 8, 24)   # Bronze WM과 같음
-
-    mod.run()
-
-    assert processed == [(date(2026, 8, 21), date(2026, 8, 24))]
-
-
-def test_run_processes_tail_even_when_no_new_confirmed_dates(run_harness):
-    """확정 구간이 없어도 당일 파티션은 매 실행 다시 계산해야 한다."""
-    mod, state, processed, written = run_harness
-    state["silver_wm"] = date(2026, 8, 24)    # 확정 구간 없음
-    state["bronze_max"] = date(2026, 8, 26)
-
-    mod.run()
-
-    assert processed == [(date(2026, 8, 25), date(2026, 8, 26))]
-    assert written == []
-
-
-def test_run_does_not_advance_watermark_when_confirmed_range_fails(run_harness):
-    mod, state, processed, written = run_harness
-    state["fail_on"] = (date(2026, 8, 21), date(2026, 8, 24))
-
-    with pytest.raises(SystemExit) as exc:
-        mod.run()
-
-    assert exc.value.code == 1
-    assert written == []
-    assert processed == [(date(2026, 8, 21), date(2026, 8, 24))]
-
-
-def test_run_keeps_confirmed_watermark_when_tail_fails(run_harness):
-    """tail 실패는 확정 구간의 성과를 되돌리지 않는다 - 워터마크는 이미 전진해 있다."""
-    mod, state, _processed, written = run_harness
-    state["bronze_max"] = date(2026, 8, 26)
-    state["fail_on"] = (date(2026, 8, 25), date(2026, 8, 26))
-
-    with pytest.raises(SystemExit) as exc:
-        mod.run()
-
-    assert exc.value.code == 1
-    assert written == [(date(2026, 8, 24), mod.SILVER_FAILURE_REPORT)]
-
-
-# ---------------------------------------------------------------------------
-# _process_range 쓰기 규약 (#288)
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def range_harness(monkeypatch):
-    """_process_range를 Iceberg 없이 돌리고 replace_range 호출을 기록한다."""
-    from jobs import silver_failure_report as mod
-
-    writes: list[dict] = []
-    state = {"bronze": bronze_table(), "prev_silver": 1}
-
-    monkeypatch.setattr(mod, "_read_bronze_range", lambda _c, _s, _e: state["bronze"])
-    monkeypatch.setattr(mod, "_silver_row_count", lambda _c, _s, _e: state["prev_silver"])
-    monkeypatch.setattr(mod, "_ensure_quarantine_table", lambda _c: "QUARANTINE")
-    monkeypatch.setattr(
-        mod, "replace_range",
-        lambda table, rows, column, start, end, catalog=None: writes.append(
-            {"table": table, "rows": rows, "column": column, "start": start, "end": end}
-        ),
-    )
-    monkeypatch.delenv("MAX_QUARANTINE_RATIO", raising=False)
-    return mod, state, writes
-
-
-def test_process_range_writes_quarantine_before_main_table(range_harness):
-    mod, _state, writes = range_harness
-
-    mod._process_range(object(), "SILVER", date(2026, 8, 21), date(2026, 8, 21))
-
-    assert [w["table"] for w in writes] == ["QUARANTINE", "SILVER"]
-
-
-def test_process_range_keys_quarantine_by_declared_date(range_harness):
-    """quarantine 구간 키는 유도 신고일이 아니라 선언 신고일이어야 한다.
-
-    불일치 행의 유도 신고일은 정의상 선언 구간 밖일 수 있어서, 그걸 키로 쓰면
-    replace_range의 범위 단정을 통과하지 못한다.
-    """
-    mod, _state, writes = range_harness
-
-    mod._process_range(object(), "SILVER", date(2026, 8, 21), date(2026, 8, 21))
-
-    quarantine_write, main_write = writes
-    assert quarantine_write["column"] == DECLARED_COLUMN
-    assert main_write["column"] == PARTITION_COLUMN
-
-
-def test_process_range_blanks_declared_range_when_bronze_is_empty(range_harness):
-    """0행이어도 선언 구간을 비워야 재실행 결과가 같아진다."""
-    mod, state, writes = range_harness
-    state["bronze"] = bronze_table().slice(0, 0)
-    state["prev_silver"] = 0
-
-    mod._process_range(object(), "SILVER", date(2026, 8, 21), date(2026, 8, 22))
-
-    assert len(writes) == 2
-    for w in writes:
-        assert len(w["rows"]) == 0
-        assert (w["start"], w["end"]) == ("2026-08-21", "2026-08-22")
-
-
-def test_process_range_stops_batch_when_mismatch_ratio_exceeds_threshold(range_harness):
-    """불일치가 임계치를 넘으면 quarantine이 아니라 배치 중단 - 구조적 이상 신호다."""
-    mod, state, _writes = range_harness
-    state["bronze"] = bronze_table(
-        {"reg_dttm": "2026-08-19 23:00:00", PARTITION_COLUMN: "2026-08-21"}
-    )
-    state["prev_silver"] = 0
-
-    with pytest.raises(mod.SilverFailureReportError, match="불일치 비율"):
-        mod._process_range(object(), "SILVER", date(2026, 8, 21), date(2026, 8, 21))
-
-
-def test_process_range_allows_quarantine_ratio_up_to_fifty_percent(range_harness):
-    """E2E 운영에서는 절반 이하의 날짜 불일치를 quarantine으로 보존한다."""
-    mod, state, writes = range_harness
-    state["bronze"] = bronze_table(
-        {"reg_dttm": "2026-08-21 09:12:34", PARTITION_COLUMN: "2026-08-21"},
-        {"reg_dttm": "2026-08-19 23:00:00", PARTITION_COLUMN: "2026-08-21"},
-    )
-
-    mod._process_range(object(), "SILVER", date(2026, 8, 21), date(2026, 8, 21))
-
-    assert [w["table"] for w in writes] == ["QUARANTINE", "SILVER"]
-    assert len(writes[0]["rows"]) == 1
-
-
-def test_process_range_allows_incremental_bronze_load(range_harness):
-    """일자별 증분 Bronze는 직전 Silver보다 적어도 해당 구간을 교체한다."""
-    mod, state, writes = range_harness
-    state["prev_silver"] = 100   # Bronze 1행 / 직전 Silver 100행
-
-    mod._process_range(object(), "SILVER", date(2026, 8, 21), date(2026, 8, 21))
-
-    assert [w["table"] for w in writes] == ["QUARANTINE", "SILVER"]
-
-
-def test_process_range_allows_small_bronze_range(range_harness):
-    """작은 일자별 Bronze 범위도 현재 입력으로 교체한다."""
-    mod, state, writes = range_harness
-    state["prev_silver"] = 100   # Bronze 1행 / 직전 Silver 100행
-
-    mod._process_range(object(), "SILVER", date(2026, 8, 21), date(2026, 8, 21))
-
-    assert [w["table"] for w in writes] == ["QUARANTINE", "SILVER"]
 
 
 # ---------------------------------------------------------------------------

@@ -40,8 +40,14 @@ OPTIONAL_STANDARD_COLUMNS: list[str] = []
 
 ALL_STANDARD_COLUMNS = sorted(set(COLUMN_ALIAS_MAP.values()))
 
+# API 수집 메타데이터 (#304). API는 요청일 기준 최대 31일치를 함께 돌려주므로
+# "요청일"과 "실제 신고일"을 이름으로 분리해 둬야 Silver가 헷갈리지 않는다.
+# 파일 백필(초기 적재)에는 요청 개념이 없어 두 컬럼 모두 NULL이다.
+REQUEST_METADATA_COLUMNS = ["requested_date", "observed_at"]
+
 BRONZE_COLUMNS = ALL_STANDARD_COLUMNS + [
-    "reg_date_partition",  # YYYY-MM-DD, 파티션 키
+    "reg_date_partition",  # YYYY-MM-DD, 파티션 키 = API 요청일 (실제 신고일이 아님)
+] + REQUEST_METADATA_COLUMNS + [
     "source_file",
     "ingested_at",
 ]
