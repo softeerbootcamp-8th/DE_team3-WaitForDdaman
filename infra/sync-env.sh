@@ -78,7 +78,7 @@ sync_to_host() {
   if [[ "$DO_RESTART" == true ]]; then
     echo "==> [$label] 컨테이너 재기동 ($compose_file)"
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$SSH_KEY" "$EC2_USER@$host" \
-      "cd $REMOTE_DIR && (docker compose -f $compose_file up -d || docker compose -f docker-compose.prod.yml up -d) && docker compose ps"
+      "cd $REMOTE_DIR && (docker compose -f $compose_file up -d || docker compose -f docker-compose.prod.yml up -d) && (docker compose -f $compose_file ps || docker compose ps)"
   fi
 }
 
