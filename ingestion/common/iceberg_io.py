@@ -11,8 +11,16 @@ import logging
 from typing import Optional, Union
 
 import pyarrow as pa
+import pyarrow.compute as pc
 from pyiceberg.catalog import Catalog
-from pyiceberg.expressions import BooleanExpression, EqualTo, Or
+from pyiceberg.expressions import (
+    And,
+    BooleanExpression,
+    EqualTo,
+    GreaterThanOrEqual,
+    LessThanOrEqual,
+    Or,
+)
 from pyiceberg.table import Table
 
 from common.iceberg_catalog import build_iceberg_catalog
@@ -110,6 +118,97 @@ def overwrite_partitions(
     )
     table.overwrite(arrow_table, overwrite_filter=overwrite_filter)
     logger.info("Iceberg 다중 파티션 덮어쓰기 완료: table=%s", table.name())
+
+
+def build_range_filter(column: str, start_value: str, end_value: str) -> BooleanExpression:
+    """
+    `column >= start_value AND column <= end_value` 범위식을 만듭니다.
+
+    연속된 날짜 구간에는 build_partition_filter()의 OR(EqualTo, ...) 나열보다 이 범위식이
+    맞다 - 값 목록이 아니라 "선언한 구간 전체"를 뜻하므로, 이번 입력에 데이터가 하나도
+    없는 날짜까지 필터에 포함된다(그게 범위 교체의 핵심이다).
+    """
+    if start_value > end_value:
+        raise ValueError(f"start_value가 end_value보다 큼: {start_value!r} > {end_value!r}")
+    return And(GreaterThanOrEqual(column, start_value), LessThanOrEqual(column, end_value))
+
+
+def _assert_rows_within_range(
+    arrow_table: pa.Table, column: str, start_value: str, end_value: str
+) -> None:
+    """입력 행이 전부 선언 범위 안에 있는지 확인한다 (범위 밖 행은 조용히 통과시키면 안 된다).
+
+    overwrite()는 overwrite_filter가 지우는 범위와 무관하게 입력 행을 그대로 쓴다 -
+    범위 밖 행이 섞여 있으면 "이 구간을 이번 결과로 완전히 교체했다"는 marker의 의미가
+    깨진 채로 커밋이 성공해버린다. 그래서 쓰기 전에 막는다.
+    """
+    if column not in arrow_table.column_names:
+        raise ValueError(f"입력 Arrow 테이블에 {column!r} 컬럼이 없음: {arrow_table.column_names}")
+
+    values = arrow_table.column(column)
+    if values.null_count:
+        raise ValueError(
+            f"{column!r}이 null인 행 {values.null_count}개 - 어느 범위에 속하는지 판단할 수 없음"
+        )
+
+    bounds = pc.min_max(values).as_py()
+    if bounds["min"] < start_value or bounds["max"] > end_value:
+        raise ValueError(
+            f"선언 범위 밖의 행이 포함됨: {column} 실제 범위=[{bounds['min']}, {bounds['max']}], "
+            f"선언 범위=[{start_value}, {end_value}]"
+        )
+
+
+def replace_range(
+    table_identifier_or_table: Union[str, Table],
+    rows: pa.Table,
+    column: str,
+    start_value: str,
+    end_value: str,
+    catalog: Optional[Catalog] = None,
+) -> None:
+    """
+    `column`이 [start_value, end_value] 구간인 기존 행을 전부 지우고 `rows`로 교체합니다
+    (Iceberg snapshot 1개).
+
+    overwrite_partitions()와의 차이는 "무엇을 지우는가"다. overwrite_partitions()는 이번
+    입력에 실제로 존재하는 파티션 값만 지운다 - 선언 구간에 포함됐지만 이번 결과가 0행인
+    날짜는 손대지 않으므로 그 날짜의 과거 행이 그대로 남는다. replace_range()는 입력이
+    아니라 호출자가 선언한 구간을 지운다 - 그래서 "이 구간은 이번 입력 결과로 완전히
+    교체됐다"는 완료 marker의 의미를 성립시킬 수 있다.
+
+    rows가 0행이면 overwrite() 대신 delete()를 쓴다. 빈 Arrow 테이블을 overwrite()에
+    넘기는 방식도 PyIceberg 0.11.1에서 동작하지만, delete()는 입력 스키마를 요구하지
+    않아 0행 처리 의도가 코드에 그대로 드러나고 스키마 불일치 가능성도 없다.
+
+    Args:
+        table_identifier_or_table: 'silver.rental_history' 식별자 또는 Table 객체
+        rows: 이 구간을 대체할 PyArrow Table (0행 가능)
+        column: 범위 비교 대상 컬럼명 (예: 'rent_date_partition')
+        start_value: 구간 시작값(포함)
+        end_value: 구간 끝값(포함)
+        catalog: 선택적 PyIceberg Catalog 인스턴스
+    """
+    range_filter = build_range_filter(column, start_value, end_value)
+    table = _resolve_table(table_identifier_or_table, catalog)
+
+    if len(rows) == 0:
+        logger.info(
+            "Iceberg 범위 삭제 시작(입력 0행): table=%s, filter=(%s <= %s <= %s)",
+            table.name(), start_value, column, end_value,
+        )
+        table.delete(delete_filter=range_filter)
+        logger.info("Iceberg 범위 삭제 완료: table=%s", table.name())
+        return
+
+    _assert_rows_within_range(rows, column, start_value, end_value)
+
+    logger.info(
+        "Iceberg 범위 교체 시작: table=%s, filter=(%s <= %s <= %s), row_count=%d",
+        table.name(), start_value, column, end_value, len(rows),
+    )
+    table.overwrite(rows, overwrite_filter=range_filter)
+    logger.info("Iceberg 범위 교체 완료: table=%s", table.name())
 
 
 def overwrite_all(

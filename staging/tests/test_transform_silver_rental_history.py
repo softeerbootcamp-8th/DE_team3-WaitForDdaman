@@ -443,7 +443,7 @@ def _run_with_mocks(monkeypatch, *, current_day_raises=False, promotion_meta=Non
 
     def fake_process_range(catalog, silver_table, start, end):
         order.append(("process_range", start, end))
-        return 10
+        return {"bronze_row_count": 12, "silver_row_count": 10, "quarantine_row_count": 0}
 
     def fake_prepare(catalog, silver_table, meta, confirmed_through):
         order.append(("prepare_current_day", confirmed_through))
@@ -530,19 +530,42 @@ def test_run_uses_explicit_range_when_both_env_set(monkeypatch):
 
     def fake_process_range(catalog, silver_table, start_date, end_date):
         calls.append((start_date, end_date))
-        return 0
+        return {"bronze_row_count": 0, "silver_row_count": 0, "quarantine_row_count": 0}
 
     with mock.patch.object(tsr, "build_iceberg_catalog", return_value=mock.Mock()), \
          mock.patch.object(tsr, "_ensure_silver_table", return_value=mock.Mock()), \
          mock.patch.object(tsr, "_process_range", side_effect=fake_process_range), \
          mock.patch.object(tsr, "read_watermark") as mock_read_wm, \
          mock.patch.object(tsr, "write_watermark") as mock_write_wm, \
+         mock.patch.object(tsr, "write_completion_marker") as mock_marker, \
          mock.patch.object(tsr, "ensure_bucket"):
         run()
 
     assert calls == [(date(2017, 3, 1), date(2017, 3, 5))]
     mock_read_wm.assert_not_called()
     mock_write_wm.assert_not_called()
+    # 백필 청크는 워터마크 대신 COMPLETE marker를 남긴다 - 워터마크 전진은 finalizer 담당.
+    mock_marker.assert_called_once()
+    marker = mock_marker.call_args[0][1]
+    assert marker["range_start"] == "2017-03-01"
+    assert marker["range_end"] == "2017-03-05"
+    assert marker["status"] == "COMPLETE"
+
+
+def test_run_does_not_write_marker_when_chunk_fails(monkeypatch):
+    """marker-last: 처리가 실패하면 marker가 없어야 한다 (marker 없음 = 미완료)."""
+    monkeypatch.setenv("BACKFILL_RANGE_START", "2017-03-01")
+    monkeypatch.setenv("BACKFILL_RANGE_END", "2017-03-05")
+
+    with mock.patch.object(tsr, "build_iceberg_catalog", return_value=mock.Mock()), \
+         mock.patch.object(tsr, "_ensure_silver_table", return_value=mock.Mock()), \
+         mock.patch.object(tsr, "_process_range", side_effect=SilverValidationError("boom")), \
+         mock.patch.object(tsr, "write_completion_marker") as mock_marker, \
+         mock.patch.object(tsr, "ensure_bucket"):
+        with pytest.raises(SystemExit):
+            run()
+
+    mock_marker.assert_not_called()
 
 
 def test_run_ignores_partial_range_env(monkeypatch):
@@ -676,105 +699,207 @@ def test_process_range_aborts_when_quarantine_ratio_exceeds_threshold(monkeypatc
     assert len(quarantine) / len(silver) == pytest.approx(2 / 3)  # 1% 훨씬 초과
 
 
-# ---------------------------------------------------------------- _process_range quarantine 분기 테스트
+# ---------------------------------------------------------------- _process_range 범위 단일 커밋
+#
+# 여기서만 진짜 Iceberg 카탈로그(sqlite SqlCatalog + 로컬 warehouse)를 쓴다. 이 변경의
+# 핵심 주장은 "선언 구간을 완전히 교체한다"인데, MagicMock으로는 어떤 필터를 넘겼는지까지만
+# 보이고 구간 밖 데이터가 남는지/구간 안 과거 행이 지워지는지는 스냅샷을 다시 읽어야 알 수 있다.
 
 
-def test_process_range_raises_when_quarantine_ratio_exceeds_threshold(monkeypatch):
-    """
-    _process_range가 quarantine 비율이 임계치를 초과하면 SilverValidationError를 던지고,
-    append()나 _ensure_quarantine_table()을 호출하지 않는다.
-    """
-    monkeypatch.setenv("MAX_QUARANTINE_RATIO", "0.01")
+@pytest.fixture
+def iceberg_env(tmp_path):
+    """silver.rental_history / silver.rental_history_quarantine을 실제 스키마로 만든 카탈로그."""
+    from pyiceberg.catalog.sql import SqlCatalog
 
-    # 위반행 2개 + 정상행 1개 -> 비율 2/3 = 66.67% (1% 훨씬 초과)
-    rows = [
-        {"bike_id": f"SPB-{i}", "rent_dt": "2026-08-21 12:00:00", "return_dt": "2026-08-21 11:00:00"}
-        for i in range(2)
-    ] + [
-        {"bike_id": "SPB-clean", "rent_dt": "2026-08-21 10:00:00", "return_dt": "2026-08-21 11:00:00"}
+    warehouse = tmp_path / "warehouse"
+    warehouse.mkdir()
+    catalog = SqlCatalog(
+        "silver_range_test",
+        uri=f"sqlite:///{tmp_path}/catalog.db",
+        warehouse=f"file://{warehouse}",
+    )
+    silver_table = tsr._ensure_silver_table(catalog)
+    quarantine_table = tsr._ensure_quarantine_table(catalog)
+    return catalog, silver_table, quarantine_table
+
+
+def empty_bronze() -> pa.Table:
+    return bronze_table().slice(0, 0)
+
+
+def process_range(monkeypatch, iceberg_env, bronze_rows, start: str, end: str) -> dict:
+    catalog, silver_table, _ = iceberg_env
+    monkeypatch.setattr(tsr, "_read_bronze", lambda c, s, e: bronze_rows)
+    return tsr._process_range(
+        catalog, silver_table, date.fromisoformat(start), date.fromisoformat(end)
+    )
+
+
+def silver_partitions(iceberg_env) -> list[str]:
+    _, silver_table, _ = iceberg_env
+    return sorted(r[PARTITION_COLUMN] for r in silver_table.scan().to_arrow().to_pylist())
+
+
+def quarantine_rows(iceberg_env) -> list[dict]:
+    # _process_range는 _ensure_quarantine_table()로 테이블을 새로 로드해 쓰므로,
+    # fixture가 들고 있는 객체는 그 커밋을 모른다 - 읽기 전에 refresh가 필요하다.
+    _, _, quarantine_table = iceberg_env
+    return quarantine_table.refresh().scan().to_arrow().to_pylist()
+
+
+def day_rows(day: str, count: int = 1, **extra) -> list[dict]:
+    """같은 날짜의 서로 다른 (bike_id, rent_dt) 행 count개 - 중복 제거에 걸리지 않게 만든다."""
+    return [
+        {
+            "bike_id": f"SPB-{day}-{i}",
+            "rent_dt": f"{day} {10 + i // 3600:02d}:{(i // 60) % 60:02d}:{i % 60:02d}",
+            "return_dt": f"{day} 23:00:00",
+            "rent_date_partition": day,
+            **extra,
+        }
+        for i in range(count)
     ]
 
-    mock_catalog = mock.MagicMock()
-    mock_silver_table = mock.MagicMock()
 
-    # _read_bronze 모킹: 위반행을 포함한 bronze 데이터 반환
-    bronze_data = bronze_table(*rows)
-    monkeypatch.setattr(tsr, "_read_bronze", lambda catalog, start, end: bronze_data)
-
-    # _ensure_quarantine_table과 append는 호출되면 안 됨
-    mock_ensure_quarantine = mock.MagicMock(name="_ensure_quarantine_table")
-    mock_append = mock.MagicMock(name="append")
-    monkeypatch.setattr(tsr, "_ensure_quarantine_table", mock_ensure_quarantine)
-    monkeypatch.setattr(tsr, "append", mock_append)
-
-    # validate는 호출되지 않아야 함 (append 전에 exception이 나기 때문)
-    mock_validate = mock.MagicMock(name="validate")
-    monkeypatch.setattr(tsr, "validate", mock_validate)
-
-    start_date = date(2026, 8, 21)
-    end_date = date(2026, 8, 21)
-
-    # SilverValidationError가 던져져야 함
-    with pytest.raises(SilverValidationError, match="행 단위 이상치 비율.*임계치"):
-        tsr._process_range(mock_catalog, mock_silver_table, start_date, end_date)
-
-    # append와 _ensure_quarantine_table이 호출되지 않았는지 확인
-    mock_append.assert_not_called()
-    mock_ensure_quarantine.assert_not_called()
-
-
-def test_process_range_appends_when_quarantine_ratio_within_threshold(monkeypatch):
-    """
-    _process_range가 quarantine 비율이 임계치 이내면 SilverValidationError를 던지지 않고,
-    _ensure_quarantine_table()과 append()를 호출한다.
-    """
-    monkeypatch.setenv("MAX_QUARANTINE_RATIO", "0.10")  # 10%
-
-    # 위반행 1개 + 정상행 99개 -> 비율 1/100 = 1% (10% 이내)
-    violation_row = {
-        "bike_id": "SPB-violation",
-        "rent_dt": "2026-08-21 12:00:00",
-        "return_dt": "2026-08-21 11:00:00"
+def violation_row(day: str) -> dict:
+    """return_dt < rent_dt인 이상치 1행 (정상 행과 bike_id/rent_dt가 겹치지 않게)."""
+    return {
+        "bike_id": f"SPB-violation-{day}",
+        "rent_dt": f"{day} 12:00:00",
+        "return_dt": f"{day} 09:00:00",
+        "rent_date_partition": day,
     }
-    clean_rows = [
-        {"bike_id": f"SPB-{i}", "rent_dt": "2026-08-21 10:00:00", "return_dt": "2026-08-21 11:00:00"}
-        for i in range(99)
-    ]
-    rows = [violation_row] + clean_rows
 
-    mock_catalog = mock.MagicMock()
-    mock_silver_table = mock.MagicMock()
 
-    # _read_bronze 모킹: 위반행을 포함한 bronze 데이터 반환
-    bronze_data = bronze_table(*rows)
-    monkeypatch.setattr(tsr, "_read_bronze", lambda catalog, start, end: bronze_data)
+def test_range_is_reflected_in_a_single_commit(monkeypatch, iceberg_env):
+    """31일치 결과가 날짜 수만큼이 아니라 snapshot 하나로 반영돼야 한다 (이번 변경의 목적)."""
+    _, silver_table, _ = iceberg_env
+    days = [f"2018-05-{d:02d}" for d in range(25, 32)] + [f"2018-06-{d:02d}" for d in range(1, 25)]
+    rows = [row for day in days for row in day_rows(day)]
 
-    # _ensure_quarantine_table과 append 모킹
-    mock_quarantine_table = mock.MagicMock()
-    mock_ensure_quarantine = mock.MagicMock(name="_ensure_quarantine_table", return_value=mock_quarantine_table)
-    mock_append = mock.MagicMock(name="append")
-    monkeypatch.setattr(tsr, "_ensure_quarantine_table", mock_ensure_quarantine)
-    monkeypatch.setattr(tsr, "append", mock_append)
+    before = len(silver_table.metadata.snapshots)
+    process_range(monkeypatch, iceberg_env, bronze_table(*rows), "2018-05-25", "2018-06-24")
+    silver_table.refresh()
 
-    # validate와 overwrite_partition은 정상 동작하도록 모킹
-    monkeypatch.setattr(tsr, "validate", mock.MagicMock())
-    monkeypatch.setattr(tsr, "overwrite_partition", mock.MagicMock())
+    assert len(silver_table.metadata.snapshots) - before == 1
+    assert len(set(silver_partitions(iceberg_env))) == 31
 
-    start_date = date(2026, 8, 21)
-    end_date = date(2026, 8, 21)
 
-    # SilverValidationError가 던져지지 않아야 함
-    row_count = tsr._process_range(mock_catalog, mock_silver_table, start_date, end_date)
+def test_empty_day_inside_range_removes_previous_rows(monkeypatch, iceberg_env):
+    """이번 결과가 0행인 날짜의 과거 Silver 행이 남으면 marker가 '완전 교체'를 뜻할 수 없다."""
+    first = day_rows("2018-05-25") + day_rows("2018-05-26") + day_rows("2018-05-27")
+    process_range(monkeypatch, iceberg_env, bronze_table(*first), "2018-05-25", "2018-05-27")
+    assert silver_partitions(iceberg_env) == ["2018-05-25", "2018-05-26", "2018-05-27"]
 
-    # _ensure_quarantine_table이 호출되었는지 확인
-    mock_ensure_quarantine.assert_called_once_with(mock_catalog)
+    second = day_rows("2018-05-25") + day_rows("2018-05-27")
+    process_range(monkeypatch, iceberg_env, bronze_table(*second), "2018-05-25", "2018-05-27")
 
-    # append가 호출되었는지 확인 - (quarantine_table, quarantine_arrow, catalog=...)
-    mock_append.assert_called_once()
-    call_args = mock_append.call_args
-    assert call_args[0][0] is mock_quarantine_table  # 첫 번째 인자는 quarantine table
-    assert isinstance(call_args[0][1], pa.Table)  # 두 번째 인자는 PyArrow Table
-    assert call_args[1] == {"catalog": mock_catalog}  # keyword arg로 catalog 전달
+    assert silver_partitions(iceberg_env) == ["2018-05-25", "2018-05-27"]
 
-    # 반환된 행 수는 정상행만
-    assert row_count == 99
+
+def test_partitions_outside_the_range_are_untouched(monkeypatch, iceberg_env):
+    process_range(
+        monkeypatch, iceberg_env,
+        bronze_table(*(day_rows("2018-05-24") + day_rows("2018-05-28"))),
+        "2018-05-24", "2018-05-28",
+    )
+    process_range(
+        monkeypatch, iceberg_env, bronze_table(*day_rows("2018-05-26")),
+        "2018-05-25", "2018-05-27",
+    )
+
+    assert silver_partitions(iceberg_env) == ["2018-05-24", "2018-05-26", "2018-05-28"]
+
+
+def test_entirely_empty_chunk_clears_both_tables_in_range(monkeypatch, iceberg_env):
+    """Bronze가 통째로 0행이어도 조기 반환하지 않고 선언 구간을 비운다."""
+    monkeypatch.setenv("MAX_QUARANTINE_RATIO", "0.10")
+    seed = day_rows("2018-05-25", count=99) + [violation_row("2018-05-26")]
+    process_range(monkeypatch, iceberg_env, bronze_table(*seed), "2018-05-25", "2018-05-26")
+    assert silver_partitions(iceberg_env) == ["2018-05-25"] * 99
+    assert len(quarantine_rows(iceberg_env)) == 1
+
+    summary = process_range(monkeypatch, iceberg_env, empty_bronze(), "2018-05-25", "2018-05-26")
+
+    assert summary == {"bronze_row_count": 0, "silver_row_count": 0, "quarantine_row_count": 0}
+    assert silver_partitions(iceberg_env) == []
+    assert quarantine_rows(iceberg_env) == []
+
+
+def test_rerunning_the_same_chunk_does_not_duplicate_quarantine(monkeypatch, iceberg_env):
+    """append()로 쌓던 시절엔 재실행마다 같은 이상치가 다시 붙어 감사 건수가 부풀었다."""
+    monkeypatch.setenv("MAX_QUARANTINE_RATIO", "0.10")
+    rows = day_rows("2018-05-25", count=50) + [violation_row("2018-05-25")]
+
+    process_range(monkeypatch, iceberg_env, bronze_table(*rows), "2018-05-25", "2018-05-25")
+    first = quarantine_rows(iceberg_env)
+    process_range(monkeypatch, iceberg_env, bronze_table(*rows), "2018-05-25", "2018-05-25")
+    second = quarantine_rows(iceberg_env)
+
+    assert len(first) == 1
+    assert len(second) == 1
+    assert [r["bike_id"] for r in second] == ["SPB-violation-2018-05-25"]
+    assert [r["quarantine_reason"] for r in second] == ["return_dt < rent_dt"]
+
+
+def test_quarantine_ratio_gate_blocks_before_any_write(monkeypatch, iceberg_env):
+    """1% 게이트는 그대로 - 그리고 게이트에 걸리면 어떤 테이블도 변경되면 안 된다."""
+    monkeypatch.setenv("MAX_QUARANTINE_RATIO", "0.01")
+    _, silver_table, _ = iceberg_env
+    rows = day_rows("2018-05-25", count=1) + [violation_row("2018-05-25")]
+    before = len(silver_table.metadata.snapshots)
+
+    with pytest.raises(SilverValidationError, match="행 단위 이상치 비율.*임계치"):
+        process_range(monkeypatch, iceberg_env, bronze_table(*rows), "2018-05-25", "2018-05-25")
+
+    silver_table.refresh()
+    assert len(silver_table.metadata.snapshots) == before
+    assert quarantine_rows(iceberg_env) == []
+
+
+def test_quarantine_within_threshold_is_written_and_clean_rows_promoted(monkeypatch, iceberg_env):
+    monkeypatch.setenv("MAX_QUARANTINE_RATIO", "0.10")
+    rows = day_rows("2018-05-25", count=99) + [violation_row("2018-05-25")]
+
+    summary = process_range(monkeypatch, iceberg_env, bronze_table(*rows), "2018-05-25", "2018-05-25")
+
+    assert summary["bronze_row_count"] == 100
+    assert summary["silver_row_count"] == 99
+    assert summary["quarantine_row_count"] == 1
+    assert len(quarantine_rows(iceberg_env)) == 1
+    _, silver_table, _ = iceberg_env
+    promoted = {r["bike_id"] for r in silver_table.scan().to_arrow().to_pylist()}
+    assert "SPB-violation-2018-05-25" not in promoted
+
+
+def test_quarantine_is_replaced_even_when_this_run_has_no_violations(monkeypatch, iceberg_env):
+    """이상치 0건이어도 구간을 교체해야 이전 실행이 남긴 이상치가 사라진다."""
+    monkeypatch.setenv("MAX_QUARANTINE_RATIO", "0.10")
+    dirty = day_rows("2018-05-25", count=20) + [violation_row("2018-05-25")]
+    process_range(monkeypatch, iceberg_env, bronze_table(*dirty), "2018-05-25", "2018-05-25")
+    assert len(quarantine_rows(iceberg_env)) == 1
+
+    clean = day_rows("2018-05-25", count=20)
+    summary = process_range(monkeypatch, iceberg_env, bronze_table(*clean), "2018-05-25", "2018-05-25")
+
+    assert summary["quarantine_row_count"] == 0
+    assert quarantine_rows(iceberg_env) == []
+
+
+def test_dq_failure_leaves_both_tables_unchanged(monkeypatch, iceberg_env):
+    """품질 검증이 끝나기 전에는 어떤 테이블도 건드리지 않는다 (quarantine 포함)."""
+    monkeypatch.setenv("MAX_QUARANTINE_RATIO", "0.10")
+    _, silver_table, _ = iceberg_env
+    monkeypatch.setattr(
+        tsr, "validate",
+        mock.MagicMock(side_effect=SilverValidationError("DQ 실패")),
+    )
+    rows = day_rows("2018-05-25", count=20) + [violation_row("2018-05-25")]
+    before = len(silver_table.metadata.snapshots)
+
+    with pytest.raises(SilverValidationError, match="DQ 실패"):
+        process_range(monkeypatch, iceberg_env, bronze_table(*rows), "2018-05-25", "2018-05-25")
+
+    silver_table.refresh()
+    assert len(silver_table.metadata.snapshots) == before
+    assert quarantine_rows(iceberg_env) == []
