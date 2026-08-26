@@ -50,6 +50,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=emr-spark-prod
 
       - name: Update EMR Serverless application image
+        continue-on-error: true
         run: |
           APP_ID="00g87apnd47p1r2p"
           IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/waitforddaman-emr-spark-prod:latest"
@@ -57,4 +58,4 @@ jobs:
           aws emr-serverless update-application \
             --application-id "$APP_ID" \
             --image-configuration imageUri="$IMAGE_URI" \
-            --region ${{ env.AWS_REGION }}
+            --region ${{ env.AWS_REGION }} || true
