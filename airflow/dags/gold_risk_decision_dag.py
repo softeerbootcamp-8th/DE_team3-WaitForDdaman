@@ -130,12 +130,18 @@ def gold_risk_decision():
         timeout=SENSOR_TIMEOUT,
     )
 
+    t0_enabled_expr = "{{ var.value.get('FAILURE_REPORT_T0_ENABLED', 'false') }}"
+
     # 2. build_bike_features_daily - Silver(rental_history/failure_report)만 있으면 됨.
     # rental_history는 트리거 소스인 gold_dim_fact가 이미 대기했으므로, 여기선
     # failure_report 대기 뒤에만 실행하면 된다.
     build_bike_features_daily = BashOperator(
         task_id="build_bike_features_daily",
         bash_command=_bash("build_bike_features_daily", f"SNAPSHOT_DATE='{snapshot_date_expr}' "),
+        env={
+            "FAILURE_REPORT_T0_ENABLED": t0_enabled_expr,
+        },
+        append_env=True,
         execution_timeout=timedelta(minutes=30),
     )
 

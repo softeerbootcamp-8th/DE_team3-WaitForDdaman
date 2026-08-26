@@ -126,6 +126,7 @@ FALLBACK_ENABLED_TEMPLATE = (
     "{{ var.value.get('RENTAL_HISTORY_FALLBACK_ENABLED', 'false') }}"
 )
 T0_ENABLED_TEMPLATE = "{{ var.value.get('RENTAL_HISTORY_T0_ENABLED', 'false') }}"
+FAILURE_REPORT_T0_ENABLED_TEMPLATE = "{{ var.value.get('FAILURE_REPORT_T0_ENABLED', 'false') }}"
 PRELIMINARY_MAX_AGE_MINUTES_TEMPLATE = (
     "{{ var.value.get('RENTAL_HISTORY_PRELIMINARY_MAX_AGE_MINUTES', '120') }}"
 )
@@ -275,6 +276,10 @@ def bronze_daily_batch_all_sources():
             "daily_batch_failure_report",
             "MAX_DAYS_PER_RUN='{{ params.max_days_per_run }}' ",
         ),
+        env={
+            "FAILURE_REPORT_T0_ENABLED": FAILURE_REPORT_T0_ENABLED_TEMPLATE,
+        },
+        append_env=True,
         execution_timeout=timedelta(hours=1),
         outlets=[FAILURE_REPORT_BRONZE],
         pool=BRONZE_POOL,
@@ -290,6 +295,10 @@ def bronze_daily_batch_all_sources():
             "daily_batch_bikeman_event",
             "MAX_DAYS_PER_RUN='{{ params.max_days_per_run }}' ",
         ),
+        env={
+            "COLLECTION_CUTOFF_AT": COLLECTION_CUTOFF_AT_TEMPLATE,
+        },
+        append_env=True,
         execution_timeout=timedelta(minutes=30),
         outlets=[BIKEMAN_EVENT_BRONZE],
         pool=BRONZE_POOL,

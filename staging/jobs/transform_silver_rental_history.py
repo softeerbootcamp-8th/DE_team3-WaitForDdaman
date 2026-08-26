@@ -53,8 +53,12 @@ from pyiceberg.types import DoubleType, NestedField, StringType, TimestamptzType
 import config
 from common.duckdb_io import query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
-from common.iceberg_io import append, overwrite_partition
+from common.iceberg_io import replace_range
 from common.s3_utils import ensure_bucket, get_json, put_json  # 워커/로컬 실행 시 대상 버킷이 없으면 만들어주는 안전장치
+from common.silver_rental_history_completion import (
+    build_completion_marker,
+    write_completion_marker,
+)
 from common.sql_assert import QualityCheck, QualityCheckError
 from common.watermark import read_watermark, write_watermark  # Bronze용 모듈을 키만 바꿔 Silver 전용으로 재사용
 from config.watermark_keys import SILVER_RENTAL_HISTORY  # build_dim_bike/set_watermark와 같은 값을 공유
@@ -105,6 +109,20 @@ SILVER_PARTITION_SPEC = PartitionSpec(
     PartitionField(source_id=7, field_id=1000, transform=IdentityTransform(), name=PARTITION_COLUMN)
 )
 SILVER_PROPERTIES = {"write.distribution-mode": "hash"}
+
+# Bronze가 0행이라 transform()을 아예 돌리지 않는 경우에 쓰는 빈 결과의 스키마.
+# SILVER_SCHEMA와 컬럼/타입이 1:1로 대응해야 한다.
+SILVER_ARROW_SCHEMA = pa.schema([
+    pa.field("bike_id", pa.string()),
+    pa.field("rent_dt", pa.timestamp("us", tz="UTC")),
+    pa.field("return_dt", pa.timestamp("us", tz="UTC")),
+    pa.field("use_distance_m", pa.float64()),
+    pa.field("rent_station_id", pa.string()),
+    pa.field("return_station_id", pa.string()),
+    pa.field("rent_date_partition", pa.string()),
+    pa.field("source_file", pa.string()),
+    pa.field("ingested_at", pa.timestamp("us", tz="UTC")),
+])
 
 QUARANTINE_TABLE = "silver.rental_history_quarantine"
 
@@ -389,7 +407,30 @@ def _read_bronze(catalog, start_str: str, end_str: str) -> pa.Table:
     ).to_arrow()
 
 
-def _process_range(catalog, silver_table, start_date: date, end_date: date) -> int:
+def _process_range(catalog, silver_table, start_date: date, end_date: date) -> dict:
+    """
+    선언 구간 [start_date, end_date]를 이번 입력 결과로 완전히 교체하고 처리 요약을 돌려준다.
+
+    ### 읽기·변환·검증과 쓰기를 분리한다
+    품질 검증(비율 게이트 + DQ)이 끝나기 전에는 어떤 테이블도 건드리지 않는다. 예전에는
+    quarantine append가 validate()보다 먼저였는데, 그러면 DQ 실패로 중단된 실행이
+    quarantine 행만 남겨놓고 죽는다.
+
+    ### 왜 날짜별 overwrite가 아니라 범위 1회 교체인가 (#256 후속)
+    예전에는 `SELECT DISTINCT rent_date_partition`으로 실제 데이터가 있는 날짜만 뽑아
+    날짜마다 overwrite_partition()을 불렀다. 최대 31일 청크면 Iceberg transaction과
+    JDBC Catalog commit이 31번 반복돼, 운영 실측에서 고밀도 청크 태스크 시간의 97~99%가
+    그 반복 구간이었다. 이제 범위 필터 하나로 한 번만 커밋한다.
+
+    분해가 안전하다는 근거(모듈 docstring의 "중복 제거 윈도우는 하루 안에서 닫힌다")는
+    여전히 유효하지만, 이제는 그걸 근거로 쪼갤 이유가 없다 - 한 번에 쓰는 쪽이 더 싸고,
+    청크 중간 실패 시 일부 날짜만 새 결과인 중간 상태도 사라진다.
+
+    ### 왜 "데이터가 있는 날짜"가 아니라 "선언 구간"을 지우는가
+    이번 결과가 0행인 날짜를 교체 대상에서 빼면 그 날짜의 과거 Silver 행이 그대로 남는다.
+    그러면 완료 marker가 "이 구간이 현재 입력 결과로 완전히 교체됐다"는 뜻을 가질 수 없다.
+    Bronze가 통째로 0행인 경우도 조기 반환하지 않고 0행 결과로 구간을 비운다.
+    """
     start_str = start_date.strftime("%Y-%m-%d")
     end_str = end_date.strftime("%Y-%m-%d")
     range_label = start_str if start_date == end_date else f"{start_str}~{end_str}"
@@ -398,22 +439,29 @@ def _process_range(catalog, silver_table, start_date: date, end_date: date) -> i
     row_count = len(bronze_table)
 
     if row_count == 0:
-        logger.info("%s: Bronze에 처리할 데이터 없음", range_label)
-        return 0
+        # 조기 반환하지 않는다 - 스키마가 맞는 0행 결과로 두 테이블의 선언 구간을 비운다.
+        # transform()/validate()는 건너뛴다: 입력이 없으면 파싱 실패도 중복도 있을 수
+        # 없고, 0행 테이블에 유일성 비율 같은 DQ를 매기는 건 의미가 없다.
+        logger.info("%s: Bronze에 처리할 데이터 없음 - 선언 구간을 0행으로 교체", range_label)
+        silver_arrow = SILVER_ARROW_SCHEMA.empty_table()
+        quarantine_arrow = QUARANTINE_ARROW_SCHEMA.empty_table()
+        dedup_count = 0
+    else:
+        silver_arrow = transform(bronze_table)
+        dedup_count = len(silver_arrow)
+        if dedup_count < row_count:
+            logger.info(
+                "%s: bike_id/rent_dt 결측 또는 중복으로 %d행 제외 (Bronze %d행 -> Silver %d행)",
+                range_label, row_count - dedup_count, row_count, dedup_count,
+            )
 
-    silver_arrow = transform(bronze_table)
-    dedup_count = len(silver_arrow)
-    if dedup_count < row_count:
-        logger.info(
-            "%s: bike_id/rent_dt 결측 또는 중복으로 %d행 제외 (Bronze %d행 -> Silver %d행)",
-            range_label, row_count - dedup_count, row_count, dedup_count,
-        )
+        con = _connect()
+        con.register("silver_rental_history_pre_quarantine", silver_arrow)
+        silver_arrow, quarantine_arrow = _split_quarantine_violations(silver_arrow, con)
 
-    con = _connect()
-    con.register("silver_rental_history_pre_quarantine", silver_arrow)
-    silver_arrow, quarantine_arrow = _split_quarantine_violations(silver_arrow, con)
     quarantine_count = len(quarantine_arrow)
     if quarantine_count:
+        # 비율 판정과 경고 로그에만 쓰는 분기다. quarantine 쓰기 자체는 아래에서 항상 한다.
         ratio = quarantine_count / dedup_count
         max_ratio = float(os.getenv("MAX_QUARANTINE_RATIO") or DEFAULT_MAX_QUARANTINE_RATIO)
         if ratio > max_ratio:
@@ -425,33 +473,35 @@ def _process_range(catalog, silver_table, start_date: date, end_date: date) -> i
             "%s: 행 단위 이상치 %d행(%.4f%%) quarantine 처리 - silver.rental_history_quarantine 확인 필요",
             range_label, quarantine_count, ratio * 100,
         )
-        append(_ensure_quarantine_table(catalog), quarantine_arrow, catalog=catalog)
 
     silver_count = len(silver_arrow)
-    validate(silver_arrow, range_label)  # 실패 시 SilverValidationError -> 배치 중단
+    if row_count:
+        validate(silver_arrow, range_label)  # 실패 시 SilverValidationError -> 배치 중단
 
-    # Spark의 dynamic partition overwrite를 파티션 값별 overwrite로 옮긴 것.
-    # 위 docstring의 "중복 제거 윈도우는 하루 안에서 닫힌다"가 이 분해의 근거다 -
-    # 한 중복 그룹이 두 파티션에 걸치는 일이 없으므로 파티션별로 따로 써도
-    # 한 번에 쓴 것과 결과가 같다. Bronze에 없는 날짜는 손대지 않는 것도 동일.
-    con.register("silver_rental_history", silver_arrow)
-    partition_values = [
-        row[0]
-        for row in con.execute(
-            f"SELECT DISTINCT {PARTITION_COLUMN} FROM silver_rental_history "
-            f"ORDER BY {PARTITION_COLUMN}"
-        ).fetchall()
-    ]
-    for value in partition_values:
-        chunk = query_arrow(
-            con,
-            f"SELECT * FROM silver_rental_history WHERE {PARTITION_COLUMN} = ?",
-            [value],
-        ).select(SILVER_COLUMNS)
-        overwrite_partition(silver_table, chunk, PARTITION_COLUMN, value)
+    # 쓰기 순서: quarantine -> 본 테이블 -> (호출자가) marker.
+    # 두 테이블은 서로 다른 Iceberg 테이블이라 한 트랜잭션으로 묶을 수 없다. quarantine이
+    # 먼저 성공하고 본 테이블이 실패하면 짧은 불일치가 생기지만, quarantine은 Gold의
+    # 비즈니스 입력이 아닌 감사 테이블이고 marker가 없는 청크는 미완료로 취급되므로 이
+    # 창을 허용한다 - 재실행이 같은 구간을 다시 교체해 최종적으로 수렴한다.
+    #
+    # 이상치가 0건이어도 항상 교체한다. append()로 쌓던 예전 방식은 같은 청크를 재실행할
+    # 때마다 동일한 이상치가 다시 추가돼 감사 건수가 부풀었다. 구간 교체로 바꾸면 재실행
+    # 결과가 행 수와 내용까지 같아진다.
+    replace_range(
+        _ensure_quarantine_table(catalog), quarantine_arrow, PARTITION_COLUMN,
+        start_str, end_str, catalog=catalog,
+    )
+    replace_range(silver_table, silver_arrow, PARTITION_COLUMN, start_str, end_str, catalog=catalog)
 
-    logger.info("%s: %d행 Silver 승격 완료 (파티션 %d개)", range_label, silver_count, len(partition_values))
-    return silver_count
+    logger.info(
+        "%s: %d행 Silver 승격 완료 (구간 단일 커밋, quarantine %d행)",
+        range_label, silver_count, quarantine_count,
+    )
+    return {
+        "bronze_row_count": row_count,
+        "silver_row_count": silver_count,
+        "quarantine_row_count": quarantine_count,
+    }
 
 
 def _parse_bool_env(name: str, default: bool = False) -> bool:
@@ -595,7 +645,8 @@ def _prepare_current_day_promotion(
         )
 
     run_date_value = date.fromisoformat(run_date_str)
-    silver_row_count = _process_range(catalog, silver_table, run_date_value, run_date_value)
+    summary = _process_range(catalog, silver_table, run_date_value, run_date_value)
+    silver_row_count = summary["silver_row_count"]
 
     document = _build_silver_promotion_document(
         run_date_str=run_date_str,
@@ -624,6 +675,34 @@ def _persist_current_day_promotion_marker(prepared: dict) -> None:
     )
 
 
+def _write_backfill_completion_marker(range_start: str, range_end: str, summary: dict) -> None:
+    """청크 COMPLETE marker를 남긴다 - 두 Iceberg 테이블 쓰기가 모두 성공한 뒤 마지막에만.
+
+    실패 marker는 만들지 않는다. "marker가 없다 = 미완료"라는 단일 규칙이 planner와
+    finalizer 양쪽에서 그대로 성립해야, 어떤 실패 지점에서 죽든 재실행이 수렴한다.
+
+    dag_run_id는 감사용이다 - BashOperator가 넣어주는 AIRFLOW_CTX_DAG_RUN_ID를 쓰고,
+    marker 매칭에는 관여하지 않는다(다른 Run이 만든 marker도 재사용해야 하므로).
+    """
+    marker = build_completion_marker(
+        range_start=range_start,
+        range_end=range_end,
+        bronze_watermark_at_start=(os.getenv("BRONZE_WATERMARK_AT_START") or "").strip() or None,
+        bronze_row_count=summary["bronze_row_count"],
+        silver_row_count=summary["silver_row_count"],
+        quarantine_row_count=summary["quarantine_row_count"],
+        dag_run_id=(
+            os.getenv("DAG_RUN_ID") or os.getenv("AIRFLOW_CTX_DAG_RUN_ID") or "unknown"
+        ),
+        processed_at=datetime.now(timezone.utc).isoformat(),
+    )
+    key = write_completion_marker(config.SETTINGS.raw_bucket, marker)
+    logger.info(
+        "청크 COMPLETE marker 기록: %s (Bronze %d행 -> Silver %d행, quarantine %d행)",
+        key, marker["bronze_row_count"], marker["silver_row_count"], marker["quarantine_row_count"],
+    )
+
+
 def run() -> None:
     # 백필/daily_batch를 안 거치고 이 잡만 단독 실행하는 경우에도 안전하도록 버킷을 보장
     # (raw_bucket에는 워터마크 JSON이 있음)
@@ -637,17 +716,18 @@ def run() -> None:
     # 워터마크를 읽지도 쓰지도 않는다 - 병렬로 도는 청크들이 서로 다른 시점의
     # 워터마크를 읽어 겹치거나, 워터마크를 여러 번 잘못된 순서로 쓰는 걸 막기 위함.
     # 워터마크 전진은 airflow/dags/bronze_initial_load_all_sources_dag.py의 마무리
-    # 태스크가 모든 청크 성공 후 한 번만 담당한다.
+    # 태스크(advance_silver_rental_history_watermark)가 연속 완료 구간까지만 담당한다.
     range_start = os.getenv("BACKFILL_RANGE_START")
     range_end = os.getenv("BACKFILL_RANGE_END")
     if range_start and range_end:
         start_date = datetime.strptime(range_start, "%Y-%m-%d").date()
         end_date = datetime.strptime(range_end, "%Y-%m-%d").date()
         try:
-            _process_range(catalog, silver_table, start_date, end_date)
+            summary = _process_range(catalog, silver_table, start_date, end_date)
         except SilverValidationError as e:
             logger.error("%s~%s 처리 실패, 배치 중단: %s", start_date, end_date, e)
             sys.exit(1)
+        _write_backfill_completion_marker(range_start, range_end, summary)
         return
 
     # 상한선: Bronze가 확정 커밋한 날짜 (rental_history 기본 워터마크 키)

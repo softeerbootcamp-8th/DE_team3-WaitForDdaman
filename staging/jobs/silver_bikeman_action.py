@@ -21,6 +21,7 @@ from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import NestedField, StringType, TimestamptzType
 
 import config
+from common.cutoff_utils import parse_collection_cutoff
 from common.duckdb_io import query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import append, overwrite_partition
@@ -385,9 +386,12 @@ def run() -> None:
     catalog = build_iceberg_catalog()
     _ensure_auxiliary_tables(catalog)
 
+    cutoff = parse_collection_cutoff(os.getenv("COLLECTION_CUTOFF_AT"))
+    as_of_date = cutoff.date()
+
     last_processed = read_watermark(watermark_key=WATERMARK_KEY)
     start_date = last_processed + timedelta(days=1)
-    end_date = date.today() - timedelta(days=1)
+    end_date = as_of_date - timedelta(days=1)
     max_days = os.getenv("MAX_DAYS_PER_RUN")
     if max_days:
         end_date = min(end_date, start_date + timedelta(days=int(max_days) - 1))

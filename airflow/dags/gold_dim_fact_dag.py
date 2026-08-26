@@ -185,6 +185,8 @@ default_args = {
     "on_failure_callback": notify_slack_on_failure,
 }
 
+T0_ENABLED_TEMPLATE = "{{ var.value.get('RENTAL_HISTORY_T0_ENABLED', 'false') }}"
+
 
 def _collection_priority_bash(job_module: str, extra_env: str = "") -> str:
     # collection_priority 잡은 자체 common 패키지가 없다 -
@@ -253,6 +255,10 @@ def gold_dim_fact():
     build_bike_location = BashOperator(
         task_id="build_bike_location",
         bash_command=_collection_priority_bash("build_bike_location", "SNAPSHOT_DATE='{{ ds }}' "),
+        env={
+            "RENTAL_HISTORY_T0_ENABLED": T0_ENABLED_TEMPLATE,
+        },
+        append_env=True,
         execution_timeout=timedelta(minutes=20),
     )
     build_station_active = BashOperator(

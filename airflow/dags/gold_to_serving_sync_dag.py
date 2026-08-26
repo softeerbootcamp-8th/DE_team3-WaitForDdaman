@@ -61,6 +61,7 @@ def _load_ingestion_env(env_path: str) -> None:
             os.environ[key.strip()] = value.strip()
 
 
+
 def _build_mart_bike_risk_daily(snapshot_date: str) -> None:
     _load_ingestion_env(f"{INGESTION_DIR}/.env")
     if PYLIB_DIR not in sys.path:
