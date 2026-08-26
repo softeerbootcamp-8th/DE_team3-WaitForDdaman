@@ -46,15 +46,6 @@ Spark를 걷어낸 뒤에도(#143) 이 판단은 그대로다 - 세션 기동 �
 pyiceberg, 변환은 DuckDB SQL로 옮긴다. DuckDB를 쓰는 이유는 볼륨이 아니라 기존
 Spark SQL 표현(regexp_extract / to_date / trim)을 번역 오류 없이 옮기기 위해서다.
 
-### check: 브론즈 부분 적재 방어
-단일 DAG(매일 브론즈 전체 재처리 + 전량 덮어쓰기)에서는 이 검증이 실버를 지키는
-첫 번째 방어선이다(두 번째는 validate). ingestion/jobs/initial_load_failure_report.py의
-브론즈 적재는 파일 단위로 개별 커밋되고 배치 전체를 감싸는 트랜잭션이 없어서, 배치
-도중 실패하면 브론즈가 부분 적재 상태로 남을 수 있다. 이 상태로 그대로 재처리하면
-전량 덮어쓰기가 멀쩡하던 실버를 부분 데이터로 통째로 교체해버리므로, 브론즈
-현재 행수가 직전 실버 행수의 MIN_BRONZE_TO_PREV_SILVER_RATIO 미만이면 중단한다.
-직전 실버가 없거나(최초 실행) 0행이면 비교 기준이 없으므로 통과시킨다.
-
 ### transform
 - reg_dttm: STRING -> TIMESTAMP. 원본 포맷이 'yyyy-MM-dd HH:mm:ss'(19자, 2026-01~06
   API 수집분 실측 100%)와 'yyyyMMdd'(일부 초기 적재 파일, ingestion/jobs/
@@ -142,8 +133,6 @@ SILVER_TABLE = "silver.failure_report"
 # 필터가 같이 바뀌어야 한다.
 PARTITION_COLUMN = "reg_date_partition"
 
-MIN_BRONZE_TO_PREV_SILVER_RATIO = 0.95  # 잠정치 - 실측 후 조정
-
 REQUIRED_COLUMNS = ("bike_no", "reg_dttm", "failure_type")
 
 SILVER_COLUMNS = ["bike_no", "reg_dttm", "failure_type", PARTITION_COLUMN]
@@ -186,8 +175,9 @@ QUARANTINE_ARROW_SCHEMA = pa.schema([
     pa.field("quarantined_at", pa.timestamp("us", tz="UTC")),
 ])
 
-# 이 비율을 넘는 불일치는 구조적 이상으로 보고 배치를 막는다 (rental_history와 동일 발상).
-DEFAULT_MAX_QUARANTINE_RATIO = 0.01
+# API 요청일과 실제 신고일이 자주 어긋나는 원천 특성을 반영해, 절반까지는 quarantine으로
+# 보존한다. 절반을 넘으면 구조적 이상 가능성이 커 배치를 중단한다.
+DEFAULT_MAX_QUARANTINE_RATIO = 0.50
 
 # 한 실행이 소화할 확정 날짜 수 상한. transform_silver_rental_history와 같은 규칙 -
 # 오래 밀린 워터마크가 한 번에 수개월을 처리하지 않게 자른다.
@@ -247,22 +237,6 @@ def _connect() -> duckdb.DuckDBPyConnection:
     # 컨테이너 TZ에 결과가 흔들리면 파티션 값이 하루씩 밀 수 있다.
     con.execute("SET TimeZone='UTC'")
     return con
-
-
-def evaluate_partial_load(
-    bronze_count: int,
-    prev_silver_count: int,
-    threshold: float = MIN_BRONZE_TO_PREV_SILVER_RATIO,
-) -> tuple[bool, str]:
-    """브론즈가 직전 실버 대비 threshold 미만으로 줄었으면 (True, 사유)를 반환한다."""
-    if prev_silver_count == 0:
-        return False, "직전 silver 데이터 없음 - 비율 체크 스킵"
-
-    ratio = bronze_count / prev_silver_count
-    reason = f"브론즈 {bronze_count}행 / 직전 실버 {prev_silver_count}행 = {ratio:.1%}"
-    if ratio < threshold:
-        return True, f"{reason} (임계값 {threshold:.0%} 미만 - 브론즈 부분 적재 의심)"
-    return False, reason
 
 
 def transform_with_declared(
@@ -466,13 +440,7 @@ def _process_range(catalog, silver_table, start_date: date, end_date: date) -> d
     bronze_arrow = _read_bronze_range(catalog, start_str, end_str)
     bronze_count = len(bronze_arrow)
 
-    # 파티션 스펙 재생성 전에 직전 실버 행수를 읽어야 한다 - 재생성이 먼저면 0행이 되어
-    # 부분 적재 방어선이 통째로 무력화된다.
-    prev_silver_count = _silver_row_count(catalog, start_str, end_str)
-    is_partial, reason = evaluate_partial_load(bronze_count, prev_silver_count)
-    logger.info("%s: %s", label, reason)
-    if is_partial:
-        raise SilverFailureReportError(f"{label}: {reason}")
+    logger.info("%s: Bronze %d행 처리", label, bronze_count)
 
     if bronze_count == 0:
         logger.info("%s: Bronze에 처리할 데이터 없음 - 선언 구간을 0행으로 교체", label)

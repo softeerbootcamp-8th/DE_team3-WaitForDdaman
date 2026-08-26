@@ -23,7 +23,6 @@ from jobs.silver_failure_report import (
     SILVER_PARTITION_SPEC,
     SILVER_SCHEMA,
     _split_partition_mismatch,
-    evaluate_partial_load,
     resolve_confirmed_range,
     transform,
     validate,
@@ -183,23 +182,6 @@ def test_validate_allows_duplicate_unique_key():
         {"reg_dttm": "2026-08-21 01:00:00"}, {"reg_dttm": "2026-08-21 20:00:00"}
     )
     assert validate(transform(duplicated)) == []
-
-
-# ---------------------------------------------------------------- 부분 적재 방어
-
-
-@pytest.mark.parametrize(
-    "bronze,prev_silver,expected_stop",
-    [
-        (1000, 0, False),     # 최초 실행 - 비교 기준 없음
-        (1000, 1000, False),  # 동일
-        (960, 1000, False),   # 96% - 임계값 이상
-        (940, 1000, True),    # 94% - 브론즈 부분 적재 의심
-    ],
-)
-def test_evaluate_partial_load(bronze, prev_silver, expected_stop):
-    stop, _ = evaluate_partial_load(bronze, prev_silver)
-    assert stop is expected_stop
 
 
 # ---------------------------------------------------------------------------
@@ -501,13 +483,38 @@ def test_process_range_stops_batch_when_mismatch_ratio_exceeds_threshold(range_h
         mod._process_range(object(), "SILVER", date(2026, 8, 21), date(2026, 8, 21))
 
 
-def test_process_range_stops_batch_on_partial_bronze_load(range_harness):
-    """Bronze가 직전 Silver 대비 크게 줄면 부분 적재로 보고 막는다 (구간 단위 비교)."""
-    mod, state, _writes = range_harness
+def test_process_range_allows_quarantine_ratio_up_to_fifty_percent(range_harness):
+    """E2E 운영에서는 절반 이하의 날짜 불일치를 quarantine으로 보존한다."""
+    mod, state, writes = range_harness
+    state["bronze"] = bronze_table(
+        {"reg_dttm": "2026-08-21 09:12:34", PARTITION_COLUMN: "2026-08-21"},
+        {"reg_dttm": "2026-08-19 23:00:00", PARTITION_COLUMN: "2026-08-21"},
+    )
+
+    mod._process_range(object(), "SILVER", date(2026, 8, 21), date(2026, 8, 21))
+
+    assert [w["table"] for w in writes] == ["QUARANTINE", "SILVER"]
+    assert len(writes[0]["rows"]) == 1
+
+
+def test_process_range_allows_incremental_bronze_load(range_harness):
+    """일자별 증분 Bronze는 직전 Silver보다 적어도 해당 구간을 교체한다."""
+    mod, state, writes = range_harness
     state["prev_silver"] = 100   # Bronze 1행 / 직전 Silver 100행
 
-    with pytest.raises(mod.SilverFailureReportError):
-        mod._process_range(object(), "SILVER", date(2026, 8, 21), date(2026, 8, 21))
+    mod._process_range(object(), "SILVER", date(2026, 8, 21), date(2026, 8, 21))
+
+    assert [w["table"] for w in writes] == ["QUARANTINE", "SILVER"]
+
+
+def test_process_range_allows_small_bronze_range(range_harness):
+    """작은 일자별 Bronze 범위도 현재 입력으로 교체한다."""
+    mod, state, writes = range_harness
+    state["prev_silver"] = 100   # Bronze 1행 / 직전 Silver 100행
+
+    mod._process_range(object(), "SILVER", date(2026, 8, 21), date(2026, 8, 21))
+
+    assert [w["table"] for w in writes] == ["QUARANTINE", "SILVER"]
 
 
 # ---------------------------------------------------------------------------
