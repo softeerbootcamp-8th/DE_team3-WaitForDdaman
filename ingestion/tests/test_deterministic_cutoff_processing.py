@@ -26,7 +26,7 @@ def test_failure_report_backfill_deterministic_date(monkeypatch):
     """과거 cutoff 주입 시 실제 물리 날짜와 무관하게 주입된 논리 날짜만 처리한다."""
     processed_dates = []
 
-    def fake_process_one_day(target_date: date):
+    def fake_process_one_day(target_date: date, cutoff=None):
         processed_dates.append(target_date)
         return 1
 

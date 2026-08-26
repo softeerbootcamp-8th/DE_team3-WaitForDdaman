@@ -152,6 +152,7 @@ def test_failure_report_pure_arrow_write(s3_env):
     ]
 
     with patch("jobs.daily_batch_failure_report.fetch_failure_reports_by_date", return_value=sample_rows), \
+         patch("jobs.daily_batch_failure_report._ensure_bronze_columns"), \
          patch("jobs.daily_batch_failure_report.overwrite_partition") as mock_overwrite:
         count = process_failure_report(date(2026, 8, 22))
 
