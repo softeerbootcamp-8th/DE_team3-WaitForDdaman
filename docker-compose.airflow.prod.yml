@@ -1,10 +1,4 @@
-# 프로덕션 구성. production 배포와 CD는 이 파일만 사용한다.
-# release 동기화로 로컬/dev용 compose·Dockerfile이 브랜치에 같이 존재할 수 있지만,
-# 운영 EC2에서는 docker-compose.prod.yml만 실행한다.
-#
-# postgres 컨테이너가 없다: Airflow 메타데이터는 airflow-metadata-db RDS,
-# 도메인/서빙 데이터는 domain-db RDS를 쓴다.
-# 연결 정보는 같은 디렉터리의 .env에서 온다(.env.example 참고).
+# Airflow 파이프라인 프로덕션 구성 (Airflow 전용 EC2)
 x-airflow-common:
   &airflow-common
   image: ${ECR_REGISTRY}/waitforddaman-airflow:${IMAGE_TAG:-latest}
@@ -12,10 +6,6 @@ x-airflow-common:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
-    # 비밀번호를 URL에 넣지 않고 PGPASSWORD로 넘긴다. URL에 그대로 끼우면 @ / :
-    # 같은 문자가 들어간 비밀번호가 에러 없이 "다른 host/db"로 파싱된다
-    # (실측: 'p@ss/w:rd#1' -> host='ss'). psycopg2가 libpq를 거치면서
-    # PGPASSWORD를 집어오므로 URL에서 빼도 정상 연결된다.
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}@${AIRFLOW_DB_HOST}:${AIRFLOW_DB_PORT:-5432}/${AIRFLOW_DB_NAME}
     PGPASSWORD: ${AIRFLOW_DB_PASSWORD}
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
@@ -27,16 +17,11 @@ x-airflow-common:
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow_jwt_secret}
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
     AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-ap-northeast-2}
-    # 정적 AWS 키는 의도적으로 설정하지 않는다 - EC2 인스턴스 프로파일 IAM Role로 인증한다
-    # (ingestion/README.md에 문서화된 설계). 여기서 빈 문자열 기본값조차 주면 STS
-    # 자격증명 체인을 오히려 방해할 수 있어 아예 생략한다.
     APP_ENV: aws
     SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
-    ICEBERG_CATALOG_TYPE: ${ICEBERG_CATALOG_TYPE:-jdbc}  # RDS(domain-db) 기반 JDBC 카탈로그로 전환 (2026-08-22)
+    ICEBERG_CATALOG_TYPE: ${ICEBERG_CATALOG_TYPE:-jdbc}
     ICEBERG_CATALOG_NAME: ${ICEBERG_CATALOG_NAME:-bike_catalog}
     ICEBERG_WAREHOUSE_PATH: ${ICEBERG_WAREHOUSE_PATH}
-    # jdbc 카탈로그 전용 - domain-db RDS의 iceberg_catalog 스키마를 가리킨다
-    # (전용 role iceberg_catalog_rw, sql/bike_man/bikeman_seed_init.sql 참고).
     ICEBERG_JDBC_CATALOG_URI: ${ICEBERG_JDBC_CATALOG_URI}
     ICEBERG_JDBC_CATALOG_USER: ${ICEBERG_JDBC_CATALOG_USER}
     ICEBERG_JDBC_CATALOG_PASSWORD: ${ICEBERG_JDBC_CATALOG_PASSWORD}
@@ -48,54 +33,22 @@ x-airflow-common:
     EMR_SPARK_POLL_INTERVAL_SECONDS: ${EMR_SPARK_POLL_INTERVAL_SECONDS:-30}
     EMR_SPARK_POLL_MAX_SECONDS: ${EMR_SPARK_POLL_MAX_SECONDS:-21600}
     EMR_RISK_MODEL_CONFIG: ${EMR_RISK_MODEL_CONFIG:-/opt/app/config/risk_model.yaml}
-    # t4g.large(8GB)에서 6g 힙 JVM을 동시에 여러 개 띄우면 OOM 위험이 크므로
-    # 로컬 튜닝(local[2] 등)은 유지하되 driver 메모리는 낮춰서 사용한다.
-    # 실측 후 조정 필요 - ingestion/common/spark_session.py 참고.
-    SPARK_LOCAL_EXECUTION: 'false'
+    SPARK_LOCAL_EXECUTION: 'true'
     RISK_MODEL_CONFIG: ${RISK_MODEL_CONFIG:-/opt/airflow/pylib/config/risk_model.yaml}
     PYTHONPATH: /opt/airflow/pylib
   volumes:
     - airflow-logs-volume:/opt/airflow/logs
-    # 모든 DAG의 BashOperator 커맨드가 `cd ingestion && source .env && python -m jobs.X`
-    # 형태로 /opt/airflow/ingestion/.env를 직접 source한다(dag_common.py 등 참고) -
-    # environment: 블록과는 별개 경로라 이 마운트가 없으면 모든 DAG 태스크가 실패한다.
-    # SERVING_DB_*, BIKEMAN_DB_*, SEOUL_API_KEY 등도 전부 이 파일에서 읽힌다.
     - ./.env:/opt/airflow/.env:ro
     - ./.env:/opt/airflow/ingestion/.env:ro
   user: "${AIRFLOW_UID:-50000}:0"
 
 services:
-  api:
-    container_name: service-api
-    image: ${ECR_REGISTRY}/waitforddaman-api:${IMAGE_TAG:-latest}
-    environment:
-      # search_path에 serving을 넣는 이유: state.py의 쿼리가 station_daily /
-      # bike_risk_daily / dim_district를 스키마 한정 없이 조회하는데, 실제 테이블은
-      # serving 스키마에 있다(serving_db.py의 SCHEMA 상수). 이게 없으면
-      # "relation does not exist"로 500이 난다.
-      # 비밀번호는 URL이 아니라 PGPASSWORD로 넘긴다(위 airflow 쪽과 같은 이유).
-      DATABASE_URL: postgresql+psycopg2://${DOMAIN_DB_USER}@${DOMAIN_DB_HOST}:${DOMAIN_DB_PORT:-5432}/${DOMAIN_DB_NAME}?options=-csearch_path%3Dserving,public
-      PGPASSWORD: ${DOMAIN_DB_PASSWORD}
-    expose:
-      - "8000"
-    restart: always
-    # 주의: host에 8000 포트를 노출하지 않는다 - web(nginx)이 내부망으로 /api를 프록시한다
-
-  web:
-    container_name: service-web
-    image: ${ECR_REGISTRY}/waitforddaman-web:${IMAGE_TAG:-latest}
-    ports:
-      - "80:80"
-    depends_on:
-      - api
-    restart: always
-
   airflow-apiserver:
     <<: *airflow-common
     container_name: airflow-apiserver
     command: api-server
     ports:
-      - "8080:8080"  # 보안그룹에서 관리자 IP만 허용
+      - "8080:8080"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
       interval: 10s
@@ -155,9 +108,6 @@ services:
   airflow-init:
     <<: *airflow-common
     container_name: airflow-init
-    # DB 마이그레이션/계정 생성은 이미지 엔트리포인트가 _AIRFLOW_* 환경변수를 보고
-    # 처리한 뒤, Bronze/Silver 적재용 풀을 만든다. t4g.large(8GB) 메모리 제약으로
-    # 동시성을 2가 아닌 1로 낮춘다 - 필요 시 실측 후 조정.
     command:
       - bash
       - -c
