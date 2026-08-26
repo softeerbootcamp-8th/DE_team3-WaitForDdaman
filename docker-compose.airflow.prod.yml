@@ -111,10 +111,11 @@ services:
   airflow-init:
     <<: *airflow-common
     container_name: airflow-init
-    # Bronze/Silver/Gold 적재 풀. DUCKDB_MEMORY_LIMIT(기본 3GB, common/duckdb_io.py)과
-    # 짝을 이뤄 t4g.xlarge(16GB)에서 세 풀이 동시에 최대로 돌아도(3GB x 3) OS/Airflow
-    # 오버헤드를 뺀 예산 안에 들어오게 역산한 값이다. Gold는 원래 가드가 아예 없어
-    # OOM으로 이어졌다 (#144/#285). 필요 시 실측 후 조정.
+    # Bronze/Silver/Gold 적재 풀. DUCKDB_MEMORY_LIMIT(기본 2GB, common/duckdb_io.py)과
+    # 짝을 이뤄 실제 워커인 t4g.large(8GB)에서 세 풀이 동시에 최대로 돌아도(2GB x 3 = 6GB)
+    # OS/Airflow 오버헤드를 뺀 예산 안에 들어오게 역산한 값이다(기존 3GB 기본값은
+    # t4g.xlarge/16GB로 잘못 가정해 8GB 워커에서 재차 OOM이 났다). Gold는 원래 가드가
+    # 아예 없어 OOM으로 이어졌다 (#144/#285). 필요 시 실측 후 조정.
     command:
       - bash
       - -c
