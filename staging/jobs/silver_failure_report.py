@@ -79,23 +79,46 @@ Spark SQL 표현(regexp_extract / to_date / trim)을 번역 오류 없이 옮기
   날짜 단위(자정)로 통일하기로 하면서 같은 날 같은 자전거가 같은 고장유형으로 여러 번
   신고되면 자연스럽게 발생하는 중복이라 더 이상 이례적인 실패 조건이 아니다.
 
-### overwrite: 파티션별이 아니라 전량 교체
-이 잡은 매번 브론즈 전체를 재처리하므로 결과가 곧 테이블 전체다. 등록일 파티션마다
-overwrite_partition()을 반복하면 커밋이 파티션 수만큼 쪼개져 느리고, 이번 입력에
-더 이상 없는 과거 파티션이 남는다. common/iceberg_io.py의 overwrite_all()로 커밋
-1회에 전량 교체한다 - 재실행해도 결과가 같다(멱등).
+### 쓰기: 확정 구간 증분 + 미확정 tail 재계산 (#288)
+예전엔 매번 Bronze 전체를 읽어 overwrite_all()로 통째 교체했다. 비용이 데이터 총량에
+비례해 계속 커지므로, Bronze가 이미 하는 확정/미확정 구분을 그대로 따라간다.
 
-### 단일 DAG (전체 재처리), Asset 기반 스케줄
+  확정 구간 [Silver WM+1, Bronze WM]  -> replace_range, 워터마크 전진
+  미확정 tail (> Bronze WM)           -> replace_range, 워터마크 미갱신
+
+미확정 tail은 daily_batch_failure_report가 FAILURE_REPORT_T0_ENABLED로 워터마크를
+올리지 않고 적재해둔 당일 파티션이다. 그 끝은 Bronze의 MAX(파티션)을 매니페스트에서
+읽어 구한다 - FAILURE_REPORT_BRONZE Asset은 extra를 싣지 않으므로(rental_history와
+다른 점) Bronze 상태에서 직접 판단해야 하고, 그래야 catch-up 트리거(#286)처럼
+metadata 없는 경로에서도 동작한다.
+
+구간 교체는 "데이터가 있는 날짜"가 아니라 "선언 구간"을 지운다. 0행 결과여도 구간을
+비워야 재실행 결과가 행 수와 내용까지 같아진다(common/iceberg_io.py replace_range 참고).
+
+### quarantine: 유도 신고일 != 선언 신고일
+Bronze 파티션은 "선언" 신고일(API 조회 대상일, daily_batch_failure_report가 루프
+날짜를 그대로 찍는다)이고 Silver 파티션은 "유도" 신고일(date(reg_dttm))이다. 두 값이
+어긋나는 행은 Bronze 파티션 D에서 Silver 파티션 D'로 옮겨가는데, 그러면 구간 교체가
+정확할 수 없다 - D'가 교체 구간 밖이면 옛 행이 안 지워져 재실행마다 중복이 쌓이고,
+교체 구간 안의 D'가 구간 밖 Bronze에서 기여받은 행을 갖고 있으면 삭제 후 복원되지 않는다.
+불일치 행을 silver.failure_report_quarantine으로 격리하면 남은 행은 전부 유도 == 선언이라
+Silver 파티션 == Bronze 파티션이 성립한다. Silver 파티션의 정의는 바꾸지 않는다(#143 계약).
+
+### 단일 DAG, Asset 기반 스케줄
 자세한 이유는 airflow/dags/silver_failure_report_dag.py 참고.
 
 사용법:
     python -m jobs.silver_failure_report
 """
 import logging
+import os
 import sys
+from datetime import date, datetime, timedelta, timezone
+from typing import Optional
 
 import duckdb
 import pyarrow as pa
+import pyarrow.compute as pc
 from pyiceberg.exceptions import NoSuchTableError
 from pyiceberg.partitioning import PartitionField, PartitionSpec
 from pyiceberg.schema import Schema
@@ -104,7 +127,7 @@ from pyiceberg.types import NestedField, StringType, TimestamptzType
 
 from common.duckdb_io import query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
-from common.iceberg_io import overwrite_all
+from common.iceberg_io import build_range_filter, replace_range
 from common.sql_assert import QualityCheck
 from common.watermark import read_watermark, write_watermark
 from config.watermark_keys import BRONZE_FAILURE_REPORT, SILVER_FAILURE_REPORT
@@ -125,7 +148,50 @@ REQUIRED_COLUMNS = ("bike_no", "reg_dttm", "failure_type")
 
 SILVER_COLUMNS = ["bike_no", "reg_dttm", "failure_type", PARTITION_COLUMN]
 
-BRONZE_FIELDS = ("bike_no", "reg_dttm", "failure_type")
+# Bronze의 파티션 컬럼(선언 신고일)도 함께 읽는다 - 유도 신고일(date(reg_dttm))과
+# 어긋나는 행을 골라내는 기준이고, quarantine 테이블의 구간 교체 키로도 쓴다.
+BRONZE_FIELDS = ("bike_no", "reg_dttm", "failure_type", PARTITION_COLUMN)
+
+# Bronze가 선언한 신고일. transform()이 유도한 PARTITION_COLUMN과 비교해 불일치를 판정한다.
+DECLARED_COLUMN = "declared_reg_date"
+
+# 0행 구간을 교체할 때 쓸 빈 테이블의 스키마. SILVER_SCHEMA(Iceberg)와 1:1로 맞춘다.
+SILVER_ARROW_SCHEMA = pa.schema([
+    pa.field("bike_no", pa.string()),
+    pa.field("reg_dttm", pa.timestamp("us", tz="UTC")),
+    pa.field("failure_type", pa.string()),
+    pa.field(PARTITION_COLUMN, pa.string()),
+])
+
+QUARANTINE_TABLE = "silver.failure_report_quarantine"
+
+# silver.rental_history_quarantine과 동일 convention: 원본 컬럼 + 격리 사유/시각.
+# 언파티션 - 볼륨이 작고 조회가 감사 목적이다. 구간 교체는 DECLARED_COLUMN 필터로 한다.
+QUARANTINE_SCHEMA = Schema(
+    NestedField(1, "bike_no", StringType(), required=False),
+    NestedField(2, "reg_dttm", TimestamptzType(), required=False),
+    NestedField(3, "failure_type", StringType(), required=False),
+    NestedField(4, PARTITION_COLUMN, StringType(), required=False, doc="유도 신고일 date(reg_dttm)"),
+    NestedField(5, DECLARED_COLUMN, StringType(), required=False, doc="Bronze가 선언한 신고일"),
+    NestedField(6, "quarantine_reason", StringType(), required=False),
+    NestedField(7, "quarantined_at", TimestamptzType(), required=False),
+)
+QUARANTINE_ARROW_SCHEMA = pa.schema([
+    pa.field("bike_no", pa.string()),
+    pa.field("reg_dttm", pa.timestamp("us", tz="UTC")),
+    pa.field("failure_type", pa.string()),
+    pa.field(PARTITION_COLUMN, pa.string()),
+    pa.field(DECLARED_COLUMN, pa.string()),
+    pa.field("quarantine_reason", pa.string()),
+    pa.field("quarantined_at", pa.timestamp("us", tz="UTC")),
+])
+
+# 이 비율을 넘는 불일치는 구조적 이상으로 보고 배치를 막는다 (rental_history와 동일 발상).
+DEFAULT_MAX_QUARANTINE_RATIO = 0.01
+
+# 한 실행이 소화할 확정 날짜 수 상한. transform_silver_rental_history와 같은 규칙 -
+# 오래 밀린 워터마크가 한 번에 수개월을 처리하지 않게 자른다.
+DEFAULT_MAX_DAYS_PER_RUN = 31
 
 SILVER_SCHEMA = Schema(
     NestedField(1, "bike_no", StringType(), required=False, doc="자전거 번호"),
@@ -154,10 +220,12 @@ TRANSFORM_SQL = """
         bike_no,
         reg_dttm_ts                                    AS reg_dttm,
         failure_type,
-        strftime(reg_dttm_ts, '%Y-%m-%d')              AS reg_date_partition
+        strftime(reg_dttm_ts, '%Y-%m-%d')              AS reg_date_partition,
+        declared_reg_date
     FROM (
         SELECT
             bike_no,
+            reg_date_partition                         AS declared_reg_date,
             CAST(
                 COALESCE(
                     try_strptime(
@@ -197,12 +265,23 @@ def evaluate_partial_load(
     return False, reason
 
 
-def transform(bronze_table: pa.Table, con: duckdb.DuckDBPyConnection | None = None) -> pa.Table:
-    """bronze.failure_report 전체를 확정 스키마 + 파티션 컬럼으로 변환한다. 읽기/쓰기를 하지 않는다."""
+def transform_with_declared(
+    bronze_table: pa.Table, con: duckdb.DuckDBPyConnection | None = None
+) -> pa.Table:
+    """확정 스키마 + 유도 신고일에 Bronze의 선언 신고일까지 붙여 돌려준다.
+
+    불일치 판정과 quarantine 구간 교체가 선언 신고일을 필요로 하므로, 두 값을 같은
+    SQL 한 번에서 함께 뽑는다 - 따로 계산하면 유도 규칙이 두 곳으로 갈린다.
+    """
     conn = con or _connect()
     conn.register("bronze_failure_report", bronze_table)
     result = query_arrow(conn, TRANSFORM_SQL)
-    return result.select(SILVER_COLUMNS)
+    return result.select(SILVER_COLUMNS + [DECLARED_COLUMN])
+
+
+def transform(bronze_table: pa.Table, con: duckdb.DuckDBPyConnection | None = None) -> pa.Table:
+    """확정 스키마 + 유도 파티션 컬럼만 남긴다 (Silver 본 테이블 스키마). 읽기/쓰기를 하지 않는다."""
+    return transform_with_declared(bronze_table, con).select(SILVER_COLUMNS)
 
 
 def validate(silver_table: pa.Table) -> list[str]:
@@ -230,12 +309,102 @@ def validate(silver_table: pa.Table) -> list[str]:
     return errors
 
 
-def _silver_row_count(catalog) -> int:
+def _ensure_quarantine_table(catalog):
+    """quarantine 테이블이 없으면 만든다 (silver.rental_history_quarantine과 동일 패턴)."""
+    try:
+        return catalog.load_table(QUARANTINE_TABLE)
+    except NoSuchTableError:
+        logger.info("%s 테이블 신규 생성", QUARANTINE_TABLE)
+        return catalog.create_table(QUARANTINE_TABLE, schema=QUARANTINE_SCHEMA)
+
+
+def _read_bronze_range(catalog, start_str: str, end_str: str) -> pa.Table:
+    """Bronze의 선언 신고일이 [start, end]인 행만 읽는다 (전체 스캔 제거)."""
+    return (
+        catalog.load_table(BRONZE_TABLE)
+        .scan(
+            row_filter=build_range_filter(PARTITION_COLUMN, start_str, end_str),
+            selected_fields=BRONZE_FIELDS,
+        )
+        .to_arrow()
+    )
+
+
+def bronze_max_partition(catalog) -> Optional[date]:
+    """Bronze의 MAX(선언 신고일). 매니페스트만 읽어 데이터 파일은 건드리지 않는다.
+
+    미확정 tail(Bronze 워터마크보다 뒤에 있는 파티션)의 끝을 구하는 데 쓴다.
+    rental_history는 Bronze Asset의 extra로 당일 파티션을 지정받지만
+    FAILURE_REPORT_BRONZE는 extra를 싣지 않으므로, Bronze 상태에서 직접 읽는다 -
+    catch-up 트리거(#286)처럼 metadata 없는 경로에서도 그대로 동작한다.
+
+    reg_dttm이 NULL인 원본 행은 파티션 값이 ""로 떨어지므로 걸러낸다
+    (ingestion/jobs/check_watermark_date.py의 _max_partition_value와 동일한 이유).
+    """
+    try:
+        table = catalog.load_table(BRONZE_TABLE)
+    except NoSuchTableError:
+        return None
+    values = [
+        row["partition"].get(PARTITION_COLUMN)
+        for row in table.inspect.partitions().to_pylist()
+    ]
+    values = [v for v in values if v]
+    if not values:
+        return None
+    return date.fromisoformat(max(values))
+
+
+def _split_partition_mismatch(silver_with_declared: pa.Table) -> tuple[pa.Table, pa.Table]:
+    """유도 신고일이 선언 신고일과 다른 행을 quarantine으로 분리한다.
+
+    왜 필요한가: Bronze 파티션은 "선언" 신고일(API 조회 대상일)이고 Silver 파티션은
+    "유도" 신고일(date(reg_dttm))이다. 두 값이 어긋나는 행은 Bronze 파티션 D에서
+    Silver 파티션 D'로 옮겨가는데, 그러면 구간 교체가 정확할 수 없다 - D'가 교체 구간
+    밖이면 옛 행이 안 지워져 재실행마다 중복이 쌓이고, 교체 구간 안의 D'가 구간 밖
+    Bronze에서 기여받은 행을 갖고 있으면 삭제 후 복원되지 않는다.
+
+    불일치를 격리하면 남은 행은 전부 유도 == 선언이므로 Silver 파티션 == Bronze 파티션이
+    성립하고, replace_range가 선언 구간을 정확히 교체한다. Silver 파티션의 정의
+    (date(reg_dttm))는 바꾸지 않는다 - Gold 인터페이스 계약(#143) 유지.
+    """
+    derived = silver_with_declared.column(PARTITION_COLUMN)
+    declared = silver_with_declared.column(DECLARED_COLUMN)
+    matched = pc.equal(derived, declared)
+    # null은 equal()에서 null이 되어 filter가 버린다 - 명시적으로 불일치로 몰아둔다.
+    matched = pc.fill_null(matched, False)
+
+    clean = silver_with_declared.filter(matched).select(SILVER_COLUMNS)
+    violations = silver_with_declared.filter(pc.invert(matched))
+    if len(violations) == 0:
+        return clean, QUARANTINE_ARROW_SCHEMA.empty_table()
+
+    quarantined = violations.append_column(
+        "quarantine_reason",
+        pa.array(["derived_reg_date != declared_reg_date"] * len(violations), pa.string()),
+    ).append_column(
+        "quarantined_at",
+        pa.array([datetime.now(timezone.utc)] * len(violations), pa.timestamp("us", tz="UTC")),
+    )
+    return clean, quarantined.select(QUARANTINE_ARROW_SCHEMA.names).cast(QUARANTINE_ARROW_SCHEMA)
+
+
+def _silver_row_count(catalog, start_str: str, end_str: str) -> int:
+    """선언 구간에 해당하는 직전 Silver 행 수. 부분 적재 방어선의 비교 기준이다.
+
+    전량 재처리 시절엔 테이블 전체 행 수를 셌지만, 이제 교체 단위가 구간이므로
+    비교도 같은 구간으로 좁혀야 한다 - 전체와 비교하면 31일 구간을 처리할 때마다
+    비율이 항상 임계치 밑으로 떨어져 매번 배치가 막힌다.
+    """
     try:
         table = catalog.load_table(SILVER_TABLE)
     except NoSuchTableError:
         return 0
-    return len(table.scan(selected_fields=("bike_no",)).to_arrow())
+    scan = table.scan(
+        row_filter=build_range_filter(PARTITION_COLUMN, start_str, end_str),
+        selected_fields=("bike_no",),
+    )
+    return len(scan.to_arrow())
 
 
 def _ensure_silver_table(catalog):
@@ -265,58 +434,173 @@ def _ensure_silver_table(catalog):
     if current_partition_columns == [PARTITION_COLUMN]:
         return table
 
-    logger.warning(
-        "%s의 파티션 스펙이 %s라 %s identity로 재생성한다 (#143). 이 실행이 전량 재적재하므로 "
-        "데이터 손실은 없다.",
-        SILVER_TABLE, current_partition_columns, PARTITION_COLUMN,
+    # 전량 재처리 시절엔 여기서 drop+create해도 그 실행이 전부 다시 채웠다. 증분으로
+    # 바뀐 뒤에는 워터마크 아래 구간을 다시 처리하지 않으므로 drop이 곧 데이터 손실이다.
+    # 사람이 워터마크를 되돌려 재적재를 지시해야 한다.
+    raise SilverFailureReportError(
+        f"{SILVER_TABLE}의 파티션 스펙이 {current_partition_columns}라 "
+        f"{PARTITION_COLUMN} identity와 다르다. 증분 처리는 이 테이블을 재생성할 수 없다 "
+        f"(워터마크 아래 구간을 다시 채우지 않으므로 drop이 데이터 손실이 된다). "
+        f"set_watermark로 Silver 워터마크를 되돌린 뒤 재적재할 것."
     )
-    catalog.drop_table(SILVER_TABLE)
-    return catalog.create_table(
-        SILVER_TABLE,
-        schema=SILVER_SCHEMA,
-        partition_spec=SILVER_PARTITION_SPEC,
-        properties=SILVER_PROPERTIES,
+
+
+class SilverFailureReportError(RuntimeError):
+    """구간 처리 실패 - 워터마크를 전진시키지 않고 배치를 중단한다."""
+
+
+def _process_range(catalog, silver_table, start_date: date, end_date: date) -> dict:
+    """선언 구간 [start_date, end_date]를 이번 입력 결과로 완전히 교체한다.
+
+    Bronze 전체를 읽지 않는다. 선언 신고일이 구간 안인 Bronze 행만 읽어 변환하고,
+    quarantine과 본 테이블을 각각 구간 교체한다(커밋 2회).
+
+    입력이 0행이어도 조기 반환하지 않는다 - 선언 구간을 0행으로 비워야 "이 구간은
+    이번 결과로 완전히 교체됐다"가 성립한다. 실제 데이터가 있는 날짜만 교체하면
+    이번에 사라진 날짜의 과거 행이 그대로 남는다(replace_range docstring 참고).
+    """
+    start_str = start_date.strftime("%Y-%m-%d")
+    end_str = end_date.strftime("%Y-%m-%d")
+    label = start_str if start_date == end_date else f"{start_str}~{end_str}"
+
+    bronze_arrow = _read_bronze_range(catalog, start_str, end_str)
+    bronze_count = len(bronze_arrow)
+
+    # 파티션 스펙 재생성 전에 직전 실버 행수를 읽어야 한다 - 재생성이 먼저면 0행이 되어
+    # 부분 적재 방어선이 통째로 무력화된다.
+    prev_silver_count = _silver_row_count(catalog, start_str, end_str)
+    is_partial, reason = evaluate_partial_load(bronze_count, prev_silver_count)
+    logger.info("%s: %s", label, reason)
+    if is_partial:
+        raise SilverFailureReportError(f"{label}: {reason}")
+
+    if bronze_count == 0:
+        logger.info("%s: Bronze에 처리할 데이터 없음 - 선언 구간을 0행으로 교체", label)
+        clean = SILVER_ARROW_SCHEMA.empty_table()
+        quarantined = QUARANTINE_ARROW_SCHEMA.empty_table()
+    else:
+        with_declared = transform_with_declared(bronze_arrow)
+
+        # 캐스팅 실패(reg_dttm null)는 기존과 동일하게 배치를 중단시킨다 - 포맷 편차를
+        # 조용히 quarantine으로 흘리지 않는다. validate가 유도 파티션 null도 함께 잡는다.
+        errors = validate(with_declared.select(SILVER_COLUMNS))
+        if errors:
+            for e in errors:
+                logger.error("%s 검증 실패: %s", label, e)
+            raise SilverFailureReportError(f"{label}: 검증 실패 {errors}")
+
+        clean, quarantined = _split_partition_mismatch(with_declared)
+
+    quarantine_count = len(quarantined)
+    if quarantine_count:
+        ratio = quarantine_count / bronze_count
+        max_ratio = float(os.getenv("MAX_QUARANTINE_RATIO") or DEFAULT_MAX_QUARANTINE_RATIO)
+        if ratio > max_ratio:
+            raise SilverFailureReportError(
+                f"{label}: 신고일 불일치 비율 {ratio:.4f}가 임계치 {max_ratio}를 초과 - "
+                f"구조적 이상 가능성으로 배치 중단 (불일치 {quarantine_count}/{bronze_count}행)"
+            )
+        logger.warning(
+            "%s: 신고일 불일치 %d행(%.4f%%) quarantine 처리 - %s 확인 필요",
+            label, quarantine_count, ratio * 100, QUARANTINE_TABLE,
+        )
+
+    # 쓰기 순서: quarantine -> 본 테이블. 서로 다른 Iceberg 테이블이라 한 트랜잭션으로
+    # 묶을 수 없다. quarantine이 먼저 성공하고 본 테이블이 실패하면 짧은 불일치가 생기지만,
+    # quarantine은 Gold의 입력이 아닌 감사 테이블이고 워터마크가 전진하지 않으므로
+    # 재실행이 같은 구간을 다시 교체해 수렴한다.
+    #
+    # append가 아니라 구간 교체인 이유: append면 같은 구간을 재실행할 때마다 동일한
+    # 불일치 행이 다시 쌓여 감사 건수가 부풀고 멱등성이 깨진다. quarantine의 구간 키는
+    # 유도 신고일이 아니라 DECLARED_COLUMN이다 - 불일치 행의 유도 신고일은 정의상
+    # 선언 구간 밖일 수 있어서 그걸로는 범위 단정(_assert_rows_within_range)을 통과할 수 없다.
+    replace_range(
+        _ensure_quarantine_table(catalog), quarantined, DECLARED_COLUMN,
+        start_str, end_str, catalog=catalog,
     )
+    replace_range(silver_table, clean, PARTITION_COLUMN, start_str, end_str, catalog=catalog)
+
+    logger.info(
+        "%s: Silver %d행 교체 완료 (Bronze %d행, quarantine %d행)",
+        label, len(clean), bronze_count, quarantine_count,
+    )
+    return {
+        "bronze_row_count": bronze_count,
+        "silver_row_count": len(clean),
+        "quarantine_row_count": quarantine_count,
+    }
+
+
+def resolve_confirmed_range(
+    silver_watermark: date, bronze_watermark: date, max_days: Optional[str] = None
+) -> Optional[tuple[date, date]]:
+    """확정 구간 [silver WM+1, bronze WM]에 MAX_DAYS_PER_RUN 상한을 적용한다.
+
+    처리할 신규 확정 날짜가 없으면 None.
+    """
+    start_date = silver_watermark + timedelta(days=1)
+    end_date = bronze_watermark
+    if start_date > end_date:
+        return None
+
+    limit = int(max_days or DEFAULT_MAX_DAYS_PER_RUN)
+    capped_end = start_date + timedelta(days=limit - 1)
+    if capped_end < end_date:
+        logger.info(
+            "MAX_DAYS_PER_RUN=%s 적용 - 이번 실행은 %s ~ %s까지만 처리 (원래 끝: %s)",
+            limit, start_date, capped_end, end_date,
+        )
+        end_date = capped_end
+    return start_date, end_date
 
 
 def run() -> None:
     catalog = build_iceberg_catalog()
 
-    bronze_table = catalog.load_table(BRONZE_TABLE).scan(selected_fields=BRONZE_FIELDS).to_arrow()
-    bronze_count = len(bronze_table)
-    logger.info("bronze.failure_report: %d행", bronze_count)
-
-    if bronze_count == 0:
-        logger.error("브론즈에 데이터가 없음 - 브론즈 적재 완료 여부 확인 필요")
-        sys.exit(1)
-
-    # 파티션 스펙 재생성 전에 직전 실버 행수를 읽어야 한다 - 재생성이 먼저면 0행이 되어
-    # 부분 적재 방어선이 통째로 무력화된다.
-    prev_silver_count = _silver_row_count(catalog)
-    is_partial, reason = evaluate_partial_load(bronze_count, prev_silver_count)
-    logger.info(reason)
-    if is_partial:
-        logger.error("파이프라인 중단: %s", reason)
-        sys.exit(1)
-
-    silver_arrow = transform(bronze_table)
-
-    errors = validate(silver_arrow)
-    if errors:
-        for e in errors:
-            logger.error("검증 실패: %s", e)
-        sys.exit(1)
+    # 워터마크를 Bronze 데이터보다 먼저 읽는다 (#286). 증분 구조에서는 이게 순서 문제가
+    # 아니라 필연이다 - 두 값이 읽을 범위를 정하기 때문이다.
+    bronze_watermark = read_watermark(watermark_key=BRONZE_FAILURE_REPORT)
+    silver_watermark = read_watermark(watermark_key=SILVER_FAILURE_REPORT)
 
     silver_table = _ensure_silver_table(catalog)
-    row_count = len(silver_arrow)
-    overwrite_all(silver_table, silver_arrow)
 
-    # overwrite가 끝난 뒤에만 갱신 - 이 시점의 Bronze 워터마크까지 Silver에
-    # 반영됐다는 의미로 그대로 이어받는다
-    bronze_watermark = read_watermark(watermark_key=BRONZE_FAILURE_REPORT)
-    write_watermark(bronze_watermark, watermark_key=SILVER_FAILURE_REPORT)
+    confirmed = resolve_confirmed_range(
+        silver_watermark, bronze_watermark, os.getenv("MAX_DAYS_PER_RUN")
+    )
+    if confirmed is None:
+        logger.info(
+            "처리할 신규 확정 날짜 없음 (Silver 워터마크=%s, Bronze 워터마크=%s)",
+            silver_watermark, bronze_watermark,
+        )
+    else:
+        start_date, end_date = confirmed
+        try:
+            _process_range(catalog, silver_table, start_date, end_date)
+        except SilverFailureReportError as e:
+            logger.error("확정 구간 처리 실패, 배치 중단: %s", e)
+            sys.exit(1)
+        # 확정 구간이 성공한 뒤에만 전진한다. 값은 Bronze 워터마크 복사가 아니라
+        # 이번 실행이 실제로 교체한 구간의 끝이다 - 상한(MAX_DAYS_PER_RUN)에 걸려
+        # 뒷부분을 남겼을 때 처리하지 않은 날짜를 완료로 선언하지 않기 위함이다.
+        write_watermark(end_date, watermark_key=SILVER_FAILURE_REPORT)
+        logger.info("Silver 워터마크 전진: %s -> %s", silver_watermark, end_date)
 
-    logger.info("전량 덮어쓰기 완료: %d행 (Silver 워터마크=%s)", row_count, bronze_watermark)
+    # 미확정 tail. Bronze가 워터마크를 올리지 않고 적재해둔 구간(FAILURE_REPORT_T0_ENABLED로
+    # 적재되는 당일 파티션이 대표 사례)을 매 실행 다시 계산한다. 워터마크는 갱신하지 않는다 -
+    # 아직 확정 후보가 아니라 다음 실행에서 확정 구간으로 다시 덮어써진다.
+    #
+    # 이 처리를 빼면 당일 고장신고가 Silver에서 사라진다. build_bike_features_daily가
+    # FAILURE_REPORT_T0_ENABLED를 읽어 당일 고장신고를 위험도 피처에 반영하므로
+    # 현재 동작이 깨진다.
+    tail_end = bronze_max_partition(catalog)
+    if tail_end is not None and tail_end > bronze_watermark:
+        tail_start = bronze_watermark + timedelta(days=1)
+        logger.info("미확정 tail 처리: %s ~ %s (워터마크 미갱신)", tail_start, tail_end)
+        try:
+            _process_range(catalog, silver_table, tail_start, tail_end)
+        except SilverFailureReportError as e:
+            logger.error("미확정 tail 처리 실패, 배치 중단: %s", e)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

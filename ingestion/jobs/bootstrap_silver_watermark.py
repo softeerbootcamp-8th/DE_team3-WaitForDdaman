@@ -34,17 +34,22 @@ import config
 from common.iceberg_catalog import build_iceberg_catalog
 from common.s3_utils import get_json
 from common.watermark import write_watermark
-from config.watermark_keys import SILVER_RENTAL_HISTORY
+from config.watermark_keys import SILVER_FAILURE_REPORT, SILVER_RENTAL_HISTORY
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 # 데이터셋명 -> (Bronze 테이블, 파티션 컬럼, Silver 워터마크 키)
-# failure_report/bikeman_event은 여기 없다 - silver_failure_report는 매번 브론즈 전체를
-# 재처리하는 구조라 워터마크 자체가 없고, bikeman_event는 파일 백필 대상이 아니라
-# "서비스 시작일" 기준이라 이 DAG(파일 백필) 범위 밖이다.
+# bikeman_event은 여기 없다 - 파일 백필 대상이 아니라 "서비스 시작일" 기준이라
+# 이 DAG(파일 백필) 범위 밖이다.
+#
+# failure_report는 #288부터 대상이다. 전량 재처리(overwrite_all) 시절엔 Silver 워터마크가
+# Bronze 값의 미러라 부트스트랩할 게 없었지만, 확정 구간 증분으로 바뀐 뒤에는 하한이
+# 필요하다 - 없으면 read_watermark가 backfill_start_date(기본 2015-01-01)로 폴백해
+# 데이터가 없는 6년치를 구간에 넣는다.
 DATASETS = {
     "rental_history": ("bronze.rental_history", "rent_date_partition", SILVER_RENTAL_HISTORY),
+    "failure_report": ("bronze.failure_report", "reg_date_partition", SILVER_FAILURE_REPORT),
 }
 
 

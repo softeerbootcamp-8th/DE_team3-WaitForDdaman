@@ -63,7 +63,7 @@ PYTHON_BIN = "python"
 SILVER_MODULE = "silver_failure_report"  # staging/jobs/silver_failure_report.py
 
 
-def _staging_bash(job_module: str) -> str:
+def _staging_bash(job_module: str, extra_env: str = "") -> str:
     """
     staging/ 잡 실행 커맨드. staging에는 common/이 없어 ingestion/common/을 그대로
     재사용한다 - PYTHONPATH에 ingestion과 staging을 같이 잡으면 `jobs`는 두 디렉터리의
@@ -73,7 +73,7 @@ def _staging_bash(job_module: str) -> str:
     return (
         f"cd {STAGING_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
         f"PYTHONPATH={INGESTION_DIR}:{STAGING_DIR}:$PYTHONPATH "
-        f"{PYTHON_BIN} -m jobs.{job_module}"
+        f"{extra_env}{PYTHON_BIN} -m jobs.{job_module}"
     )
 
 
@@ -81,16 +81,24 @@ def _staging_bash(job_module: str) -> str:
     dag_id="silver_failure_report",
     schedule=[FAILURE_REPORT_BRONZE],  # 고정 시간이 아니라 Bronze 완료 이벤트로 트리거
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Seoul"),
-    catchup=False,  # 매번 브론즈 전체를 재처리하는 구조라 과거 날짜를 따로 메울 이유가 없음
-    max_active_runs=1,
+    # Airflow catchup은 쓰지 않는다 - 밀린 날짜는 잡이 자기 워터마크로 따라잡는다(#288).
+    catchup=False,
+    max_active_runs=1,  # 같은 구간에 두 실행이 동시에 replace_range를 시도하는 것 방지
     default_args=DEFAULT_ARGS,
     tags=["silver", "asset_triggered", "main"],
+    params={
+        # 미지정이면 잡의 DEFAULT_MAX_DAYS_PER_RUN(31)을 쓴다. 오래 밀린 워터마크를
+        # 한 번에 소화시키고 싶을 때만 수동 실행에서 올린다.
+        "max_days_per_run": "",
+    },
     doc_md=__doc__,
 )
 def silver_failure_report():
     BashOperator(
         task_id="silver_failure_report",
-        bash_command=_staging_bash(SILVER_MODULE),
+        bash_command=_staging_bash(
+            SILVER_MODULE, "MAX_DAYS_PER_RUN='{{ params.max_days_per_run }}' "
+        ),
         execution_timeout=timedelta(hours=1),
         pool=SILVER_POOL,
     )

@@ -39,7 +39,7 @@ bikeman은 워터마크로 며칠 밀려도 따라잡는다).
         >> select_final_or_preliminary   (ALL_DONE - 수집이 실패해도 반드시 실행)
         >> promote_to_bronze             (PyIceberg 단일 snapshot commit, BRONZE_POOL)
         >> update_confirmed_watermark
-        >> publish_bronze_asset          (RENTAL_HISTORY_BRONZE의 유일한 producer)
+        >> publish_bronze_asset          (RENTAL_HISTORY_BRONZE producer - #286부터 catch-up도 발행)
 
 - 수집 실패는 Airflow에서 그대로 보이되, 예비 관측본으로 복구되면 파이프라인은 성공한다.
   따라서 이 원천의 외부 성공 조건은 "FINAL 수집 성공"이 아니라 "Bronze commit 완료"다.
