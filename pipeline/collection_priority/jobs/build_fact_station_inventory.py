@@ -75,7 +75,7 @@ from pyiceberg.schema import Schema
 from pyiceberg.types import BooleanType, DateType, IntegerType, NestedField, StringType, TimestamptzType
 
 import config
-from common.duckdb_io import query_arrow
+from common.duckdb_io import connect, query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import overwrite_all
 from common.s3_utils import ensure_bucket
@@ -198,7 +198,7 @@ def _merge_bike_last_action(
 ) -> pa.Table:
     """baseline(직전 상태)과 delta(신규 반영분)를 병합한다 - 카탈로그 없이 두
     PyArrow Table만으로 동작하는 순수 로직이라 단위 테스트가 가능하다."""
-    conn = con or duckdb.connect(":memory:")
+    conn = con or connect()
     conn.register("baseline", baseline_table)
     conn.register("delta", delta_table)
     return query_arrow(conn, _MERGE_BIKE_LAST_ACTION_SQL, [snapshot_date])
@@ -211,7 +211,7 @@ def _resolve_bike_station(
 ) -> pa.Table:
     """자전거별 최종 위치(effective_station_id, excluded)를 계산한다 - 두
     PyArrow Table만으로 동작하는 순수 로직이라 단위 테스트가 가능하다."""
-    conn = con or duckdb.connect(":memory:")
+    conn = con or connect()
     conn.register("bike_location", bike_location_table)
     conn.register("latest_action", latest_action_table)
     return query_arrow(conn, _RESOLVE_SQL)
@@ -225,7 +225,7 @@ def _aggregate_station_inventory(
 ) -> pa.Table:
     """대여소별 재고를 집계한다 - 두 PyArrow Table만으로 동작하는 순수 로직이라
     단위 테스트가 가능하다."""
-    conn = con or duckdb.connect(":memory:")
+    conn = con or connect()
     conn.register("resolved", resolved_table)
     conn.register("station_active", station_active_table)
     return query_arrow(conn, _AGGREGATE_SQL, [snapshot_date])
@@ -256,7 +256,7 @@ def _load_bike_last_action_baseline_snapshot(catalog) -> pa.Table:
 
 def _bike_last_action_baseline(gold_snapshot: pa.Table) -> pa.Table:
     """직전 상태 전체 (테이블이 비어있으면 빈 Table - cold start도 안전)."""
-    con = duckdb.connect(":memory:")
+    con = connect()
     con.register("t", gold_snapshot)
     return query_arrow(
         con,
@@ -277,7 +277,7 @@ def _bike_last_action_baseline_snapshot_date(gold_snapshot: pa.Table) -> date | 
     델타 시작일로 그대로 쓸 수 있다. 테이블이 비어있으면(cold start) None."""
     if len(gold_snapshot) == 0:
         return None
-    con = duckdb.connect(":memory:")
+    con = connect()
     con.register("t", gold_snapshot)
     return con.execute("SELECT MAX(snapshot_date) FROM t").fetchone()[0]
 
@@ -313,7 +313,7 @@ def build_bike_last_action(catalog, snapshot_date: date) -> pa.Table:
     delta_end = snapshot_date - timedelta(days=1)
     bikeman_action_delta = _read_bikeman_action_delta(catalog, delta_start, delta_end)
 
-    con = duckdb.connect(":memory:")
+    con = connect()
     con.register("bikeman_action", bikeman_action_delta)
     delta = query_arrow(con, _BIKE_LAST_ACTION_DELTA_SQL)
 

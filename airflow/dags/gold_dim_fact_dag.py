@@ -109,7 +109,7 @@ from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOpe
 from airflow.providers.standard.sensors.python import PythonSensor
 from airflow.sdk import dag
 
-from dag_common import notify_slack_on_failure
+from dag_common import GOLD_POOL, notify_slack_on_failure
 
 PYLIB_DIR = "/opt/airflow/pylib"
 INGESTION_DIR = "/opt/airflow/ingestion"
@@ -223,6 +223,9 @@ def gold_dim_fact():
         poke_interval=POKE_INTERVAL,
         timeout=SENSOR_TIMEOUT,
     )
+    # pool=GOLD_POOL: 이 태스크 4개는 전부 같은 upstream에 물려 병렬로 실행되도록
+    # 설계돼 있다 - 가드 없이는 DuckDB 무거운 쿼리 여러 개가 워커에서 동시에
+    # 무제약으로 돌아 OOM으로 이어진다 (#144/#285).
     build_dim_bike = BashOperator(
         task_id="build_dim_bike",
         bash_command=_collection_priority_bash(
@@ -230,6 +233,7 @@ def gold_dim_fact():
             "MAX_DAYS_PER_RUN='{{ params.max_days_per_run }}' ",
         ),
         execution_timeout=timedelta(minutes=30),
+        pool=GOLD_POOL,
     )
     build_bike_location = BashOperator(
         task_id="build_bike_location",
@@ -239,16 +243,19 @@ def gold_dim_fact():
         },
         append_env=True,
         execution_timeout=timedelta(minutes=20),
+        pool=GOLD_POOL,
     )
     build_station_active = BashOperator(
         task_id="build_station_active",
         bash_command=_collection_priority_bash("build_station_active", "SNAPSHOT_DATE='{{ ds }}' "),
         execution_timeout=timedelta(minutes=20),
+        pool=GOLD_POOL,
     )
     build_fact_station_inventory = BashOperator(
         task_id="build_fact_station_inventory",
         bash_command=_collection_priority_bash("build_fact_station_inventory", "SNAPSHOT_DATE='{{ ds }}' "),
         execution_timeout=timedelta(minutes=20),
+        pool=GOLD_POOL,
     )
 
     trigger_risk_decision = TriggerDagRunOperator(

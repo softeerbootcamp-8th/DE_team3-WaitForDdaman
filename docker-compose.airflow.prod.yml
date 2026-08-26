@@ -1,0 +1,126 @@
+# Airflow 파이프라인 프로덕션 구성 (Airflow 전용 EC2)
+x-airflow-common:
+  &airflow-common
+  image: ${ECR_REGISTRY}/waitforddaman-airflow:${IMAGE_TAG:-latest}
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}@${AIRFLOW_DB_HOST}:${AIRFLOW_DB_PORT:-5432}/${AIRFLOW_DB_NAME}
+    PGPASSWORD: ${AIRFLOW_DB_PASSWORD}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+    AIRFLOW__WEBSERVER__BASE_URL: ${AIRFLOW_BASE_URL:-http://localhost:8080}
+    AIRFLOW__API__BASE_URL: ${AIRFLOW_BASE_URL:-http://localhost:8080}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow_jwt_secret}
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-ap-northeast-2}
+    APP_ENV: aws
+    SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+    ICEBERG_CATALOG_TYPE: ${ICEBERG_CATALOG_TYPE:-jdbc}
+    ICEBERG_CATALOG_NAME: ${ICEBERG_CATALOG_NAME:-bike_catalog}
+    ICEBERG_WAREHOUSE_PATH: ${ICEBERG_WAREHOUSE_PATH}
+    ICEBERG_JDBC_CATALOG_URI: ${ICEBERG_JDBC_CATALOG_URI}
+    ICEBERG_JDBC_CATALOG_USER: ${ICEBERG_JDBC_CATALOG_USER}
+    ICEBERG_JDBC_CATALOG_PASSWORD: ${ICEBERG_JDBC_CATALOG_PASSWORD}
+    ICEBERG_CATALOG_SECRET_ARN: ${ICEBERG_CATALOG_SECRET_ARN:-}
+    RAW_BUCKET: ${RAW_BUCKET}
+    WAREHOUSE_BUCKET: ${WAREHOUSE_BUCKET}
+    EMR_SPARK_APPLICATION_ID: ${EMR_SPARK_APPLICATION_ID:-}
+    EMR_SPARK_EXECUTION_ROLE_ARN: ${EMR_SPARK_EXECUTION_ROLE_ARN:-}
+    EMR_SPARK_POLL_INTERVAL_SECONDS: ${EMR_SPARK_POLL_INTERVAL_SECONDS:-30}
+    EMR_SPARK_POLL_MAX_SECONDS: ${EMR_SPARK_POLL_MAX_SECONDS:-21600}
+    EMR_RISK_MODEL_CONFIG: ${EMR_RISK_MODEL_CONFIG:-/opt/app/config/risk_model.yaml}
+    SPARK_LOCAL_EXECUTION: 'false'
+    AIRFLOW__DAG_PROCESSOR__PARSING_PROCESSES: '1'
+    AIRFLOW__CORE__PARALLELISM: '4'
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: '2'
+    RISK_MODEL_CONFIG: ${RISK_MODEL_CONFIG:-/opt/airflow/pylib/config/risk_model.yaml}
+    PYTHONPATH: /opt/airflow/pylib
+  volumes:
+    - airflow-logs-volume:/opt/airflow/logs
+    - ./.env:/opt/airflow/.env:ro
+    - ./.env:/opt/airflow/ingestion/.env:ro
+  user: "${AIRFLOW_UID:-50000}:0"
+
+services:
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: airflow-apiserver
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: airflow-dag-processor
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: airflow-triggerer
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    command:
+      - bash
+      - -c
+      - airflow version && airflow pools set bronze_ingest 1 'Bronze 적재 동시 실행 제한 (t4g.large 메모리 제약)' && airflow pools set silver_process 1 'Silver 변환 동시 실행 제한 (t4g.large 메모리 제약)'
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+
+volumes:
+  airflow-logs-volume:

@@ -6,6 +6,8 @@ Spark DataFrame / DuckDB pa.Table을 register()로 이름 붙이고 sql()로 그
 from __future__ import annotations
 
 import duckdb
+
+from common.duckdb_io import connect
 import pandas as pd
 import pytest
 
@@ -30,7 +32,7 @@ def spark():
 
 
 def test_duckdb_register_then_sql_roundtrip():
-    engine = SqlEngine.for_duckdb(duckdb.connect(":memory:"))
+    engine = SqlEngine.for_duckdb(connect())
     engine.register("t", pd.DataFrame({"bike_id": ["B1", "B2"], "trips": [3, 5]}))
 
     result = engine.sql("SELECT bike_id, trips FROM t WHERE trips > 3")
@@ -49,7 +51,7 @@ def test_spark_register_then_sql_roundtrip(spark):
 
 
 def test_duckdb_dialect_is_duckdb():
-    engine = SqlEngine.for_duckdb(duckdb.connect(":memory:"))
+    engine = SqlEngine.for_duckdb(connect())
     assert engine.dialect == "duckdb"
 
 
@@ -60,7 +62,7 @@ def test_spark_dialect_is_spark(spark):
 
 def test_sql_result_can_be_registered_for_next_step():
     """체이닝: sql() 결과를 다시 register()해서 다음 SQL에서 참조 가능해야 한다."""
-    engine = SqlEngine.for_duckdb(duckdb.connect(":memory:"))
+    engine = SqlEngine.for_duckdb(connect())
     engine.register("t", pd.DataFrame({"bike_id": ["B1", "B2"], "trips": [3, 5]}))
 
     step1 = engine.sql("SELECT bike_id, trips * 2 AS trips2 FROM t")

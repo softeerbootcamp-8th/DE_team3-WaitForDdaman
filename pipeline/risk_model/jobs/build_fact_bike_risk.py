@@ -36,7 +36,7 @@ from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import DateType, DoubleType, NestedField, StringType
 
 import config
-from common.duckdb_io import query_arrow
+from common.duckdb_io import connect, query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import overwrite_partition
 from common.s3_utils import ensure_bucket
@@ -107,7 +107,7 @@ _LATEST_COLLECTED_SQL = """
 def _latest_collected_bike_ids(actions_table: pa.Table) -> pa.Table:
     """bike_id별 가장 최근 이벤트가 'COLLECT'인 자전거만 남긴다 - 수거 뒤에 배치
     이벤트가 이미 찍혔으면(최신이 DEPLOY 등) 대상에서 빠진다."""
-    conn = duckdb.connect(":memory:")
+    conn = connect()
     conn.register("actions", actions_table)
     return query_arrow(conn, _LATEST_COLLECTED_SQL)
 
@@ -121,7 +121,7 @@ _EXCLUDE_COLLECTED_SQL = """
 
 
 def _exclude_collected_bikes(features_table: pa.Table, collected_table: pa.Table) -> pa.Table:
-    conn = duckdb.connect(":memory:")
+    conn = connect()
     conn.register("features", features_table)
     conn.register("collected", collected_table)
     return query_arrow(conn, _EXCLUDE_COLLECTED_SQL)
@@ -157,7 +157,7 @@ def _score_features(features_table: pa.Table, target_date: date) -> pa.Table:
     feat_pd = features_table.to_pandas().set_index("bike_id")
     scored_pd = score(feat_pd, art).reset_index()
 
-    conn = duckdb.connect(":memory:")
+    conn = connect()
     conn.register("scored", scored_pd)
     return query_arrow(
         conn,

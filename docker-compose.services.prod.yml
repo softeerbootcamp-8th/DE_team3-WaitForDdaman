@@ -1,0 +1,20 @@
+# Services(Web & API) 프로덕션 구성
+services:
+  api:
+    container_name: service-api
+    image: ${ECR_REGISTRY}/waitforddaman-api:${IMAGE_TAG:-latest}
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${DOMAIN_DB_USER}@${DOMAIN_DB_HOST}:${DOMAIN_DB_PORT:-5432}/${DOMAIN_DB_NAME}?options=-csearch_path%3Dserving,public
+      PGPASSWORD: ${DOMAIN_DB_PASSWORD}
+    expose:
+      - "8000"
+    restart: always
+
+  web:
+    container_name: service-web
+    image: ${ECR_REGISTRY}/waitforddaman-web:${IMAGE_TAG:-latest}
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+    restart: always

@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Optional, Union
 
 import duckdb
+
+from common.duckdb_io import connect
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -87,7 +89,7 @@ def run_checks(
     metric_sql은 반드시 단일 숫자(비율 등)를 돌려주는 SELECT여야 하고, 대상 테이블은
     `{table}` 자리표시자로 참조한다.
     """
-    conn = con or duckdb.connect(":memory:")
+    conn = con or connect()
     conn.register("check_target", data)
 
     total_rows = conn.execute("SELECT COUNT(*) FROM check_target").fetchone()[0]

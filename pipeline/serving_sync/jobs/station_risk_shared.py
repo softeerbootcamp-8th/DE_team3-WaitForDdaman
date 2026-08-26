@@ -10,7 +10,7 @@ import duckdb
 import pyarrow as pa
 from pyiceberg.expressions import EqualTo
 
-from common.duckdb_io import query_arrow
+from common.duckdb_io import connect, query_arrow
 
 FACT_BIKE_RISK_TABLE = "gold.fact_bike_risk"
 BIKE_LOCATION_TABLE = "gold.bike_location"
@@ -54,7 +54,7 @@ def station_risk_agg(
     이 함수의 결과에 아예 나타나지 않는다(호출부에서 기본값 100.0으로 채움).
     카탈로그 없이 두 PyArrow Table만으로 동작하는 순수 로직이라 단위 테스트가 가능하다.
     """
-    conn = con or duckdb.connect(":memory:")
+    conn = con or connect()
     conn.register("risk", risk_table)
     conn.register("location", location_table)
     return query_arrow(conn, _STATION_RISK_AGG_SQL)

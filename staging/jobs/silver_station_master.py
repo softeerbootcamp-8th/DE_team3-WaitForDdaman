@@ -44,7 +44,7 @@ from pyiceberg.schema import Schema
 from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import DateType, DoubleType, IntegerType, NestedField, StringType
 
-from common.duckdb_io import query_arrow
+from common.duckdb_io import connect, query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import overwrite_partition
 from common.sql_assert import QualityCheck
@@ -149,7 +149,7 @@ def normalize(bronze_table: pa.Table, con: duckdb.DuckDBPyConnection | None = No
     자치구가 매핑에 없으면 UnknownDistrictError를 던진다. 조용히 null로 두면
     프론트의 지역 필터에서 그 대여소가 사라지는데 아무도 알아차리지 못한다.
     """
-    conn = con or duckdb.connect(":memory:")
+    conn = con or connect()
     conn.register("bronze_station_master", bronze_table)
     result = query_arrow(conn, _normalize_sql("bronze_station_master"))
 

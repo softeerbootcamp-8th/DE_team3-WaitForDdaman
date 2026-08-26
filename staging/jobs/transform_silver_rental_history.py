@@ -51,7 +51,7 @@ from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import DoubleType, NestedField, StringType, TimestamptzType
 
 import config
-from common.duckdb_io import query_arrow
+from common.duckdb_io import connect, query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import replace_range
 from common.s3_utils import ensure_bucket, get_json, put_json  # 워커/로컬 실행 시 대상 버킷이 없으면 만들어주는 안전장치
@@ -258,7 +258,7 @@ SILVER_PROMOTION_PREFIX = "_meta/promotion/silver_rental_history/"
 
 
 def _connect() -> duckdb.DuckDBPyConnection:
-    con = duckdb.connect(":memory:")
+    con = connect()
     # TIMESTAMP -> TIMESTAMPTZ 캐스팅이 세션 타임존을 따르므로 UTC로 못박는다.
     # 컨테이너 TZ에 결과가 흔들리면 Spark 잡과 값이 어긋난다.
     con.execute("SET TimeZone='UTC'")
