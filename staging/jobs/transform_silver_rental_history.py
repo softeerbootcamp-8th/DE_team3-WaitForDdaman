@@ -19,8 +19,8 @@ PyDeequ를 걷어내면서 콜백 서버 종료 처리(stop_spark_session_with_d
      같은 그룹에 들어가는 두 행은 rent_dt가 완전히 동일하다 - 날짜가 다를 수 없다.
   2. 청크를 자르는 축인 `rent_date_partition`은 rent_dt에서 결정론적으로 파생된
      값이다 (ingestion/jobs/initial_load_rental_history.py:_derive_date_partition -
-     rent_dt에서 숫자만 뽑아 YYYY-MM-DD로 조립, daily_batch_rental_history.py는
-     아예 그 날짜 상수를 그대로 넣는다). 즉 rent_dt가 같으면
+     rent_dt에서 숫자만 뽑아 YYYY-MM-DD로 조립, promote_rental_history_raw.py는
+     선택된 Raw의 대상 날짜를 그대로 넣는다). 즉 rent_dt가 같으면
      rent_date_partition도 반드시 같다.
 
 두 조건이 겹치므로 한 중복 그룹의 모든 행은 항상 같은 rent_date_partition 안에

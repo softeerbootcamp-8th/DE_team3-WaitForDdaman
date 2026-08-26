@@ -321,7 +321,6 @@ INPUT_DIR=./data/failure_report python -m jobs.initial_load_failure_report
 일 배치:
 
 ```bash
-python -m jobs.daily_batch_rental_history
 python -m jobs.daily_batch_failure_report
 python -m jobs.daily_batch_station_master
 python -m jobs.daily_batch_station_active
