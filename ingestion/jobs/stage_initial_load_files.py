@@ -44,7 +44,12 @@ def run(dataset: str, input_files: list[str]) -> list[str]:
         # 쓰면, 이 URI가 나중에 EMR Serverless로 전달될 때 문제가 된다(jobs/list_input_files.py
         # 문서 참고) - 스테이징 업로드 시점에 ASCII로 안전한 이름으로 바꿔서 이 문제 자체를
         # 없앤다. legacy_key는 그 안전화 이전(#218 이전)에 실제로 쓰던 key 그대로다.
+        # Hadoop/Spark는 이름이 '_' 또는 '.'로 시작하는 객체를 숨김 파일로
+        # 취급해 spark.read.csv() 입력에서 제외할 수 있다. 한글 파일명을
+        # underscore로 치환한 결과가 전부 '_'로 시작한 실제 장애가 있었으므로,
+        # 항상 ASCII 접두사를 붙여 일반 입력 파일로 만든다.
         safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", path.name)
+        safe_name = f"input_{safe_name.lstrip('._')}"
         key = f"raw/{dataset}/_initial_load_staging/{safe_name}"
         legacy_key = f"raw/{dataset}/_initial_load_staging/{path.name}"
         reuse_or_upload_staging_file(path, config.SETTINGS.raw_bucket, key, legacy_key)
