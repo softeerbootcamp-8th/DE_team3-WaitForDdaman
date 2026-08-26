@@ -184,7 +184,7 @@ Airflow UI에서 `Trigger DAG w/ config`를 사용할 경우 예시:
 DAG ID:
 
 ```text
-bronze_historical_reconciliation
+bronze_catchup_all_sources
 ```
 
 매일 00:30에 `rental_history`와 `failure_report`의 Bronze 워터마크 다음 날짜부터

@@ -1,12 +1,12 @@
-"""Bronze 자동 Reconciliation DAG 구조 테스트 (#195)."""
+"""Bronze Catchup DAG 구조 테스트 (#195)."""
 
 import sys
 from pathlib import Path
 
 import pytest
 
-DAG_ID = "bronze_historical_reconciliation"
-DAG_FILE = "bronze_historical_reconciliation_dag.py"
+DAG_ID = "bronze_catchup_all_sources"
+DAG_FILE = "bronze_catchup_all_sources_dag.py"
 
 
 def _dag_folder() -> str:
