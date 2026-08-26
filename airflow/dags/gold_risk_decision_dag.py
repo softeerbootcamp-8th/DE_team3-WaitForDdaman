@@ -107,7 +107,7 @@ def _bash(job_module: str, extra_env: str = "") -> str:
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
-    tags=["gold", "trigger_only"],
+    tags=["gold", "trigger_only", "main"],
     params={
         "snapshot_date": "",  # 수동 재처리용. 미지정 시 dag_run.conf.snapshot_date 또는 ds 사용
     },

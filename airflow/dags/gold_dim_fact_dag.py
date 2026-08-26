@@ -184,7 +184,7 @@ def _collection_priority_bash(job_module: str, extra_env: str = "") -> str:
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
-    tags=["gold", "daily_batch"],
+    tags=["gold", "daily_batch", "main"],
     params={
         "max_days_per_run": "",  # build_dim_bike 백필용
     },

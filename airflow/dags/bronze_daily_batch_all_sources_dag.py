@@ -144,7 +144,7 @@ FETCH_STATION_ACTIVE_RAW_LAMBDA = "fetch_station_active_raw"
     max_active_runs=1,  # 두 run이 같은 파티션을 동시에 덮어쓰는 것 방지
     max_active_tasks=2,  # 로컬 LocalStack 동시 쓰기 부하 제한
     default_args=DEFAULT_ARGS,
-    tags=["bronze", "daily_batch"],
+    tags=["bronze", "daily_batch", "main"],
     params={
         "max_days_per_run": DEFAULT_MAX_DAYS_PER_RUN,
     },

@@ -44,7 +44,7 @@ def _bash(job_dir: str, job_module: str, extra_env: str = "") -> str:
     catchup=False,
     max_active_runs=1,  # 같은 파티션에 두 실행이 동시에 MERGE/덮어쓰기 시도하는 것 방지
     default_args=DEFAULT_ARGS,
-    tags=["silver", "asset_triggered"],
+    tags=["silver", "asset_triggered", "main"],
     params={
         "max_days_per_run": "",
     },

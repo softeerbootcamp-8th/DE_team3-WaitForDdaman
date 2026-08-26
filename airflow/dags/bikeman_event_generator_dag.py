@@ -65,7 +65,7 @@ def _lambda_payload() -> str:
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
-    tags=["serving", "trigger_only"],
+    tags=["serving", "trigger_only", "main"],
     doc_md=__doc__,
 )
 def bikeman_event_generator():

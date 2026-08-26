@@ -113,7 +113,7 @@ def _lambda_payload(**extra: str) -> str:
     catchup=False,
     max_active_runs=1,
     default_args=default_args,
-    tags=["serving", "trigger_only"],
+    tags=["serving", "trigger_only", "main"],
     doc_md=__doc__,
 )
 def gold_to_serving_sync():
