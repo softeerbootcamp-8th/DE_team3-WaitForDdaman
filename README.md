@@ -12,6 +12,17 @@
 
 자전거별 고장 위험도와 대여소별 재고 상태를 반영한 **수거 권장 목록**을 산출하고, 정비소의 일일 수용력을 반영한 **최종 수거 목록**을 제공한다.
 
+## 목차
+
+- [문제 정의](#문제-정의)
+- [결과](#결과)
+- [구성](#구성)
+- [우리의 고민정리 / 고려한 사항](#우리의-고민정리--고려한-사항)
+- [기술 스택](#기술-스택)
+- [더 알아보기](#더-알아보기)
+- [한계 및 향후 작업](#한계-및-향후-작업)
+- [팀원 소개](#팀원-소개)
+
 ## 문제 정의
 
 **누구의**
@@ -56,20 +67,21 @@
 
 ## 결과
 
-- 우리의 산출물
-    - 수거 권장 목록
+### 수거 반장님 화면
+![수거 반장님 화면](docs/images/recommended-list.png)
+- 짧은 설명
 
-      ![수거 권장 목록](docs/images/recommended-list.png)
+### 현장 작업자
+![현장 작업자 화면](docs/images/final-list.png)
+- 짧은 설명
 
-    - 수거 확정 목록
-
-      ![수거 확정 목록](docs/images/final-list.png)
-
+### 사이트
 - 사이트: http://ec2-15-165-230-137.ap-northeast-2.compute.amazonaws.com/
+- 짧은 설명
 
 ## 구성
 
-### 데이터 흐름도 / 메달리온 아키텍처
+### 메달리온 아키텍처
 
 ![데이터 흐름도](docs/images/medalion_architechture.png)
 
@@ -137,12 +149,17 @@
 | Data Interface | ![PyArrow](https://img.shields.io/badge/PyArrow-%23000000.svg?style=for-the-badge&logo=apachearrow&logoColor=white) | DuckDB와 Iceberg 사이의 컬럼형 데이터 전달 |
 | Data Lakehouse | ![Amazon S3](https://img.shields.io/badge/S3-%23569A31.svg?style=for-the-badge&logo=amazons3&logoColor=white) Apache Iceberg PyIceberg | 파티셔닝, 원자적 커밋, Snapshot, 재처리와 변경 이력 관리 |
 | ML | ![scikit-learn](https://img.shields.io/badge/scikit--learn-%23F7931E.svg?style=for-the-badge&logo=scikitlearn&logoColor=white) LightGBM | 규칙·선형·트리 모델 비교와 Champion 관리 |
-| Serving | ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-%234169E1.svg?style=for-the-badge&logo=postgresql&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-%23009688.svg?style=for-the-badge&logo=fastapi&logoColor=white) | 일별 Mart 적재와 읽기 전용 API 제공 |
-| Frontend | ![React](https://img.shields.io/badge/React-%2361DAFB.svg?style=for-the-badge&logo=react&logoColor=black) ![TypeScript](https://img.shields.io/badge/TypeScript-%233178C6.svg?style=for-the-badge&logo=typescript&logoColor=white) | 지도, 위험 자전거 목록과 수거 확정 화면 제공 |
+| Serving DB | ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-%234169E1.svg?style=for-the-badge&logo=postgresql&logoColor=white) | 일별 Mart 적재와 읽기 전용 API 제공 |
 | Infrastructure | ![AWS Lambda](https://img.shields.io/badge/Lambda-%23FF9900.svg?style=for-the-badge&logo=awslambda&logoColor=white) ![Amazon EC2](https://img.shields.io/badge/EC2-%23FF9900.svg?style=for-the-badge&logo=amazonec2&logoColor=white) ![Amazon RDS](https://img.shields.io/badge/RDS-%23527FFF.svg?style=for-the-badge&logo=amazonrds&logoColor=white) ![Amazon ECR](https://img.shields.io/badge/ECR-%23FF9900.svg?style=for-the-badge&logo=amazonecr&logoColor=white) | Raw 수집, 실행 환경, 서빙 DB와 이미지 배포 |
 | Monitoring | ![CloudWatch](https://img.shields.io/badge/CloudWatch-%23FF9900.svg?style=for-the-badge&logo=cloudwatch&logoColor=white) ![Amazon SNS](https://img.shields.io/badge/SNS-%23FF9900.svg?style=for-the-badge&logo=amazonsns&logoColor=white) ![Slack](https://img.shields.io/badge/Slack-%234A154B.svg?style=for-the-badge&logo=slack&logoColor=white) | Lambda·DLQ 감지와 Airflow 실패 알림 |
-| IaC·CI/CD | ![Terraform](https://img.shields.io/badge/Terraform-%237B42BC.svg?style=for-the-badge&logo=terraform&logoColor=white) ![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-%232088FF.svg?style=for-the-badge&logo=githubactions&logoColor=white) ![Docker](https://img.shields.io/badge/Docker-%232496ED.svg?style=for-the-badge&logo=docker&logoColor=white) | 인프라 재현과 이미지 기반 배포 자동화 |
-| Local Development | ![Docker Compose](https://img.shields.io/badge/Docker%20Compose-%232496ED.svg?style=for-the-badge&logo=docker&logoColor=white) LocalStack | AWS 자원을 로컬에서 재현하고 E2E 검증 |
+
+## 기술 문서
+
+| 구분 | 내용 |
+| --- | --- |
+| [고민한 사항](https://github.com/softeerbootcamp-8th/DE_team3-WaitForDdaman/wiki/고민한-사항) | 설계 단계에서 검토한 대안과 선택 이유 |
+| [성능 튜닝](https://github.com/softeerbootcamp-8th/DE_team3-WaitForDdaman/wiki/성능-튜닝) | 처리 성능 개선 실험과 Before/After 측정 결과 |
+| [트러블슈팅](https://github.com/softeerbootcamp-8th/DE_team3-WaitForDdaman/wiki/트러블슈팅) | 운영 중 발생한 장애와 원인 분석, 해결 과정 |
 
 ## 한계 및 향후 작업
 
