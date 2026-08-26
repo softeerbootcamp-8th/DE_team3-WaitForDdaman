@@ -71,11 +71,13 @@ def test_backfill_range_tasks_exist(dag):
     task_ids = set(dag.task_ids)
     assert "compute_rental_history_backfill_ranges" in task_ids
     assert "parse_rental_history_backfill_ranges" in task_ids
+    assert "build_rental_history_backfill_commands" in task_ids
     assert "load_silver_rental_history_chunk" in task_ids
-    assert "max_rental_history_backfill_range_end" in task_ids
     assert "finalize_rental_history_backfill_watermark" in task_ids
     # 기존 bash for-loop 단일 태스크는 더 이상 존재하지 않는다
     assert "load_silver_rental_history" not in task_ids
+    # 연속 완료 구간을 finalizer가 marker로 직접 계산하므로 max_end 태스크는 사라졌다
+    assert "max_rental_history_backfill_range_end" not in task_ids
 
 
 def test_load_silver_rental_history_chunk_is_mapped(dag):
@@ -83,12 +85,86 @@ def test_load_silver_rental_history_chunk_is_mapped(dag):
     assert chunk_task.is_mapped
 
 
-def test_finalize_watermark_depends_on_chunk_via_max_end(dag):
+def test_chunk_task_expands_over_pending_ranges_only(dag):
+    """청크 커맨드는 계획의 pending_ranges만 펼친다 - 완료 청크는 Task Instance를 안 만든다."""
+    build = dag.get_task("build_rental_history_backfill_commands")
+    assert "parse_rental_history_backfill_ranges" in build.upstream_task_ids
+    assert build.task_id in dag.get_task("load_silver_rental_history_chunk").upstream_task_ids
+
+    commands = build.python_callable(
+        {
+            "bronze_watermark_at_start": "2026-06-30",
+            "contract_version": 1,
+            "all_ranges": [
+                {"start": "2015-01-01", "end": "2015-01-31"},
+                {"start": "2015-02-01", "end": "2015-02-28"},
+            ],
+            "pending_ranges": [{"start": "2015-02-01", "end": "2015-02-28"}],
+        }
+    )
+    assert len(commands) == 1
+    assert "BACKFILL_RANGE_START='2015-02-01'" in commands[0]
+    assert "BACKFILL_RANGE_END='2015-02-28'" in commands[0]
+    assert "BRONZE_WATERMARK_AT_START='2026-06-30'" in commands[0]
+    assert "2015-01-01" not in commands[0]
+
+
+def test_chunk_task_keeps_silver_pool_and_serial_mapping(dag):
+    """#232의 직렬 제약(pool + max_active_tis_per_dag=1)은 이번 변경에서도 유지한다."""
+    chunk_task = dag.get_task("load_silver_rental_history_chunk")
+    assert chunk_task.partial_kwargs["pool"] == "silver_process"
+    assert chunk_task.partial_kwargs["max_active_tis_per_dag"] == 1
+
+
+def test_finalize_watermark_runs_all_done_after_chunks(dag):
+    """청크가 실패해도 finalizer가 돌아야 연속 완료 구간까지 워터마크가 전진한다."""
     finalize = dag.get_task("finalize_rental_history_backfill_watermark")
-    max_end = dag.get_task("max_rental_history_backfill_range_end")
     chunk = dag.get_task("load_silver_rental_history_chunk")
-    assert max_end.task_id in finalize.upstream_task_ids
-    assert chunk.task_id in max_end.upstream_task_ids
+    assert chunk.task_id in finalize.upstream_task_ids
+    assert finalize.trigger_rule.value == "all_done"
+    assert "advance_silver_rental_history_watermark" in finalize.bash_command
+    assert "SILVER_BACKFILL_PLAN=" in finalize.bash_command
+
+
+def test_finalizer_reads_planner_raw_xcom_not_the_parsed_dict(dag):
+    """finalizer는 planner BashOperator의 XCom 원문(한 줄 JSON)을 받아야 한다.
+
+    parse 태스크의 XCom(dict)을 쓰면 Jinja가 Python repr로 렌더링해서 두 가지가 동시에
+    깨진다 - 작은따옴표라 JSON 파싱이 실패하고, bash의 '...' 인용도 그 자리에서 닫힌다.
+    주석으로만 남아 있으면 나중에 "parse 태스크를 쓰는 게 자연스럽다"며 바뀌기 쉬워서
+    구조로 고정한다.
+    """
+    finalize = dag.get_task("finalize_rental_history_backfill_watermark")
+
+    assert 'task_ids="compute_rental_history_backfill_ranges"' in finalize.bash_command
+    assert "parse_rental_history_backfill_ranges" not in finalize.bash_command
+    # 계획 JSON은 셸에서 작은따옴표로 감싸 넘긴다 (JSON 자체에는 작은따옴표가 없다).
+    assert "SILVER_BACKFILL_PLAN='{{" in finalize.bash_command
+
+
+def test_finalizer_plan_argument_survives_shell_quoting(dag):
+    """렌더된 계획 JSON이 셸을 거쳐도 그대로 JSON으로 되읽히는지 확인한다."""
+    import json
+    import shlex
+
+    finalize = dag.get_task("finalize_rental_history_backfill_watermark")
+    plan = {
+        "silver_watermark_before": "2014-12-31",
+        "bronze_watermark_at_start": "2026-06-30",
+        "contract_version": 1,
+        "all_ranges": [{"start": "2015-01-01", "end": "2015-01-31"}],
+        "pending_ranges": [{"start": "2015-01-01", "end": "2015-01-31"}],
+    }
+    rendered = finalize.bash_command.replace(
+        '{{ ti.xcom_pull(task_ids="compute_rental_history_backfill_ranges") }}',
+        json.dumps(plan),
+    )
+
+    # shlex가 셸과 같은 규칙으로 쪼갠다 - 인용이 깨졌으면 여기서 토큰이 어긋난다.
+    assignment = next(
+        token for token in shlex.split(rendered) if token.startswith("SILVER_BACKFILL_PLAN=")
+    )
+    assert json.loads(assignment.split("=", 1)[1]) == plan
 
 
 def test_local_env_keeps_per_file_task(dag):

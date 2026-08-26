@@ -72,8 +72,10 @@ def test_interpret_parses_json_response():
 
     fake_client = MagicMock()
     fake_client.chat.completions.create.return_value = fake_response
+    fake_openai = MagicMock()
+    fake_openai.OpenAI.return_value = fake_client
 
-    with patch("openai.OpenAI", return_value=fake_client):
+    with patch.dict("sys.modules", {"openai": fake_openai}):
         result = interpret(
             source_name="rental_history",
             execution_date="2026-08-24",

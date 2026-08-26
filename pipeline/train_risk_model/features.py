@@ -216,8 +216,8 @@ def build_usage_features(engine: SqlEngine, daily, anchors_df, window: int):
     return engine.sql(sql)
 
 
-def build_fault_features(engine: SqlEngine, fault, anchors_df, cfg):
-    """as_of 이전 신고 이력만 사용 — 라벨 누수 없음."""
+def build_fault_features(engine: SqlEngine, fault, anchors_df, cfg, include_today: bool = False):
+    """as_of 이전(또는 include_today=True 시 당일 포함) 신고 이력 사용."""
     engine.register("fault", fault)
     engine.register("anchors", anchors_df)
     fail_window = int(cfg.get_path("run.fail_window_days", 150))
@@ -229,11 +229,12 @@ def build_fault_features(engine: SqlEngine, fault, anchors_df, cfg):
         lookback_cond = f"AND f.reg_date >= {lookback_cut}"
     fail_cut = date_sub_days(engine.dialect, "as_of", fail_window)
 
+    cmp_op = "<=" if include_today else "<"
     sql = f"""
         WITH joined AS (
             SELECT a.as_of AS as_of, f.bike_id AS bike_id, f.reg_date AS reg_date
             FROM fault f JOIN anchors a
-              ON f.reg_date < a.as_of {lookback_cond}
+              ON f.reg_date {cmp_op} a.as_of {lookback_cond}
         )
         SELECT as_of, bike_id,
                CAST(SUM(CASE WHEN reg_date >= {fail_cut} THEN 1 ELSE 0 END) AS BIGINT) AS fail_150d,
@@ -311,6 +312,7 @@ def build_samples(
     rent=None,
     fault=None,
     with_labels: bool = True,
+    include_today_fault: bool = False,
 ):
     """앵커 목록에 대한 (피처 + 라벨) 샘플 테이블.
 
@@ -336,7 +338,7 @@ def build_samples(
     daily = build_daily_agg(engine, rent, cfg)
 
     usage = build_usage_features(engine, daily, anchors_df, window)
-    faults = build_fault_features(engine, fault, anchors_df, cfg)
+    faults = build_fault_features(engine, fault, anchors_df, cfg, include_today=include_today_fault)
     exc = build_excluded(engine, fault, anchors_df, excl_days)
     engine.register("usage", usage)
     engine.register("faults", faults)

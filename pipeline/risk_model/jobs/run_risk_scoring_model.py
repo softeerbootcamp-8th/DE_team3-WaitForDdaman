@@ -11,6 +11,7 @@ models.primary 타입만 승격되도록 학습 쪽에서 보장하므로(risk_m
 """
 import io
 import logging
+import os
 
 import joblib
 import pandas as pd
@@ -23,13 +24,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 
-# 임시값 - #132 재조정. 0812_risk_model_code_optimize.ipynb에서 lgbm3(num_leaves=31,
-# min_child_samples=50, reg_lambda=1, is_unbalance=True) 기준 held-out(2026-04-15~06-16,
-# 187만 건) 분포로 다시 잡음: Warning 2.45%, Critical 0.77%. risk_score가 raw 확률이라
-# 재학습마다(특히 양성비율이 바뀌면) 분포가 드리프트할 수 있어 고정 컷오프는 근본 해법이
-# 아님 - 컷오프를 하드코딩하는 대신 그때그때의 분포에 맞춰 재계산하는 방식으로 바꿀지 검토 필요.
-RISK_GRADE_BINS = [-1, 66, 70, 101]
-RISK_GRADE_LABELS = ["Normal", "Warning", "Critical"]
+# 상위 백분위(%) 기준 컷오프 기본값
+# 고정 점수 컷오프는 모델 재학습이나 데이터 분포 변화 시 특정 등급이 미발생할 수 있어
+# 상위 %를 기준으로 동적 컷오프를 계산한다: 상위 1% Critical, 상위 3% Warning, 하위 97% Normal.
+DEFAULT_WARNING_PERCENTILE = 97.0   # 상위 3% (Warning)
+DEFAULT_CRITICAL_PERCENTILE = 99.0  # 상위 1% (Critical)
 
 
 def load_model(cfg=None) -> dict:
@@ -47,15 +46,53 @@ def load_model(cfg=None) -> dict:
     return art
 
 
-def score(feat: pd.DataFrame, art: dict) -> pd.DataFrame:
+def score(
+    feat: pd.DataFrame,
+    art: dict,
+    warning_percentile: float | None = None,
+    critical_percentile: float | None = None,
+) -> pd.DataFrame:
     """feat: bike_id를 index로 갖는 feature DataFrame (art['features'] 컬럼 포함)."""
     p = _train_score(art, feat)
 
     out = pd.DataFrame(index=feat.index)
     out["risk_score"] = (p * 100).round(3)
-    out["risk_grade"] = pd.cut(
-        out["risk_score"], bins=RISK_GRADE_BINS, labels=RISK_GRADE_LABELS
-    )
+
+    if len(out) == 0:
+        out["risk_grade"] = pd.Series(dtype="object")
+    else:
+        warn_pct = (
+            warning_percentile
+            if warning_percentile is not None
+            else float(os.getenv("WARNING_RISK_PERCENTILE", str(DEFAULT_WARNING_PERCENTILE)))
+        )
+        crit_pct = (
+            critical_percentile
+            if critical_percentile is not None
+            else float(os.getenv("CRITICAL_RISK_PERCENTILE", str(DEFAULT_CRITICAL_PERCENTILE)))
+        )
+
+        warn_cut = out["risk_score"].quantile(warn_pct / 100.0)
+        crit_cut = out["risk_score"].quantile(crit_pct / 100.0)
+
+        logger.info(
+            "위험도 백분위 컷오프 적용: Warning(>=%.1f%%, 점수>=%.3f), Critical(>=%.1f%%, 점수>=%.3f)",
+            100.0 - warn_pct,
+            warn_cut,
+            100.0 - crit_pct,
+            crit_cut,
+        )
+
+        def _to_grade(s: float) -> str:
+            if s >= crit_cut:
+                return "Critical"
+            elif s >= warn_cut:
+                return "Warning"
+            else:
+                return "Normal"
+
+        out["risk_grade"] = out["risk_score"].apply(_to_grade)
+
     out["model_version"] = art.get("model_version", "unknown")
     return out
 

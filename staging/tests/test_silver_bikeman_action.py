@@ -2,6 +2,7 @@
 from datetime import date, datetime, timezone
 
 import pyarrow as pa
+from pyiceberg.exceptions import NoSuchTableError
 
 from jobs.silver_bikeman_action import (
     BACKUP_TABLE,
@@ -11,12 +12,11 @@ from jobs.silver_bikeman_action import (
     SILVER_PARTITION_SPEC,
     SILVER_SCHEMA,
     SILVER_TABLE,
-    _processing_window,
     _ensure_silver_table,
+    _processing_window,
     transform,
     validate,
 )
-from pyiceberg.exceptions import NoSuchTableError
 
 
 def _bronze_table(*rows: dict) -> pa.Table:

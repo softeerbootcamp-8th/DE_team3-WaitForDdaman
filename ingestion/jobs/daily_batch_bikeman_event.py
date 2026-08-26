@@ -28,6 +28,7 @@ from typing import Any, Dict, List
 import pyarrow as pa
 
 import config
+from common.cutoff_utils import parse_collection_cutoff
 from common.db_client import BikemanDbError, fetch_events_by_date
 from common.iceberg_io import append, overwrite_partition
 from common.s3_utils import ensure_bucket, put_json
@@ -146,9 +147,12 @@ def run() -> None:
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
+    cutoff = parse_collection_cutoff(os.getenv("COLLECTION_CUTOFF_AT"))
+    as_of_date = cutoff.date()
+
     last_processed = read_watermark(watermark_key=WATERMARK_KEY)
     start_date = max(SERVICE_START_DATE, last_processed - timedelta(days=LOOKBACK_DAYS - 1))
-    end_date = date.today() - timedelta(days=1)
+    end_date = as_of_date - timedelta(days=1)
 
     max_days = os.getenv("MAX_DAYS_PER_RUN")
     if max_days:

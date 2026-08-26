@@ -163,7 +163,21 @@ _CAST_OUTPUT_SQL = """
 """
 
 
-def _build_features(catalog, con, cfg, target_date: date) -> pa.Table:
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if not normalized:
+        return default
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise ValueError(f"{name} must be 'true' or 'false': {value!r}")
+
+
+def _build_features(catalog, con, cfg, target_date: date, t0_enabled: bool = False) -> pa.Table:
     engine = SqlEngine.for_duckdb(con)
     window_days = int(cfg.get_path("run.window_days", 14))
 
@@ -177,7 +191,15 @@ def _build_features(catalog, con, cfg, target_date: date) -> pa.Table:
         target_date, excluded_count, len(suspended),
     )
 
-    df = build_samples(engine, cfg, [target_date], anchor_type="serve", rent=filtered_rent, with_labels=False)
+    df = build_samples(
+        engine,
+        cfg,
+        [target_date],
+        anchor_type="serve",
+        rent=filtered_rent,
+        with_labels=False,
+        include_today_fault=t0_enabled,
+    )
     # DuckDB의 COUNT/SUM류 집계는 BIGINT(64비트)를 내는데, gold.bike_features_daily
     # 스키마(기존 Spark DDL과 동일하게 유지)는 INT(32비트)라 캐스트 없인 pyiceberg
     # 쓰기가 스키마 불일치로 거부된다 - 실측(parity 검증)으로 확인함.
@@ -185,10 +207,10 @@ def _build_features(catalog, con, cfg, target_date: date) -> pa.Table:
     return query_arrow(con, _CAST_OUTPUT_SQL)
 
 
-def _process_date(catalog, gold_table, con, cfg, target_date: date) -> int:
+def _process_date(catalog, gold_table, con, cfg, target_date: date, t0_enabled: bool = False) -> int:
     date_str = target_date.strftime("%Y-%m-%d")
 
-    feat_table = _build_features(catalog, con, cfg, target_date)
+    feat_table = _build_features(catalog, con, cfg, target_date, t0_enabled=t0_enabled)
     row_count = len(feat_table)
     if row_count == 0:
         logger.info("%s: 최근 %d일 내 대여 이력 없음", date_str, int(cfg.get_path("run.window_days", 14)))
@@ -199,7 +221,7 @@ def _process_date(catalog, gold_table, con, cfg, target_date: date) -> int:
     written = catalog.load_table(GOLD_TABLE).scan(row_filter=EqualTo("snapshot_date", date_str)).to_arrow()
     _validate_bike_features_daily(written)  # 실패 시 QualityCheckError -> 배치 중단
 
-    logger.info("%s: 자전거 %d대 feature 산출", date_str, row_count)
+    logger.info("%s: 자전거 %d대 feature 산출 (t0_enabled=%s)", date_str, row_count, t0_enabled)
     return row_count
 
 
@@ -213,10 +235,11 @@ def run() -> None:
 
     snapshot_date_str = os.getenv("SNAPSHOT_DATE")
     target_date = date.fromisoformat(snapshot_date_str) if snapshot_date_str else date.today()
+    t0_enabled = _parse_bool_env("FAILURE_REPORT_T0_ENABLED", default=False)
 
     con = duckdb.connect(":memory:")
     try:
-        _process_date(catalog, gold_table, con, cfg, target_date)
+        _process_date(catalog, gold_table, con, cfg, target_date, t0_enabled=t0_enabled)
     except QualityCheckError as e:
         logger.error("%s 처리 실패, 배치 중단: %s", target_date, e)
         sys.exit(1)

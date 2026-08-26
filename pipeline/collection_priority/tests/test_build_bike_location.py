@@ -9,7 +9,13 @@ from datetime import date, datetime, timedelta, timezone
 
 import pyarrow as pa
 
-from jobs.build_bike_location import COLD_START_LOOKBACK_DAYS, _effective_delta_start, _merge_baseline_delta
+from jobs.build_bike_location import (
+    COLD_START_LOOKBACK_DAYS,
+    _effective_delta_start,
+    _merge_baseline_delta,
+    _parse_bool_env,
+    _resolve_delta_end,
+)
 
 SNAPSHOT_DATE = "2026-08-17"
 
@@ -122,3 +128,33 @@ def test_multiple_bikes_are_independent():
 
     assert result["B1"]["last_station_id"] == "ST-1"
     assert result["B2"]["last_station_id"] == "ST-2"
+
+
+def test_resolve_delta_end_defaults_to_yesterday():
+    """T0 비활성(기본값) 시 delta_end는 snapshot_date - 1일(어제)이다."""
+    snapshot_date = date(2026, 8, 17)
+    assert _resolve_delta_end(snapshot_date, t0_enabled=False) == date(2026, 8, 16)
+
+
+def test_resolve_delta_end_includes_today_when_t0_enabled():
+    """#138: RENTAL_HISTORY_T0_ENABLED=true 시 delta_end는 snapshot_date(오늘)까지 스캔한다."""
+    snapshot_date = date(2026, 8, 17)
+    assert _resolve_delta_end(snapshot_date, t0_enabled=True) == date(2026, 8, 17)
+
+
+def test_parse_bool_env_handles_values_and_defaults(monkeypatch):
+    monkeypatch.delenv("TEST_FLAG", raising=False)
+    assert _parse_bool_env("TEST_FLAG", default=False) is False
+    assert _parse_bool_env("TEST_FLAG", default=True) is True
+
+    monkeypatch.setenv("TEST_FLAG", "true")
+    assert _parse_bool_env("TEST_FLAG") is True
+
+    monkeypatch.setenv("TEST_FLAG", "false")
+    assert _parse_bool_env("TEST_FLAG") is False
+
+    monkeypatch.setenv("TEST_FLAG", "invalid")
+    import pytest
+    with pytest.raises(ValueError, match="must be 'true' or 'false'"):
+        _parse_bool_env("TEST_FLAG")
+

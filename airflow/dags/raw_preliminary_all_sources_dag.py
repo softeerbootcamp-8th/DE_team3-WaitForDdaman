@@ -1,7 +1,7 @@
 """
-대여이력 예비 Raw 수집 DAG
+통합 Raw 예비 수집 DAG (대여이력 + 고장신고)
 
-업무 마감 전 복구 지점을 확보하기 위해 API 원본 payload와 manifest만 저장한다.
+업무 마감 전 복구 지점을 확보하기 위해 API 원본 payload와 manifest만 S3 Raw에 저장한다.
 Spark/Iceberg를 실행하지 않고 Bronze·워터마크·Asset을 변경하지 않는다.
 
 예약 실행의 수집 기준시각은 실제 태스크 시작 시각이 아니라 data_interval_end다.
@@ -18,23 +18,23 @@ from airflow.sdk import dag
 from dag_common import COLLECTION_CUTOFF_AT_TEMPLATE, DEFAULT_ARGS, bash_job
 
 PRELIMINARY_SCHEDULE = os.getenv(
-    "RENTAL_HISTORY_PRELIMINARY_SCHEDULE", "0 5 * * *"
+    "PRELIMINARY_SCHEDULE", "0 5 * * *"
 )
 
 
 @dag(
-    dag_id="rental_history_preliminary_raw",
+    dag_id="raw_preliminary_all_sources",
     schedule=PRELIMINARY_SCHEDULE,
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Seoul"),
     catchup=False,
     max_active_runs=1,
     default_args=DEFAULT_ARGS,
-    tags=["bronze", "raw", "rental_history"],
+    tags=["raw", "preliminary"],
     doc_md=__doc__,
 )
-def rental_history_preliminary_raw():
-    BashOperator(
-        task_id="collect_preliminary_raw",
+def raw_preliminary_all_sources():
+    collect_rental_history = BashOperator(
+        task_id="collect_rental_history_preliminary_raw",
         bash_command=bash_job("collect_rental_history_raw"),
         env={
             "COLLECTION_CUTOFF_AT": COLLECTION_CUTOFF_AT_TEMPLATE,
@@ -44,5 +44,18 @@ def rental_history_preliminary_raw():
         execution_timeout=timedelta(hours=2),
     )
 
+    collect_failure_report = BashOperator(
+        task_id="collect_failure_report_preliminary_raw",
+        bash_command=bash_job("collect_failure_report_raw"),
+        env={
+            "COLLECTION_CUTOFF_AT": COLLECTION_CUTOFF_AT_TEMPLATE,
+            "SNAPSHOT_TYPE": "PRELIMINARY",
+        },
+        append_env=True,
+        execution_timeout=timedelta(hours=1),
+    )
 
-rental_history_preliminary_raw()
+    [collect_rental_history, collect_failure_report]
+
+
+raw_preliminary_all_sources()

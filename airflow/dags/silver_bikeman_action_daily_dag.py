@@ -34,10 +34,20 @@ from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag
 
 from dag_assets import BIKEMAN_EVENT_BRONZE
-from dag_common import DEFAULT_ARGS, SILVER_POOL
+from dag_common import COLLECTION_CUTOFF_AT_TEMPLATE, DEFAULT_ARGS, SILVER_POOL
 
-INGESTION_DIR = "/opt/airflow/ingestion"
-INGESTION_PYTHON = "python"
+INGESTION_DIR = "/opt/airflow/ingestion"  # common, .env 출처
+STAGING_DIR = "/opt/airflow/staging"      # 잡 실행 위치
+PYTHON_BIN = "python"
+
+
+def _staging_bash(job_module: str, extra_env_str: str = "") -> str:
+    return (
+        f"cd {STAGING_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
+        f"PYTHONPATH={INGESTION_DIR}:{STAGING_DIR}:$PYTHONPATH "
+        f"{extra_env_str}"
+        f"{PYTHON_BIN} -m jobs.{job_module}"
+    )
 
 
 @dag(
@@ -56,11 +66,11 @@ INGESTION_PYTHON = "python"
 def silver_bikeman_action_daily():
     BashOperator(
         task_id="silver_bikeman_action",
-        bash_command=(
-            f"cd {INGESTION_DIR} && set -a && source .env && set +a && "
-            "MAX_DAYS_PER_RUN='{{ params.max_days_per_run }}' "
-            f"{INGESTION_PYTHON} -m jobs.silver_bikeman_action"
-        ),
+        bash_command=_staging_bash("silver_bikeman_action", "MAX_DAYS_PER_RUN='{{ params.max_days_per_run }}' "),
+        env={
+            "COLLECTION_CUTOFF_AT": COLLECTION_CUTOFF_AT_TEMPLATE,
+        },
+        append_env=True,
         execution_timeout=timedelta(minutes=30),
         pool=SILVER_POOL,
     )

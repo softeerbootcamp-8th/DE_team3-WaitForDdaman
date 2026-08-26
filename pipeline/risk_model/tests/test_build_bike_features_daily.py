@@ -9,7 +9,7 @@ from datetime import date, datetime, timezone
 
 import pyarrow as pa
 
-from jobs.build_bike_features_daily import _exclude_suspended_rental_days
+from jobs.build_bike_features_daily import _exclude_suspended_rental_days, _parse_bool_env
 
 
 def utc(*args) -> datetime:
@@ -68,3 +68,15 @@ def test_empty_suspended_keeps_all_rentals():
     result = _exclude_suspended_rental_days(rent, suspended).to_pylist()
 
     assert {r["bike_id"] for r in result} == {"SPB-001", "SPB-002"}
+
+
+def test_parse_bool_env_handles_failure_report_t0(monkeypatch):
+    monkeypatch.delenv("FAILURE_REPORT_T0_ENABLED", raising=False)
+    assert _parse_bool_env("FAILURE_REPORT_T0_ENABLED", default=False) is False
+    assert _parse_bool_env("FAILURE_REPORT_T0_ENABLED", default=True) is True
+
+    monkeypatch.setenv("FAILURE_REPORT_T0_ENABLED", "true")
+    assert _parse_bool_env("FAILURE_REPORT_T0_ENABLED") is True
+
+    monkeypatch.setenv("FAILURE_REPORT_T0_ENABLED", "false")
+    assert _parse_bool_env("FAILURE_REPORT_T0_ENABLED") is False

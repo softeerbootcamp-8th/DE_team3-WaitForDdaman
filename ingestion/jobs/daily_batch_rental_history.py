@@ -29,6 +29,7 @@ from common.api_client import (
     fetch_rent_history_by_date_parallel,
     strip_pagination_meta,
 )
+from common.cutoff_utils import parse_collection_cutoff
 from common.iceberg_io import overwrite_partition
 from common.s3_utils import ensure_bucket, put_json
 from common.watermark import read_watermark, write_watermark
@@ -153,9 +154,12 @@ def run() -> None:
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
 
+    cutoff = parse_collection_cutoff(os.getenv("COLLECTION_CUTOFF_AT"))
+    as_of_date = cutoff.date()
+
     last_processed = read_watermark()
     start_date = last_processed + timedelta(days=1)
-    end_date = date.today() - timedelta(days=1)
+    end_date = as_of_date - timedelta(days=1)
 
     max_days = os.getenv("MAX_DAYS_PER_RUN")
     if max_days:

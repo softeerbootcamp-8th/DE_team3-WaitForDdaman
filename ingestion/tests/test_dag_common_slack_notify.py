@@ -62,6 +62,26 @@ def test_webhook_request_failure_is_swallowed(monkeypatch):
         dag_common.notify_slack_on_failure(_context())  # 예외가 올라오면 안 된다
 
 
+def test_replaces_localhost_with_airflow_base_url(monkeypatch):
+    """AIRFLOW_BASE_URL이 설정된 경우 localhost:8080 로그 URL을 실제 base URL로 치환한다."""
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/T/B/X")
+    monkeypatch.setenv("AIRFLOW_BASE_URL", "http://ec2-1-2-3-4.compute.amazonaws.com:8080")
+
+    with patch("dag_common.requests.post") as mock_post:
+        dag_common.notify_slack_on_failure(
+            _context(
+                dag_id="my_dag",
+                task_id="my_task",
+                log_url="http://localhost:8080/dags/my_dag/runs/scheduled__2026-08-25/tasks/my_task",
+            )
+        )
+
+    mock_post.assert_called_once()
+    text = mock_post.call_args[1]["json"]["text"]
+    assert "http://ec2-1-2-3-4.compute.amazonaws.com:8080/dags/my_dag/runs/scheduled__2026-08-25/tasks/my_task" in text
+    assert "localhost:8080" not in text
+
+
 @pytest.mark.parametrize(
     "module_name",
     [

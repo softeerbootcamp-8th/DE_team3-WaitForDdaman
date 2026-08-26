@@ -43,6 +43,10 @@ def run() -> dict:
         confirmed.append(cursor.isoformat())
         cursor += timedelta(days=1)
 
+    after = date.fromisoformat(confirmed[-1]) if confirmed else before
+    if after > before:
+        write_watermark(after, watermark_key=DATASET_WATERMARK_KEYS[dataset])
+
     incomplete = cursor <= target_date
     if incomplete and os.getenv("RECONCILIATION_FAIL_ON_INCOMPLETE", "false").lower() == "true":
         raise RuntimeError(
@@ -50,9 +54,6 @@ def run() -> dict:
             f"다음 필요 날짜={cursor.isoformat()} target={target_date.isoformat()}"
         )
 
-    after = date.fromisoformat(confirmed[-1]) if confirmed else before
-    if after > before:
-        write_watermark(after, watermark_key=DATASET_WATERMARK_KEYS[dataset])
     result = {
         "dataset": dataset,
         "before": before.isoformat(),
