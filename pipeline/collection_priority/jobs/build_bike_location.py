@@ -76,7 +76,7 @@ from pyiceberg.schema import Schema
 from pyiceberg.types import DateType, NestedField, StringType, TimestamptzType
 
 import config
-from common.duckdb_io import query_arrow
+from common.duckdb_io import connect, query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import overwrite_all
 from common.s3_utils import ensure_bucket
@@ -143,7 +143,7 @@ _MERGE_SQL = """
 def _delta(silver_table: pa.Table, con: duckdb.DuckDBPyConnection | None = None) -> pa.Table:
     """silver.rental_history(범위 스캔 결과)에서 자전거별 가장 최근 반납 1건만
     채택한다 - QUALIFY(윈도우)가 있어 pyarrow만으로는 옮길 수 없다."""
-    conn = con or duckdb.connect(":memory:")
+    conn = con or connect()
     conn.register("silver_rental_history", silver_table)
     return query_arrow(conn, _DELTA_SQL)
 
@@ -156,7 +156,7 @@ def _merge_baseline_delta(
 ) -> pa.Table:
     """baseline(직전 상태)과 delta(신규 반영분)를 병합한다 - 카탈로그 없이 두
     PyArrow Table만으로 동작하는 순수 로직이라 단위 테스트가 가능하다."""
-    conn = con or duckdb.connect(":memory:")
+    conn = con or connect()
     conn.register("baseline", baseline_table)
     conn.register("delta", delta_table)
     return query_arrow(conn, _MERGE_SQL, [snapshot_date])
@@ -181,7 +181,7 @@ def _load_gold_baseline_snapshot(catalog) -> pa.Table:
 
 def _baseline(gold_snapshot: pa.Table) -> pa.Table:
     """직전 상태 전체 (테이블이 비어있으면 빈 Table - cold start도 안전)."""
-    con = duckdb.connect(":memory:")
+    con = connect()
     con.register("t", gold_snapshot)
     return query_arrow(
         con,
@@ -195,7 +195,7 @@ def _baseline_snapshot_date(gold_snapshot: pa.Table) -> date | None:
     델타 시작일로 그대로 쓸 수 있다. 테이블이 비어있으면(cold start) None."""
     if len(gold_snapshot) == 0:
         return None
-    con = duckdb.connect(":memory:")
+    con = connect()
     con.register("t", gold_snapshot)
     row = con.execute("SELECT MAX(snapshot_date) FROM t").fetchone()
     return row[0]

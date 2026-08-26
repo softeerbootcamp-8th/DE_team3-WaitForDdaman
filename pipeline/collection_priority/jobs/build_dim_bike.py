@@ -38,7 +38,7 @@ from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import DateType, IntegerType, NestedField, StringType, TimestamptzType
 
 import config
-from common.duckdb_io import query_arrow
+from common.duckdb_io import connect, query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import overwrite_partition
 from common.s3_utils import ensure_bucket
@@ -96,7 +96,7 @@ def _compute_new_bikes(
 ) -> pa.Table:
     """silver.rental_history(범위)와 gold.dim_bike의 기존 bike_id 목록만으로 동작하는
     순수 로직 - 신규 등장 자전거의 snapshot_date/first_seen_at/start_year를 계산한다."""
-    conn = con or duckdb.connect(":memory:")
+    conn = con or connect()
     conn.register("silver_rental_history", silver_table)
     conn.register("existing_bike_ids", existing_bike_ids)
     return query_arrow(conn, _NEW_BIKES_SQL)
@@ -162,7 +162,7 @@ def _process_range(catalog, gold_table, start_date: date, end_date: date) -> int
     # Spark의 dynamic partition overwrite를 파티션 값별 overwrite로 옮긴 것.
     # 신규 자전거의 snapshot_date(=first_seen_at 날짜)가 여러 날에 걸칠 수 있으므로
     # 값별로 나눠 커밋한다 - 기존 파티션(오늘 신규 등장이 없는 날짜)은 손대지 않는다.
-    con = duckdb.connect(":memory:")
+    con = connect()
     con.register("new_bikes", new_bikes)
     partition_values = [
         row[0]

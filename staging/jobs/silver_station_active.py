@@ -35,7 +35,7 @@ from pyiceberg.schema import Schema
 from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import DateType, NestedField, StringType
 
-from common.duckdb_io import query_arrow
+from common.duckdb_io import connect, query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import overwrite_partition
 
@@ -86,7 +86,7 @@ def normalize(bronze_table: pa.Table, con: duckdb.DuckDBPyConnection | None = No
     station_id가 null인 행은 드롭한다. 같은 스냅샷 내 station_id 중복은
     하나만 남긴다.
     """
-    conn = con or duckdb.connect(":memory:")
+    conn = con or connect()
     conn.register("bronze_station_active", bronze_table)
     result = query_arrow(conn, NORMALIZE_SQL.format(source="bronze_station_active"))
     return result.select(SILVER_COLUMNS)
@@ -94,7 +94,7 @@ def normalize(bronze_table: pa.Table, con: duckdb.DuckDBPyConnection | None = No
 
 def _log_quality(bronze_table: pa.Table, silver_table: pa.Table) -> None:
     """드롭/중복 건수를 남긴다. 조용히 넘기면 원천 이상을 놓친다."""
-    con = duckdb.connect(":memory:")
+    con = connect()
     con.register("bronze_station_active", bronze_table)
 
     total = len(bronze_table)

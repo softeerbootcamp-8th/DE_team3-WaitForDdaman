@@ -8,7 +8,7 @@ import pytest
 from moto import mock_aws
 
 import config as config_module
-from common.duckdb_io import query_arrow
+from common.duckdb_io import connect, query_arrow
 from common.iceberg_io import append, overwrite_all, overwrite_partition, replace_range
 from common.partition_listing import (
     get_table_data_prefix,
@@ -262,9 +262,7 @@ def test_query_arrow_returns_materialized_table():
     duckdb 버전에 따라 .arrow()가 RecordBatchReader를 돌려주는데, 그걸 같은 커넥션에
     다시 register하면 교착이 난다(실측). query_arrow는 항상 pa.Table을 준다.
     """
-    import duckdb
-
-    con = duckdb.connect(":memory:")
+    con = connect()
     con.register("src", pa.table({"a": [1, 2, 3]}))
 
     result = query_arrow(con, "SELECT a FROM src WHERE a > 1")
@@ -278,9 +276,7 @@ def test_query_arrow_returns_materialized_table():
 
 
 def test_query_arrow_accepts_parameters():
-    import duckdb
-
-    con = duckdb.connect(":memory:")
+    con = connect()
     con.register("src", pa.table({"a": [1, 2, 3]}))
 
     result = query_arrow(con, "SELECT a FROM src WHERE a = ?", [2])

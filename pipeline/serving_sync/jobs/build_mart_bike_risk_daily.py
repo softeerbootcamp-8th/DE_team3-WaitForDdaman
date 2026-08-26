@@ -39,7 +39,7 @@ from pyiceberg.types import (
 )
 
 import config
-from common.duckdb_io import query_arrow
+from common.duckdb_io import connect, query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import overwrite_partition
 from common.s3_utils import ensure_bucket
@@ -144,7 +144,7 @@ def _fail_history_agg(
     limit: int = 5,
     con: duckdb.DuckDBPyConnection | None = None,
 ) -> pa.Table:
-    conn = con or duckdb.connect(":memory:")
+    conn = con or connect()
     conn.execute("SET TimeZone='UTC'")
     conn.register("failure", failure_table)
     return query_arrow(conn, _FAIL_HISTORY_SQL, [as_of_date, limit])
@@ -164,7 +164,7 @@ def build_mart_bike_risk_daily(
 ) -> pa.Table:
     """카탈로그 없이 PyArrow Table들만으로 동작하는 순수 로직이라 단위 테스트가 가능하다.
     fail_history_table은 이미 _fail_history_agg()를 거친(bike_id, fail_history) 결과다."""
-    conn = con or duckdb.connect(":memory:")
+    conn = con or connect()
     conn.register("risk", risk_table)
     conn.register("decision", decision_table)
     conn.register("location", location_table)
@@ -205,7 +205,7 @@ def _read_and_build(catalog, snapshot_date: date) -> pa.Table | None:
     location_table = catalog.load_table(BIKE_LOCATION_TABLE).scan().to_arrow()
     station_active_table = catalog.load_table(STATION_ACTIVE_TABLE).scan().to_arrow()
 
-    con = duckdb.connect(":memory:")
+    con = connect()
     con.register(
         "dim_bike_raw",
         catalog.load_table(DIM_BIKE_TABLE).scan(selected_fields=("bike_id", "start_year")).to_arrow(),

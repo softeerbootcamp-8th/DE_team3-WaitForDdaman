@@ -125,7 +125,7 @@ from pyiceberg.schema import Schema
 from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import NestedField, StringType, TimestamptzType
 
-from common.duckdb_io import query_arrow
+from common.duckdb_io import connect, query_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import build_range_filter, replace_range
 from common.sql_assert import QualityCheck
@@ -242,7 +242,7 @@ TRANSFORM_SQL = """
 
 
 def _connect() -> duckdb.DuckDBPyConnection:
-    con = duckdb.connect(":memory:")
+    con = connect()
     # TIMESTAMP -> TIMESTAMPTZ 캐스팅과 strftime이 세션 타임존을 따르므로 UTC로 못박는다.
     # 컨테이너 TZ에 결과가 흔들리면 파티션 값이 하루씩 밀 수 있다.
     con.execute("SET TimeZone='UTC'")

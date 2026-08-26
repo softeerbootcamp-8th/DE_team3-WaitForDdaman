@@ -108,6 +108,15 @@ BRONZE_RENTAL_HISTORY_COMMIT_POOL = "bronze_rental_history_commit"
 # SILVER_POOL로 전역 동시 실행 수를 제한한다 (워커 메모리 보호).
 SILVER_POOL = "silver_process"
 
+# Gold 태스크(gold_dim_fact_dag의 build_dim_bike/build_bike_location/build_station_active/
+# build_fact_station_inventory, gold_risk_decision_dag의 build_bike_features_daily/
+# run_risk_scoring_model/build_fact_bike_decision)는 Bronze/Silver와 달리 pool 가드가
+# 아예 없었다 - gold_dim_fact_dag는 같은 upstream에 물린 태스크 3개가 나란히 병렬
+# 실행되도록 설계돼 있어, DuckDB 무거운 쿼리 여러 개가 워커에서 동시에 무제약으로
+# 돌 수 있었다 (#144가 예견했으나 완료조건 미충족, #285에서 재확인 - 실제 OOM 발생).
+# common.duckdb_io.connect()의 memory_limit 강제와 짝을 이루는 동시성 가드다.
+GOLD_POOL = "gold_process"
+
 # 대여이력 Raw 수집/선택/승격은 실제 프로세스 시작 시각이 아니라 "논리 실행 시각"으로
 # 판단해야 한다 (같은 DAGRun의 재시도가 같은 window/같은 key를 보게 하기 위함).
 COLLECTION_CUTOFF_AT_TEMPLATE = (
