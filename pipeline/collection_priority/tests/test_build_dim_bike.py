@@ -47,13 +47,45 @@ def test_first_seen_at_is_earliest_rent_dt_per_bike():
     assert result[0]["first_seen_at"] == utc(2026, 8, 18, 7, 0, 0)
 
 
-def test_snapshot_date_and_start_year_derived_from_first_seen_at():
-    silver = rental_table([("SPB-001", utc(2026, 8, 18, 7, 30, 0))])
+def test_snapshot_date_and_start_year_derived_from_bike_id_range():
+    silver = rental_table(
+        [
+            ("SPB-00100", utc(2026, 8, 18, 7, 30, 0)),  # 1~10000 -> 2015
+            ("SPB-15000", utc(2026, 8, 18, 7, 30, 0)),  # 10001~20000 -> 2017
+            ("SPB-25000", utc(2026, 8, 18, 7, 30, 0)),  # 20001~35000 -> 2019
+            ("SPB-45000", utc(2026, 8, 18, 7, 30, 0)),  # 40001~49999 -> 2020
+            ("SPB-55000", utc(2026, 8, 18, 7, 30, 0)),  # 50001~69999 -> 2022
+            ("SPB-75000", utc(2026, 8, 18, 7, 30, 0)),  # 70001~79999 -> 2024
+            ("SPB-85000", utc(2026, 8, 18, 7, 30, 0)),  # 80001~99999 -> 2020 (새싹)
+        ]
+    )
 
     result = _compute_new_bikes(silver, existing_bike_ids([])).to_pylist()
+    by_bike = {r["bike_id"]: r for r in result}
 
-    assert result[0]["snapshot_date"].isoformat() == "2026-08-18"
-    assert result[0]["start_year"] == 2026
+    assert by_bike["SPB-00100"]["snapshot_date"].isoformat() == "2026-08-18"
+    assert by_bike["SPB-00100"]["start_year"] == 2015
+    assert by_bike["SPB-15000"]["start_year"] == 2017
+    assert by_bike["SPB-25000"]["start_year"] == 2019
+    assert by_bike["SPB-45000"]["start_year"] == 2020
+    assert by_bike["SPB-55000"]["start_year"] == 2022
+    assert by_bike["SPB-75000"]["start_year"] == 2024
+    assert by_bike["SPB-85000"]["start_year"] == 2020
+
+
+def test_start_year_falls_back_to_first_seen_at_when_unmapped_or_no_digits():
+    silver = rental_table(
+        [
+            ("SPB-36000", utc(2026, 8, 18, 7, 30, 0)),  # 미매핑 대역 -> 2026
+            ("NO-DIGITS", utc(2026, 8, 18, 7, 30, 0)),  # 숫자 없음 -> 2026
+        ]
+    )
+
+    result = _compute_new_bikes(silver, existing_bike_ids([])).to_pylist()
+    by_bike = {r["bike_id"]: r for r in result}
+
+    assert by_bike["SPB-36000"]["start_year"] == 2026
+    assert by_bike["NO-DIGITS"]["start_year"] == 2026
 
 
 def test_bikes_already_in_gold_are_excluded():
