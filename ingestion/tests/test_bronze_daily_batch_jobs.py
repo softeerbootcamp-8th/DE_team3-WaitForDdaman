@@ -9,15 +9,12 @@ import pytest
 from moto import mock_aws
 
 import config as config_module
-from common.api_client import fetch_rent_history_by_date_parallel
 from common.s3_utils import get_s3_client, put_json
 from jobs.daily_batch_bikeman_event import _build_arrow_table as build_bikeman_event_arrow
 from jobs.daily_batch_bikeman_event import _process_one_day as process_bikeman_event
 from jobs.daily_batch_failure_report import _build_arrow_table as build_failure_report_arrow
 from jobs.daily_batch_failure_report import _parse_bool_env as parse_failure_report_bool_env
 from jobs.daily_batch_failure_report import _process_one_day as process_failure_report
-from jobs.daily_batch_rental_history import _build_arrow_table as build_rental_history_arrow
-from jobs.daily_batch_rental_history import _process_one_day as process_rental_history
 from jobs.daily_batch_station_active import _build_arrow_table as build_station_active_arrow
 from jobs.daily_batch_station_active import _process_snapshot as process_station_active
 from jobs.daily_batch_station_master import _build_arrow_table as build_station_master_arrow
@@ -145,36 +142,6 @@ def test_station_master_arrow_matches_iceberg_ingested_at_type():
     assert table.schema.field("ingested_at").type == pa.timestamp("us", tz="UTC")
 
 
-def test_rental_history_parallel_fetch_and_arrow_write(s3_env):
-    sample_rows = [
-        {
-            "BIKE_ID": "SPB-100",
-            "RENT_DT": "2026-08-22 01:00:00",
-            "RENT_ID": "108",
-            "RENT_NM": "서교동",
-            "RENT_HOLD": "1",
-            "RTN_DT": "2026-08-22 01:20:00",
-            "RTN_ID": "109",
-            "RTN_NM": "합정역",
-            "RTN_HOLD": "1",
-            "USE_MIN": "20",
-            "USE_DST": "2500",
-        }
-    ]
-
-    with patch("jobs.daily_batch_rental_history.fetch_rent_history_by_date_parallel", return_value=sample_rows), \
-         patch("jobs.daily_batch_rental_history.overwrite_partition") as mock_overwrite:
-        count = process_rental_history(date(2026, 8, 22))
-
-    assert count == 1
-    mock_overwrite.assert_called_once()
-    table_name, arrow_table, col, val = mock_overwrite.call_args[0]
-    assert table_name == "bronze.rental_history"
-    assert col == "rent_date_partition"
-    assert val == "2026-08-22"
-    assert arrow_table["bike_id"].to_pylist() == ["SPB-100"]
-
-
 def test_failure_report_pure_arrow_write(s3_env):
     sample_rows = [
         {
@@ -194,28 +161,6 @@ def test_failure_report_pure_arrow_write(s3_env):
     assert table_name == "bronze.failure_report"
     assert col == "reg_date_partition"
     assert val == "2026-08-22"
-
-
-def test_rental_history_arrow_matches_iceberg_ingested_at_type():
-    table = build_rental_history_arrow(
-        [{
-            "BIKE_ID": "SPB-100",
-            "RENT_DT": "2026-08-22 01:00:00",
-            "RENT_ID": "108",
-            "RENT_NM": "서교동",
-            "RENT_HOLD": "1",
-            "RTN_DT": "2026-08-22 01:20:00",
-            "RTN_ID": "109",
-            "RTN_NM": "합정역",
-            "RTN_HOLD": "1",
-            "USE_MIN": "20",
-            "USE_DST": "2500",
-        }],
-        "2026-08-22",
-        "api:2026-08-22",
-    )
-
-    assert table.schema.field("ingested_at").type == pa.timestamp("us", tz="UTC")
 
 
 def test_failure_report_arrow_matches_iceberg_ingested_at_type():

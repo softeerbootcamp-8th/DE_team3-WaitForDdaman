@@ -10,7 +10,7 @@ jobs/*.py가 전부 `python -m jobs.X`로 Airflow 없이도 단독 실행 가능
 하기 위함이다.
 
 일 배치로 확정되면서 조회 기준을 received_at range가 아니라 occurred_at 날짜로
-바꿨다 (daily_batch_rental_history.py의 fetch_rent_history_by_date와 동일한 패턴).
+바꿨다 (common/api_client.py의 fetch_rent_history_by_date와 동일한 패턴).
 
 필요한 .env 변수 (docker-compose의 airflow_reader 롤과 반드시 일치해야 함):
     BIKEMAN_DB_HOST=postgres

@@ -7,7 +7,6 @@ from unittest.mock import patch
 from common.cutoff_utils import parse_collection_cutoff
 from jobs.daily_batch_failure_report import run as run_failure_report
 from jobs.daily_batch_bikeman_event import run as run_bikeman_event
-from jobs.daily_batch_rental_history import run as run_rental_history
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -71,25 +70,6 @@ def test_bikeman_event_backfill_deterministic_date(monkeypatch):
         date(2026, 8, 9),
     ]
     mock_write_wm.assert_called_once_with(date(2026, 8, 9), watermark_key="_meta/watermark/bikeman_event.json")
-
-
-def test_rental_history_backfill_deterministic_date(monkeypatch):
-    """과거 cutoff 주입 시 cutoff.date() - 1일까지를 처리한다."""
-    processed_dates = []
-
-    def fake_process_one_day(target_date: date):
-        processed_dates.append(target_date)
-        return 1
-
-    monkeypatch.setenv("COLLECTION_CUTOFF_AT", "2026-08-10T06:00:00+09:00")
-
-    with patch("jobs.daily_batch_rental_history.ensure_bucket"), \
-         patch("jobs.daily_batch_rental_history.read_watermark", return_value=date(2026, 8, 8)), \
-         patch("jobs.daily_batch_rental_history.write_watermark"), \
-         patch("jobs.daily_batch_rental_history._process_one_day", side_effect=fake_process_one_day):
-        run_rental_history()
-
-    assert processed_dates == [date(2026, 8, 9)]
 
 
 def test_silver_bikeman_action_backfill_deterministic_date(monkeypatch):
