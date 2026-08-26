@@ -246,7 +246,11 @@ def bronze_daily_batch_all_sources():
             cutoff = (
                 datetime.fromisoformat(conf_cutoff)
                 if conf_cutoff
-                else context["data_interval_end"]
+                else (
+                    context.get("data_interval_end")
+                    or context.get("logical_date")
+                    or datetime.now(timezone.utc)
+                )
             )
             cutoff = cutoff.astimezone(KST)
 
