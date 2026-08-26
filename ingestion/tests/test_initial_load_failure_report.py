@@ -4,6 +4,7 @@ test_initial_load_rental_history.py와 동일한 이유/구조 - run()의 배치
 _process_one_input_file 모킹으로 Spark 없이 검증한다.
 """
 from unittest import mock
+import logging
 
 import pytest
 
@@ -19,6 +20,21 @@ def test_run_succeeds_when_all_files_succeed():
         job.run(["a.csv", "b.xlsx"])
 
     assert mocked.call_count == 2
+
+
+def test_run_logs_batch_progress_for_each_input_file(caplog):
+    caplog.set_level(logging.INFO, logger=job.__name__)
+    with mock.patch.object(
+        job, "_process_one_input_file", side_effect=[(30, False, False), (20, False, False)]
+    ), mock.patch.object(job, "build_spark_session"), mock.patch.object(
+        job, "_ensure_bronze_table"
+    ), mock.patch.object(job, "ensure_bucket"):
+        job.run(["a.csv", "b.xlsx"])
+
+    assert "초기 적재 배치 시작: 파일 2개" in caplog.text
+    assert "[1/2] 파일 처리 시작: a.csv" in caplog.text
+    assert "[1/2] 파일 처리 완료: a.csv (30행, 누적 30행)" in caplog.text
+    assert "[2/2] 파일 처리 완료: b.xlsx (20행, 누적 50행)" in caplog.text
 
 
 def test_run_exits_nonzero_when_any_file_fails():
