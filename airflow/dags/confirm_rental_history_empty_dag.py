@@ -22,10 +22,13 @@ import pendulum
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import dag
 
+PYLIB_DIR = "/opt/airflow/pylib"
 INGESTION_DIR = "/opt/airflow/ingestion"
 
 
 def _confirm_empty_callable(target_date_str: str, confirmed_by: str, reason: str):
+    if PYLIB_DIR not in sys.path:
+        sys.path.insert(0, PYLIB_DIR)
     if INGESTION_DIR not in sys.path:
         sys.path.insert(0, INGESTION_DIR)
 

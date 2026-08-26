@@ -113,7 +113,11 @@ def notify_slack_on_failure(context: dict) -> None:
 
     try:
         ti = context["task_instance"]
-        message = f":x: *{ti.dag_id}.{ti.task_id}* 실패\n실행일: {context['ds']}\n로그: {ti.log_url}"
+        log_url = ti.log_url
+        base_url = os.getenv("AIRFLOW_BASE_URL")
+        if base_url and log_url and log_url.startswith("http://localhost:8080"):
+            log_url = base_url.rstrip("/") + log_url[len("http://localhost:8080"):]
+        message = f":x: *{ti.dag_id}.{ti.task_id}* 실패\n실행일: {context['ds']}\n로그: {log_url}"
         resp = requests.post(webhook_url, json={"text": message}, timeout=10)
         resp.raise_for_status()
     except Exception:

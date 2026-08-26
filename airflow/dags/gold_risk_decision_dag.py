@@ -40,6 +40,7 @@ from airflow.sdk import dag
 
 from dag_common import notify_slack_on_failure
 
+PYLIB_DIR = "/opt/airflow/pylib"
 RISK_MODEL_DIR = "/opt/airflow/pipeline/risk_model"
 INGESTION_DIR = "/opt/airflow/ingestion"
 AIRFLOW_HOME_DIR = "/opt/airflow"
@@ -64,9 +65,11 @@ def _load_ingestion_env(env_path: str) -> None:
 
 _load_ingestion_env(f"{INGESTION_DIR}/.env")
 
-# PythonSensor가 판정 함수를 직접 호출할 수 있도록 ingestion을 네임스페이스 패키지
-# 루트로 sys.path에 얹는다 (gold_dim_fact_dag.py와 동일한 패턴). config가 위에서
+# PythonSensor가 판정 함수를 직접 호출할 수 있도록 ingestion과 pylib(config)를
+# sys.path에 얹는다 (gold_dim_fact_dag.py와 동일한 패턴). config가 위에서
 # 로드한 ingestion/.env 값으로 평가되도록 반드시 _load_ingestion_env 다음에 import한다.
+if PYLIB_DIR not in sys.path:
+    sys.path.insert(0, PYLIB_DIR)
 if INGESTION_DIR not in sys.path:
     sys.path.insert(0, INGESTION_DIR)
 
@@ -127,12 +130,18 @@ def gold_risk_decision():
         timeout=SENSOR_TIMEOUT,
     )
 
+    t0_enabled_expr = "{{ var.value.get('FAILURE_REPORT_T0_ENABLED', 'false') }}"
+
     # 2. build_bike_features_daily - Silver(rental_history/failure_report)만 있으면 됨.
     # rental_history는 트리거 소스인 gold_dim_fact가 이미 대기했으므로, 여기선
     # failure_report 대기 뒤에만 실행하면 된다.
     build_bike_features_daily = BashOperator(
         task_id="build_bike_features_daily",
         bash_command=_bash("build_bike_features_daily", f"SNAPSHOT_DATE='{snapshot_date_expr}' "),
+        env={
+            "FAILURE_REPORT_T0_ENABLED": t0_enabled_expr,
+        },
+        append_env=True,
         execution_timeout=timedelta(minutes=30),
     )
 

@@ -15,6 +15,8 @@ x-airflow-common:
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+    AIRFLOW__WEBSERVER__BASE_URL: ${AIRFLOW_BASE_URL:-http://localhost:8080}
+    AIRFLOW__API__BASE_URL: ${AIRFLOW_BASE_URL:-http://localhost:8080}
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow_jwt_secret}
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
     AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-ap-northeast-2}
@@ -39,12 +41,18 @@ x-airflow-common:
     EMR_SPARK_POLL_INTERVAL_SECONDS: ${EMR_SPARK_POLL_INTERVAL_SECONDS:-30}
     EMR_SPARK_POLL_MAX_SECONDS: ${EMR_SPARK_POLL_MAX_SECONDS:-21600}
     EMR_RISK_MODEL_CONFIG: ${EMR_RISK_MODEL_CONFIG:-/opt/app/config/risk_model.yaml}
+    PYTHONPATH: /opt/airflow/pylib
   volumes:
     - ./.env:/opt/airflow/.env:ro
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs
     - ./airflow/plugins:/opt/airflow/plugins
     - ./airflow/config:/opt/airflow/config
+    - ./ingestion:/opt/airflow/ingestion
+    - ./staging:/opt/airflow/staging
+    - ./pipeline:/opt/airflow/pipeline
+    - ./config:/opt/airflow/pylib/config
+    - ./airflow/scripts:/opt/airflow/scripts
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
@@ -191,7 +199,13 @@ services:
     command:
       - bash
       - -c
-      - airflow version && airflow pools set emr_initial_load 3 'EMR Serverless 초기 적재 배치 동시 제출 제한 (pre-initialized executor 3개)' && airflow pools set s3_initial_load_staging 2 '초기 적재 S3 스테이징 업로드 동시 실행 제한 (EC2 t4g.large 워커 자원 보호, #255)'
+      - >-
+        airflow version &&
+        airflow pools set emr_initial_load 3 "EMR Serverless 초기 적재 배치 동시 제출 제한 (pre-initialized executor 3개)" &&
+        airflow pools set s3_initial_load_staging 2 "초기 적재 S3 스테이징 업로드 동시 실행 제한 (EC2 t4g.large 워커 자원 보호, #255)" &&
+        airflow variables set RENTAL_HISTORY_T0_ENABLED true &&
+        airflow variables set RENTAL_HISTORY_FALLBACK_ENABLED true &&
+        airflow variables set FAILURE_REPORT_T0_ENABLED true
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'

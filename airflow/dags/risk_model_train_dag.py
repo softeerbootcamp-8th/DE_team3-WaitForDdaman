@@ -26,6 +26,10 @@ PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "/opt/airflow")
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+PYLIB_DIR = os.environ.get("PYLIB_DIR", "/opt/airflow/pylib")
+if PYLIB_DIR not in sys.path:
+    sys.path.insert(0, PYLIB_DIR)
+
 # resolve_anchors가 Spark 대신 common.partition_listing(boto3)을 쓰므로(#148),
 # gold_dim_fact_dag.py와 동일한 패턴으로 ingestion을 네임스페이스 패키지 루트로
 # sys.path에 얹는다. .env도 같은 이유로 먼저 로드한다 - 안 하면 컨테이너의

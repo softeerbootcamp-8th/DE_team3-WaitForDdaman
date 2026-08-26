@@ -227,11 +227,32 @@ def _read_silver_delta(catalog, start_date: date | None, end_date: date) -> pa.T
     return table.scan(row_filter=row_filter, selected_fields=selected_fields).to_arrow()
 
 
-def build_bike_location(catalog, snapshot_date: date) -> pa.Table:
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if not normalized:
+        return default
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise ValueError(f"{name} must be 'true' or 'false': {value!r}")
+
+
+def _resolve_delta_end(snapshot_date: date, t0_enabled: bool = False) -> date:
+    """스캔할 델타 구간의 끝일을 정한다. T0가 켜져 있으면 당일(snapshot_date)까지 스캔."""
+    if t0_enabled:
+        return snapshot_date
+    return snapshot_date - timedelta(days=1)
+
+
+def build_bike_location(catalog, snapshot_date: date, t0_enabled: bool = False) -> pa.Table:
     gold_snapshot = _load_gold_baseline_snapshot(catalog)
     baseline = _baseline(gold_snapshot)
     delta_start = _baseline_snapshot_date(gold_snapshot)
-    delta_end = snapshot_date - timedelta(days=1)
+    delta_end = _resolve_delta_end(snapshot_date, t0_enabled=t0_enabled)
     silver_delta = _read_silver_delta(catalog, delta_start, delta_end)
     delta = _delta(silver_delta)
 
@@ -256,6 +277,7 @@ def _validate_bike_location(table: pa.Table) -> None:
 def run() -> None:
     snapshot_date_str = os.getenv("SNAPSHOT_DATE") or date.today().strftime("%Y-%m-%d")
     snapshot_date = datetime.strptime(snapshot_date_str, "%Y-%m-%d").date()
+    t0_enabled = _parse_bool_env("RENTAL_HISTORY_T0_ENABLED", default=False)
 
     ensure_bucket(config.SETTINGS.raw_bucket)
     ensure_bucket(config.SETTINGS.warehouse_bucket)
@@ -263,7 +285,7 @@ def run() -> None:
     catalog = build_iceberg_catalog()
     gold_table = _ensure_gold_table(catalog)
 
-    out_table = build_bike_location(catalog, snapshot_date).select(GOLD_COLUMNS)
+    out_table = build_bike_location(catalog, snapshot_date, t0_enabled=t0_enabled).select(GOLD_COLUMNS)
     row_count = len(out_table)
     try:
         _validate_bike_location(out_table)  # 실패 시 QualityCheckError -> 적재 없이 배치 중단
@@ -273,7 +295,7 @@ def run() -> None:
 
     overwrite_all(gold_table, out_table)
 
-    logger.info("%s: gold.bike_location %d행 갱신 완료 (증분 처리)", snapshot_date_str, row_count)
+    logger.info("%s: gold.bike_location %d행 갱신 완료 (증분 처리, t0_enabled=%s)", snapshot_date_str, row_count, t0_enabled)
 
 
 if __name__ == "__main__":

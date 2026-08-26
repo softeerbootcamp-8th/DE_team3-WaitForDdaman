@@ -96,3 +96,51 @@ def test_promote_and_marker_still_record_failure_when_prepare_left_no_selection(
         advance_completion_watermark.run()
 
     assert read_watermark() == date(2026, 8, 20)
+
+
+def test_advance_watermark_updates_partial_success_before_raising(s3_env, monkeypatch):
+    """중간 날짜가 실패하여 incomplete 에러를 던지더라도 성공한 날짜까지는 워터마크가 전진해야 한다."""
+    from common.watermark import read_watermark, write_watermark
+    from jobs import advance_completion_watermark
+
+    write_watermark(date(2026, 8, 20))
+    _write_marker("rental_history", "2026-08-21", "COMPLETE")
+    _write_marker("rental_history", "2026-08-22", "COMPLETE")
+    # 2026-08-23은 FAILED 상태 (또는 마커 없음)
+    _write_marker("rental_history", "2026-08-23", "FAILED")
+
+    monkeypatch.setenv("DATASET", "rental_history")
+    monkeypatch.setenv("RECONCILIATION_TARGET_DATE", "2026-08-24")
+    monkeypatch.setenv("RECONCILIATION_FAIL_ON_INCOMPLETE", "true")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        advance_completion_watermark.run()
+
+    assert "다음 필요 날짜=2026-08-23" in str(exc_info.value)
+    # 부분 성공한 2026-08-22까지는 워터마크가 안전하게 전진되어 있어야 함!
+    assert read_watermark() == date(2026, 8, 22)
+
+
+def test_daily_batch_failure_report_writes_completion_marker(s3_env, monkeypatch):
+    """daily_batch_failure_report 실행 시 S3에 completion.json 마커가 정상 기록된다."""
+    from common.s3_utils import get_json
+    from common.watermark import write_watermark
+    from jobs.check_bronze_gap import marker_key
+    from jobs.daily_batch_failure_report import run as run_failure_report
+    from unittest.mock import patch
+
+    write_watermark(date(2026, 8, 20), watermark_key="_meta/watermark/failure_report.json")
+    monkeypatch.setenv("COLLECTION_CUTOFF_AT", "2026-08-22T06:00:00+09:00")
+    monkeypatch.delenv("FAILURE_REPORT_T0_ENABLED", raising=False)
+
+    with patch("jobs.daily_batch_failure_report._process_one_day", return_value=5):
+        run_failure_report()
+
+    # 2026-08-21 (확정 날짜)에 대해 COMPLETE 마커가 생성되었는지 확인
+    marker = get_json("test-reconciliation-bucket", marker_key("failure_report", date(2026, 8, 21)))
+    assert isinstance(marker, dict)
+    assert marker["dataset"] == "failure_report"
+    assert marker["target_date"] == "2026-08-21"
+    assert marker["status"] == "COMPLETE"
+    assert marker["row_count"] == 5
+

@@ -125,7 +125,7 @@ jobs:
           echo "::group::ingestion"
           # bikeman_event_generator_dag이 컨테이너 절대경로를 sys.path에 넣고 jobs를
           # import한다. DagBag 파싱 테스트가 dags 폴더 전체를 읽으므로 그 경로도 필요하다.
-          (cd ingestion && PYTHONPATH="$ROOT:$ROOT/ingestion:$ROOT/pipeline/bikeman_event_generator/jobs" pytest tests -q)
+          (cd ingestion && PYTHONPATH="$ROOT:$ROOT/ingestion:$ROOT/staging:$ROOT/pipeline/bikeman_event_generator/jobs" pytest tests -q)
           echo "::endgroup::"
 
           echo "::group::staging"

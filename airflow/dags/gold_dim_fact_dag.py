@@ -111,6 +111,7 @@ from airflow.sdk import dag
 
 from dag_common import notify_slack_on_failure
 
+PYLIB_DIR = "/opt/airflow/pylib"
 INGESTION_DIR = "/opt/airflow/ingestion"
 COLLECTION_PRIORITY_DIR = "/opt/airflow/pipeline/collection_priority"
 PYTHON = "python"
@@ -140,9 +141,11 @@ def _load_ingestion_env(env_path: str) -> None:
 _load_ingestion_env(f"{INGESTION_DIR}/.env")
 
 # PythonSensor가 Spark/서브프로세스 없이 판정 함수를 직접 호출할 수 있도록,
-# ingestion을 네임스페이스 패키지 루트로 sys.path에 얹는다 (bikeman_event_
-# generator_dag.py와 동일한 패턴). config가 위에서 로드한 ingestion/.env 값으로
-# 평가되도록 반드시 _load_ingestion_env 다음에 import한다.
+# pylib(config)와 ingestion을 네임스페이스 패키지 루트로 sys.path에 얹는다
+# (bikeman_event_generator_dag.py와 동일한 패턴). config가 위에서 로드한
+# ingestion/.env 값으로 평가되도록 반드시 _load_ingestion_env 다음에 import한다.
+if PYLIB_DIR not in sys.path:
+    sys.path.insert(0, PYLIB_DIR)
 if INGESTION_DIR not in sys.path:
     sys.path.insert(0, INGESTION_DIR)
 
@@ -160,6 +163,8 @@ default_args = {
     "max_retry_delay": timedelta(minutes=30),
     "on_failure_callback": notify_slack_on_failure,
 }
+
+T0_ENABLED_TEMPLATE = "{{ var.value.get('RENTAL_HISTORY_T0_ENABLED', 'false') }}"
 
 
 def _collection_priority_bash(job_module: str, extra_env: str = "") -> str:
@@ -229,6 +234,10 @@ def gold_dim_fact():
     build_bike_location = BashOperator(
         task_id="build_bike_location",
         bash_command=_collection_priority_bash("build_bike_location", "SNAPSHOT_DATE='{{ ds }}' "),
+        env={
+            "RENTAL_HISTORY_T0_ENABLED": T0_ENABLED_TEMPLATE,
+        },
+        append_env=True,
         execution_timeout=timedelta(minutes=20),
     )
     build_station_active = BashOperator(
