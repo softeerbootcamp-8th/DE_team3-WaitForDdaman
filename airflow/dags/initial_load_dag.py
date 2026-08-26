@@ -22,7 +22,8 @@ Silver를 채워두지 않으면 daily_batch/backfill을 별도로 한 번 더 �
 
     rental_history ─┬─> check_watermark_date_rental_history ─> set_bronze_ingestion_watermark_rental_history ─┐
                      └─> bootstrap_silver_watermark_rental_history ──────────────────────────────────────────┴─> load_silver_rental_history
-    failure_report ──> check_watermark_date_failure_report ─> set_bronze_ingestion_watermark_failure_report ──> load_silver_failure_report
+    failure_report ─┬─> check_watermark_date_failure_report ─> set_bronze_ingestion_watermark_failure_report ─┐
+                     └─> bootstrap_silver_watermark_failure_report ────────────────────────────────────────────┴─> load_silver_failure_report
 
 check_watermark_date_*는 사람이 입력한 *_watermark_date가 실제 Bronze 최대 적재일과
 다르면 경고 로그만 남기는 안전망이다 (DAG를 막지 않음 - ⚠️ 문단 참고).
@@ -192,6 +193,10 @@ default_args = {
         # 적재를 조용히 잘랐다 - 계획이 2024-12-28에서 끊겼는데 청크는 전부 성공하고
         # DAG도 success로 끝나서, 남은 1년 반을 워터마크를 직접 보기 전엔 알 수 없었다.
         "rental_history_silver_total_days_cap": "",
+        # failure_report Silver는 확정 구간 증분(#288)이라 기본 상한이 31일이다. 초기
+        # 적재는 2021-02부터를 한 번에 소화해야 하므로 사실상 상한 없음으로 둔다.
+        # 하루 볼륨이 작아 전 구간 한 커밋도 부담이 없다(실측 전량 3.9MB / 13.4초).
+        "failure_report_silver_total_days_cap": "36500",
     },
     doc_md=__doc__,
 )
@@ -585,13 +590,27 @@ def initial_load():
         execution_timeout=timedelta(minutes=10),
     )
 
-    # failure_report: silver_failure_report.py는 워터마크로 구간을 자르지 않고 매번 Bronze
-    # 전체를 재처리한다(#76 문서 참고) - bootstrap 대상이 아니다. set_bronze_ingestion_watermark_*
-    # 이후에 실행해, 처리 후 기록되는 Silver 워터마크(Bronze 워터마크의 미러)가 이번 초기
-    # 적재 값을 반영하게 한다.
+    # failure_report Silver 워터마크 부트스트랩 (#288). 전량 재처리 시절엔 Silver 워터마크가
+    # Bronze 값의 미러라 부트스트랩할 게 없었지만, 확정 구간 증분으로 바뀐 뒤에는 하한이
+    # 필요하다 - 없으면 read_watermark가 backfill_start_date(기본 2015-01-01)로 폴백해
+    # 데이터가 없는 6년치가 구간에 들어온다. Bronze의 MIN(파티션) - 1일로 찍는다.
+    bootstrap_silver_watermark_failure_report = BashOperator(
+        task_id="bootstrap_silver_watermark_failure_report",
+        bash_command=bash_job("bootstrap_silver_watermark", "DATASET=failure_report "),
+        execution_timeout=timedelta(minutes=10),
+        pool=BRONZE_POOL,  # Bronze 파티션 메타데이터를 읽으므로 다른 워터마크 태스크와 동일 풀
+    )
+
+    # failure_report Silver 승격. #288 이후 확정 구간 증분이므로 초기 적재에서는 상한을
+    # 풀어야 한다 - 기본 상한(31일)이면 2021-02부터의 Bronze를 한 실행에 소화하지 못하고
+    # 워터마크가 31일씩만 전진해 수십 번 재실행해야 한다. 하루 볼륨이 작아 전 구간을 한
+    # 커밋으로 교체해도 부담이 없다(실측 3.9MB / 229파일 전량 기준 13.4초).
     load_silver_failure_report = BashOperator(
         task_id="load_silver_failure_report",
-        bash_command=bash_staging_job("silver_failure_report"),
+        bash_command=bash_staging_job(
+            "silver_failure_report",
+            "MAX_DAYS_PER_RUN='{{ params.failure_report_silver_total_days_cap }}' ",
+        ),
         execution_timeout=timedelta(hours=1),
         pool=SILVER_POOL,
     )
@@ -605,7 +624,12 @@ def initial_load():
     ] >> compute_rental_history_backfill_ranges
     load_silver_rental_history_chunk >> finalize_rental_history_backfill_watermark
     failure_report >> check_watermark_date_failure_report >> set_bronze_ingestion_watermark_failure_report
-    set_bronze_ingestion_watermark_failure_report >> load_silver_failure_report
+    failure_report >> bootstrap_silver_watermark_failure_report
+    # rental_history와 같은 이유로 두 워터마크에 모두 의존한다 - silver_failure_report가
+    # Bronze 워터마크(상한)와 Silver 워터마크(하한)를 둘 다 읽어 구간을 정한다.
+    [
+        set_bronze_ingestion_watermark_failure_report, bootstrap_silver_watermark_failure_report,
+    ] >> load_silver_failure_report
     create_bronze_tables >> [list_rental_history_files, list_failure_report_files]
 
 
