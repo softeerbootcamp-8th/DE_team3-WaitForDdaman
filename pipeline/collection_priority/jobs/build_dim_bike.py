@@ -72,19 +72,39 @@ GOLD_PARTITION_SPEC = PartitionSpec(
 
 # 자전거별 첫 등장(MIN(rent_dt))을 구하고, 이미 gold.dim_bike에 있는 자전거는
 # LEFT JOIN + IS NULL로 제외한다 (Spark left_anti 조인과 동일 의미).
+# start_year는 따릉이 자전거 번호 대역별 실제 도입연도로 매핑하고, 매핑 대역에 없는
+# 번호나 비정형 ID는 최초 등장 시점(first_seen_at)의 연도를 폴백으로 사용한다.
 _NEW_BIKES_SQL = """
     WITH first_seen AS (
         SELECT bike_id, MIN(rent_dt) AS first_seen_at
         FROM silver_rental_history
         GROUP BY bike_id
+    ),
+    numbered AS (
+        SELECT
+            fs.bike_id,
+            fs.first_seen_at,
+            TRY_CAST(regexp_extract(fs.bike_id, '([0-9]+)', 1) AS BIGINT) AS bike_num
+        FROM first_seen fs
     )
     SELECT
-        CAST(fs.first_seen_at AS DATE) AS snapshot_date,
-        fs.bike_id AS bike_id,
-        fs.first_seen_at AS first_seen_at,
-        CAST(date_part('year', fs.first_seen_at) AS INT) AS start_year
-    FROM first_seen fs
-    LEFT JOIN existing_bike_ids e ON fs.bike_id = e.bike_id
+        CAST(n.first_seen_at AS DATE) AS snapshot_date,
+        n.bike_id AS bike_id,
+        n.first_seen_at AS first_seen_at,
+        CAST(
+            CASE
+                WHEN n.bike_num BETWEEN 1 AND 10000 THEN 2015
+                WHEN n.bike_num BETWEEN 10001 AND 20000 THEN 2017
+                WHEN n.bike_num BETWEEN 20001 AND 35000 THEN 2019
+                WHEN n.bike_num BETWEEN 40001 AND 49999 THEN 2020
+                WHEN n.bike_num BETWEEN 50001 AND 69999 THEN 2022
+                WHEN n.bike_num BETWEEN 70001 AND 79999 THEN 2024
+                WHEN n.bike_num >= 80001 AND n.bike_num <= 99999 THEN 2020
+                ELSE CAST(date_part('year', n.first_seen_at) AS INT)
+            END AS INT
+        ) AS start_year
+    FROM numbered n
+    LEFT JOIN existing_bike_ids e ON n.bike_id = e.bike_id
     WHERE e.bike_id IS NULL
 """
 
