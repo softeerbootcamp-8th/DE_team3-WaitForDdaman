@@ -94,13 +94,17 @@ RENTAL_HISTORY_SCHEMA = Schema(
     NestedField(20, "ingested_at", TimestamptzType(), required=False),
 )
 
+# reg_date_partition은 API 요청일이다 (실제 신고일이 아니다, #304). requested_date는
+# 그 의미를 이름으로 못박은 컬럼이고, observed_at은 응답을 관측한 논리 기준시각이다.
 FAILURE_REPORT_SCHEMA = Schema(
     NestedField(1, "bike_no", StringType(), required=False),
     NestedField(2, "reg_dttm", StringType(), required=False),
     NestedField(3, "failure_type", StringType(), required=False),
     NestedField(4, "reg_date_partition", StringType(), required=False),
-    NestedField(5, "source_file", StringType(), required=False),
-    NestedField(6, "ingested_at", TimestamptzType(), required=False),
+    NestedField(5, "requested_date", StringType(), required=False),
+    NestedField(6, "observed_at", TimestamptzType(), required=False),
+    NestedField(7, "source_file", StringType(), required=False),
+    NestedField(8, "ingested_at", TimestamptzType(), required=False),
 )
 
 STATION_MASTER_SCHEMA = Schema(

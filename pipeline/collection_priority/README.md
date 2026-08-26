@@ -24,6 +24,7 @@ silver.bikeman_action ─────────> gold.bike_last_action ──�
 
 - `build_dim_bike.py`: `silver.rental_history` -> `gold.dim_bike` (자전거별 최초 등장일, append-only INSERT + SQL 어서션 검증)
   - 컬럼: `snapshot_date`(파티션, 최초 등장일), `bike_id`(PK), `first_seen_at`, `start_year`
+  - `start_year`: 따릉이 자전거 번호 대역(`SPB-XXXXX`)별 실제 도입연도로 매핑(1~1만: 2015, 1~2만: 2017, 2~3.5만: 2019, 4만번대: 2020, 5~6만번대: 2022, 7만번대: 2024, 8만번대 새싹: 2020). 매핑 외 신규/비정형 번호는 대여이력 `first_seen_at` 연도로 자동 폴백
   - 한 자전거는 최초 등장한 날짜 파티션에 딱 한 번만 존재 (MERGE/UPDATE 없음 - first_seen_at은 불변, UPSERT 시 기존값 절대 덮어쓰지 않음)
   - 상한선: Silver 워터마크(`config/watermark_keys.py`의 `SILVER_RENTAL_HISTORY`), 하한선: Gold 전용 워터마크(`GOLD_DIM_BIKE`)
   - `MAX_DAYS_PER_RUN` 미지정 시 기본 31일로 캡됨 - Silver와 동일한 이유(cold start 시 무제한 배치 방지)

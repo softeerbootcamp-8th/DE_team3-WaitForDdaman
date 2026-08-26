@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 import pyarrow as pa
+from pyiceberg.types import StringType, TimestamptzType
 
 import config
 from common.api_client import (
@@ -27,6 +28,7 @@ from common.api_client import (
     strip_pagination_meta,
 )
 from common.cutoff_utils import parse_collection_cutoff
+from common.iceberg_catalog import build_iceberg_catalog
 from common.iceberg_io import overwrite_partition
 from common.s3_utils import ensure_bucket, put_json
 from common.watermark import read_watermark, write_watermark
@@ -43,22 +45,39 @@ logger = logging.getLogger(__name__)
 WATERMARK_KEY = BRONZE_FAILURE_REPORT
 COMPLETION_PREFIX = "_meta/completion/bronze_failure_report"
 
+# ⚠️ reg_date_partition은 "API 요청일"이다 (실제 신고일이 아니다, #304).
+# tbCycleFailureReport는 요청일 기준 최대 31일치를 함께 돌려주므로 한 파티션 안에
+# 신고일이 여러 개 섞인다. requested_date는 그 의미를 이름으로 못박은 컬럼이고
+# (파티션 값과 항상 같다), observed_at은 그 응답을 관측한 논리 기준시각이다.
+# 실제 신고일 기준 정제는 Silver 책임 - staging/jobs/silver_failure_report.py 참고.
 ARROW_SCHEMA = pa.schema([
     pa.field("bike_no", pa.string()),
     pa.field("reg_dttm", pa.string()),
     pa.field("failure_type", pa.string()),
     pa.field("reg_date_partition", pa.string()),
+    pa.field("requested_date", pa.string()),
+    pa.field("observed_at", pa.timestamp("us", tz="UTC")),
     pa.field("source_file", pa.string()),
     pa.field("ingested_at", pa.timestamp("us", tz="UTC")),
 ])
+
+# 기존 테이블에 없을 수 있는 수집 메타데이터 컬럼 - _ensure_bronze_columns가 채운다.
+REQUEST_METADATA_COLUMNS = ("requested_date", "observed_at")
 
 
 def _table_name() -> str:
     return "bronze.failure_report"
 
 
-def _build_arrow_table(rows: List[Dict[str, Any]], date_str: str) -> pa.Table:
+def _build_arrow_table(
+    rows: List[Dict[str, Any]], date_str: str, observed_at: datetime | None = None
+) -> pa.Table:
+    """API 응답을 Bronze 모양으로 옮긴다. 요청일로 행을 잘라내지 않는다(#304).
+
+    observed_at을 안 주면 적재 시각으로 채운다 - 로컬 단독 실행/기존 호출부 호환용.
+    """
     ingested_at = datetime.now(timezone.utc)
+    observed_at_val = (observed_at or ingested_at).astimezone(timezone.utc)
     source_file_val = f"api:{date_str}"
 
     cols: Dict[str, list] = {
@@ -66,6 +85,8 @@ def _build_arrow_table(rows: List[Dict[str, Any]], date_str: str) -> pa.Table:
         "reg_dttm": [],
         "failure_type": [],
         "reg_date_partition": [],
+        "requested_date": [],
+        "observed_at": [],
         "source_file": [],
         "ingested_at": [],
     }
@@ -84,21 +105,62 @@ def _build_arrow_table(rows: List[Dict[str, Any]], date_str: str) -> pa.Table:
             cols[dst].append(val)
 
         cols["reg_date_partition"].append(date_str)
+        cols["requested_date"].append(date_str)
+        cols["observed_at"].append(observed_at_val)
         cols["source_file"].append(source_file_val)
         cols["ingested_at"].append(ingested_at)
 
     return pa.table(cols, schema=ARROW_SCHEMA)
 
 
-def _process_one_day(target_date: date) -> int:
+def _ensure_bronze_columns(catalog=None) -> None:
+    """수집 메타데이터 컬럼(requested_date/observed_at)이 없으면 스키마를 진화시킨다.
+
+    이 잡은 Spark 없이 PyIceberg로 쓰기 때문에, 기존 테이블에 없는 컬럼이 Arrow에
+    들어 있으면 overwrite가 실패한다. 컬럼 추가는 하위호환 변경(기존 행은 NULL)이라
+    초기 적재분과 이미 쌓인 파티션을 건드리지 않는다.
+    """
+    cat = catalog or build_iceberg_catalog()
+    table = cat.load_table(_table_name())
+    existing = set(table.schema().column_names)
+    missing = [name for name in REQUEST_METADATA_COLUMNS if name not in existing]
+    if not missing:
+        return
+
+    logger.info("%s 스키마 진화: %s 컬럼 추가", _table_name(), missing)
+    with table.update_schema() as update:
+        for name in missing:
+            field = ARROW_SCHEMA.field(name)
+            iceberg_type = TimestamptzType() if pa.types.is_timestamp(field.type) else StringType()
+            update.add_column(name, iceberg_type)
+
+
+def _process_one_day(target_date: date, cutoff: datetime | None = None) -> int:
+    """요청일 하나의 API 응답을 Raw/Bronze에 그대로 적재한다.
+
+    ⚠️ 응답은 요청일 하루치가 아니라 요청일 기준 최대 31일치다(#304). 여기서 요청일로
+    잘라내면 원본이 유실되므로 자르지 않는다 - 파티션만 요청일이고, 실제 신고일 기준
+    정제와 중복 제거는 Silver가 한다.
+    """
     raw_rows = list(fetch_failure_reports_by_date(target_date))
     date_str = target_date.strftime("%Y-%m-%d")
+    # 표기는 호출자가 준 시간대 그대로 남긴다(Raw 매니페스트와 같은 값이 되도록).
+    # Arrow 컬럼으로 옮길 때만 _build_arrow_table이 UTC로 정규화한다.
+    observed_at = cutoff or datetime.now(timezone.utc)
 
     ensure_bucket(config.SETTINGS.raw_bucket)
     put_json(
         config.SETTINGS.raw_bucket,
         f"raw/failure_report/api/reg_dt={date_str}/payload.json",
-        {"reg_dt": date_str, "row_count": len(raw_rows), "rows": raw_rows},
+        {
+            "dataset": "failure_report",
+            "target_date": date_str,
+            "requested_date": date_str,
+            "observed_at": observed_at.isoformat(),
+            "row_count": len(raw_rows),
+            "reg_dt": date_str,  # 기존 키 호환
+            "rows": raw_rows,
+        },
     )
 
     if not raw_rows:
@@ -109,11 +171,12 @@ def _process_one_day(target_date: date) -> int:
     actual_columns = list({k for r in rows for k in r.keys()})
     validate_and_report(actual_columns)
 
-    arrow_table = _build_arrow_table(rows, date_str)
+    arrow_table = _build_arrow_table(rows, date_str, observed_at=observed_at)
     row_count = len(arrow_table)
 
+    _ensure_bronze_columns()
     overwrite_partition(_table_name(), arrow_table, "reg_date_partition", date_str)
-    logger.info("%s: %d행 PyIceberg 적재 완료", date_str, row_count)
+    logger.info("%s: 요청일 응답 %d행 PyIceberg 적재 완료 (신고일 여럿 포함 가능)", date_str, row_count)
     return row_count
 
 
@@ -190,7 +253,7 @@ def run() -> None:
         while current <= end_date:
             started_at = datetime.now(timezone.utc).isoformat()
             try:
-                row_count = _process_one_day(current)
+                row_count = _process_one_day(current, cutoff=cutoff)
                 status = "COMPLETE_EMPTY" if row_count == 0 else "COMPLETE"
                 _write_completion_marker(bucket, current, status, row_count, started_at)
                 write_watermark(current, watermark_key=WATERMARK_KEY)
@@ -205,7 +268,7 @@ def run() -> None:
     if t0_enabled:
         logger.info("FAILURE_REPORT_T0_ENABLED=true 적용 - 기준일 당일(%s) 파티션 적재 시작 (워터마크 미갱신)", as_of_date)
         try:
-            _process_one_day(as_of_date)
+            _process_one_day(as_of_date, cutoff=cutoff)
             logger.info("기준일 당일(%s) 고장신고 파티션 적재 완료", as_of_date)
         except (SchemaValidationError, SeoulApiError, SeoulApiTransientError) as e:
             logger.error("기준일 당일(%s) 고장신고 T0 적재 실패: %s", as_of_date, e)
