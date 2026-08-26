@@ -304,3 +304,38 @@ def test_aws_env_emr_batch_tasks_use_entry_point_arguments_not_input_files_env(
         spark_submit = job_driver["sparkSubmit"]
         assert spark_submit["entryPointArguments"] == ["--input-files-json", expected_files]
         assert "INPUT_FILES" not in spark_submit["sparkSubmitParameters"]
+
+
+def test_failure_report_silver_depends_on_both_watermarks(dag):
+    """silver_failure_report가 확정 구간 증분으로 바뀐 뒤(#288) 하한 워터마크가 필요해졌다.
+
+    Bronze 워터마크(상한)와 Silver 워터마크(하한)를 둘 다 읽어 구간을 정하므로,
+    두 워터마크 태스크가 모두 upstream이어야 한다. bootstrap이 빠지면
+    read_watermark가 backfill_start_date(기본 2015-01-01)로 폴백해 데이터가 없는
+    6년치가 구간에 들어온다.
+    """
+    upstream = dag.get_task("load_silver_failure_report").upstream_task_ids
+
+    assert "set_bronze_ingestion_watermark_failure_report" in upstream
+    assert "bootstrap_silver_watermark_failure_report" in upstream
+
+
+def test_failure_report_bootstrap_targets_its_own_dataset(dag):
+    command = dag.get_task("bootstrap_silver_watermark_failure_report").bash_command
+
+    assert "bootstrap_silver_watermark" in command
+    assert "DATASET=failure_report" in command
+
+
+def test_initial_load_lifts_failure_report_silver_day_cap(dag):
+    """초기 적재는 2021-02부터를 한 번에 소화해야 한다.
+
+    잡의 기본 상한은 31일이라, 초기 적재에서 상한을 풀지 않으면 워터마크가 31일씩만
+    전진해 수십 번 재실행해야 한다.
+    """
+    command = dag.get_task("load_silver_failure_report").bash_command
+    params = dag.params
+
+    assert "MAX_DAYS_PER_RUN=" in command
+    assert "failure_report_silver_total_days_cap" in command
+    assert int(str(params["failure_report_silver_total_days_cap"])) >= 3650
