@@ -8,12 +8,13 @@ services/api/scripts/seed_dim_district.py로 별도 채워야 한다.
 상태를 메모리에 들고 바꾸던 예전 방식(OperationState의 mutable 리스트)은 없다 — 매 요청이
 그 시점의 DB를 그대로 본다.
 """
-from __future__ import annotations
-
+import logging
 from sqlalchemy import text
 
 from services.api.app.db import engine
 from services.api.app.geo import project as _latlon_to_xy
+
+logger = logging.getLogger(__name__)
 
 # 정비소 하루 처리 capacity 기본값. 실제 배차 여력은 운영자가 프론트에서 구/지역별로
 # 조정하는 값이라 DB에는 저장하지 않는다 — 이 값은 그 조정의 초기 기준값일 뿐이다.
@@ -151,107 +152,106 @@ def get_bikes() -> tuple[list[dict], list[dict]]:
 
 
 def ensure_action_log_table() -> None:
-    """app.action_log 준비 (멱등).
-
-    이 테이블은 develop의 sql/bike_man/bikeman_seed_init.sql에 "app 스키마 placeholder"로
-    선언만 돼 있고 아무도 읽고 쓰지 않는다. 확정 기록에 쓰려면 어느 날짜 확정인지 구분할
-    snapshot_date와, 나중에 이벤트 생성기가 필요로 하는 station_id가 있어야 해서 여기서
-    덧붙인다 — ADD COLUMN IF NOT EXISTS라 seed SQL 실행 순서와 무관하게 안전하다.
-    """
-    with engine.begin() as conn:
-        conn.execute(text("CREATE SCHEMA IF NOT EXISTS app"))
-        conn.execute(
-            text(
-                """
-                CREATE TABLE IF NOT EXISTS app.action_log (
-                    id            SERIAL PRIMARY KEY,
-                    bike_id       VARCHAR(20) NOT NULL,
-                    action_taken  VARCHAR(50),
-                    actioned_by   VARCHAR(50),
-                    actioned_at   TIMESTAMP DEFAULT now()
+    """app.action_log 준비 (멱등 및 안전 처리)."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("CREATE SCHEMA IF NOT EXISTS app"))
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS app.action_log (
+                        id            SERIAL PRIMARY KEY,
+                        bike_id       VARCHAR(20) NOT NULL,
+                        action_taken  VARCHAR(50),
+                        actioned_by   VARCHAR(50),
+                        actioned_at   TIMESTAMP DEFAULT now(),
+                        snapshot_date DATE,
+                        station_id    VARCHAR(20)
+                    )
+                    """
                 )
-                """
             )
-        )
-        conn.execute(text("ALTER TABLE app.action_log ADD COLUMN IF NOT EXISTS snapshot_date DATE"))
-        conn.execute(text("ALTER TABLE app.action_log ADD COLUMN IF NOT EXISTS station_id VARCHAR(20)"))
-        conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS action_log_snapshot_idx "
-                "ON app.action_log (snapshot_date, bike_id)"
+            conn.execute(text("ALTER TABLE app.action_log ADD COLUMN IF NOT EXISTS snapshot_date DATE"))
+            conn.execute(text("ALTER TABLE app.action_log ADD COLUMN IF NOT EXISTS station_id VARCHAR(20)"))
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS action_log_snapshot_idx "
+                    "ON app.action_log (snapshot_date, bike_id)"
+                )
             )
-        )
+    except Exception as e:
+        logger.warning("ensure_action_log_table skipped or failed: %s", e)
 
 
 def get_latest_confirmation() -> dict:
-    """오늘 스냅샷의 마지막 확정 상태. 새로고침해도 확정 여부가 보이도록 프론트가 이걸 읽는다.
-
-    append-only라 같은 날 여러 배치가 쌓일 수 있으므로 최신 배치(actioned_at 최대값)만 센다.
-    어제 확정이 남아있어도 오늘 스냅샷 기준으로만 보므로 오늘 것으로 오인되지 않는다.
-    """
+    """오늘 스냅샷의 마지막 확정 상태. 새로고침해도 확정 여부가 보이도록 프론트가 이걸 읽는다."""
     ensure_action_log_table()
     snapshot_date = _latest_snapshot_date()
     if snapshot_date is None:
         return {"snapshot_date": "", "confirmed": 0, "actioned_at": None}
 
-    with engine.connect() as conn:
-        row = conn.execute(
-            text(
-                """
-                SELECT count(*) AS confirmed, max(actioned_at) AS actioned_at
-                FROM app.action_log
-                WHERE snapshot_date = :d AND action_taken = :action
-                  AND actioned_at = (
-                      SELECT max(actioned_at) FROM app.action_log
-                      WHERE snapshot_date = :d AND action_taken = :action
-                  )
-                """
-            ),
-            {"d": snapshot_date, "action": COLLECT_ACTION},
-        ).mappings().first()
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT count(*) AS confirmed, max(actioned_at) AS actioned_at
+                    FROM app.action_log
+                    WHERE snapshot_date = :d AND action_taken = :action
+                      AND actioned_at = (
+                          SELECT max(actioned_at) FROM app.action_log
+                          WHERE snapshot_date = :d AND action_taken = :action
+                      )
+                    """
+                ),
+                {"d": snapshot_date, "action": COLLECT_ACTION},
+            ).mappings().first()
 
-    actioned_at = row["actioned_at"] if row else None
-    return {
-        "snapshot_date": snapshot_date.isoformat(),
-        "confirmed": row["confirmed"] if row else 0,
-        "actioned_at": actioned_at.isoformat() if actioned_at else None,
-    }
+        actioned_at = row["actioned_at"] if row else None
+        return {
+            "snapshot_date": snapshot_date.isoformat(),
+            "confirmed": row["confirmed"] if row and row["confirmed"] is not None else 0,
+            "actioned_at": actioned_at.isoformat() if actioned_at else None,
+        }
+    except Exception as e:
+        logger.warning("get_latest_confirmation failed: %s", e)
+        return {"snapshot_date": snapshot_date.isoformat(), "confirmed": 0, "actioned_at": None}
 
 
 def get_confirmed_bikes() -> dict:
-    """가장 최근 확정 배치에 담긴 자전거 목록. 확정 내역 조회 화면이 쓴다.
-
-    app.action_log에는 bike_id/station_id만 있으므로 화면에 필요한 위험도·대여소 정보는
-    serving.bike_risk_daily / station_daily에서 조인해 채운다.
-    """
+    """가장 최근 확정 배치에 담긴 자전거 목록. 확정 내역 조회 화면이 쓴다."""
     summary = get_latest_confirmation()
     if summary["confirmed"] == 0:
         return {**summary, "bikes": []}
 
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                """
-                SELECT b.bike_id, b.station_name, b.district, b.region, b.healthy_ratio,
-                       b.risk_grade, b.risk_score, b.dist_km, b.aging,
-                       b.fail_history, s.urgency AS station_urgency
-                FROM app.action_log a
-                JOIN serving.bike_risk_daily b
-                  ON b.bike_id = a.bike_id AND b.snapshot_date = a.snapshot_date
-                LEFT JOIN serving.station_daily s
-                  ON s.station_id = b.station_id AND s.snapshot_date = b.snapshot_date
-                WHERE a.snapshot_date = :d AND a.action_taken = :action
-                  AND a.actioned_at = (
-                      SELECT max(actioned_at) FROM app.action_log
-                      WHERE snapshot_date = :d AND action_taken = :action
-                  )
-                ORDER BY b.risk_score DESC
-                """
-            ),
-            {"d": summary["snapshot_date"], "action": COLLECT_ACTION},
-        ).mappings().all()
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT b.bike_id, b.station_name, b.district, b.region, b.healthy_ratio,
+                           b.risk_grade, b.risk_score, b.dist_km, b.aging,
+                           b.fail_history, s.urgency AS station_urgency
+                    FROM app.action_log a
+                    JOIN serving.bike_risk_daily b
+                      ON b.bike_id = a.bike_id AND b.snapshot_date = a.snapshot_date
+                    LEFT JOIN serving.station_daily s
+                      ON s.station_id = b.station_id AND s.snapshot_date = b.snapshot_date
+                    WHERE a.snapshot_date = :d AND a.action_taken = :action
+                      AND a.actioned_at = (
+                          SELECT max(actioned_at) FROM app.action_log
+                          WHERE snapshot_date = :d AND action_taken = :action
+                      )
+                    ORDER BY b.risk_score DESC
+                    """
+                ),
+                {"d": summary["snapshot_date"], "action": COLLECT_ACTION},
+            ).mappings().all()
 
-    return {**summary, "bikes": [_to_bike(r) for r in rows]}
+        return {**summary, "bikes": [_to_bike(r) for r in rows]}
+    except Exception as e:
+        logger.warning("get_confirmed_bikes failed: %s", e)
+        return {**summary, "bikes": []}
 
 
 def confirm_collection(bike_ids: list[str]) -> dict:
