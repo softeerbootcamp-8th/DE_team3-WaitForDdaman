@@ -50,8 +50,8 @@ class CheckResult:
     error: Optional[str] = None
 
 
-def load_config(path: Union[str, Path]) -> tuple[str, str, list[CheckDefinition]]:
-    """어써션 YAML을 읽어 (source_name, target_table, 체크 목록)을 반환한다."""
+def load_config(path: Union[str, Path]) -> tuple[str, str, str, list[CheckDefinition]]:
+    """어써션 YAML을 읽어 (source_name, target_table, partition_column, 체크 목록)을 반환한다."""
     with open(path, "r", encoding="utf-8") as fh:
         raw = yaml.safe_load(fh)
 
@@ -67,7 +67,7 @@ def load_config(path: Union[str, Path]) -> tuple[str, str, list[CheckDefinition]
         )
         for c in raw["checks"]
     ]
-    return raw["source_name"], raw["target_table"], checks
+    return raw["source_name"], raw["target_table"], raw["partition_column"], checks
 
 
 def _judge(value: float, comparison: Optional[str], threshold: Optional[float]) -> str:

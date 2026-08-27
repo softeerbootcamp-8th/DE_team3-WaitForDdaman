@@ -1,0 +1,30 @@
+# 대여소정보(station_master) Bronze DQ 어써션
+#
+# station_id는 골드 전체 조인 키라 결측이면 그 스냅샷에서 해당 대여소가 골드 어디에도
+# 안 붙는다. hold_num은 station_master_schema.py 주석에 "행마다 빠지는 필드"라고
+# 실측 기록돼있어 하드 threshold 없이 추이만 관찰한다.
+
+source_name: bronze_station_master
+target_table: bronze.station_master
+partition_column: snapshot_date
+
+checks:
+  - check_name: station_id_null_rate
+    target_column: station_id
+    severity: error
+    comparison: lte
+    threshold: 0.001
+    description: "골드 조인 키(station_id) 결측률 - 결측이면 그 대여소가 골드에서 누락됨"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (WHERE station_id IS NULL) AS DOUBLE) / COUNT(*)
+      FROM {table}
+
+  - check_name: hold_num_null_rate
+    target_column: hold_num
+    severity: monitor
+    comparison: null
+    threshold: null
+    description: "거치대수(hold_num) 결측률 - 알려진 결측 필드라 하드 판정 없이 추이만 관찰"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (WHERE hold_num IS NULL) AS DOUBLE) / COUNT(*)
+      FROM {table}

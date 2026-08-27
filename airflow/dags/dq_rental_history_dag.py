@@ -35,6 +35,7 @@ from dag_common import DEFAULT_ARGS, SILVER_POOL
 INGESTION_DIR = "/opt/airflow/ingestion"
 PYTHON = "python"
 SOURCE_NAME = "rental_history"
+DQ_ASSERTIONS_CONFIG = "/opt/airflow/pylib/config/dq/rental_history.yaml"
 
 
 def _bash(job_module: str) -> str:
@@ -43,6 +44,7 @@ def _bash(job_module: str) -> str:
         f"PYTHONPATH={INGESTION_DIR}:$PYTHONPATH "
         "EXECUTION_DATE='{{ ds }}' "
         f"DQ_SOURCE_NAME={SOURCE_NAME} "
+        f"DQ_ASSERTIONS_CONFIG={DQ_ASSERTIONS_CONFIG} "
         f"{PYTHON} -m jobs.{job_module}"
     )
 
@@ -60,7 +62,7 @@ def _bash(job_module: str) -> str:
 def dq_rental_history():
     run_assertions = BashOperator(
         task_id="run_dq_assertions",
-        bash_command=_bash("run_dq_assertions_rental_history"),
+        bash_command=_bash("run_dq_assertions"),
         execution_timeout=timedelta(minutes=30),
         pool=SILVER_POOL,
     )

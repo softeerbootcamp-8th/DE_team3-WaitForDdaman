@@ -1,0 +1,37 @@
+# 따맨(bikeman) 이벤트 Bronze DQ 어써션
+#
+# Bronze 스키마 계약(ingestion/schema/bikeman_event_schema.py)은 필수 컬럼 존재 여부와
+# event_type이 COLLECT/DEPLOY 값 집합에 속하는지까지는 검증하지 않는다. 시간 역전
+# (occurred_at > received_at)은 Silver(bikeman_action_schema.py)가 quarantine으로
+# 이미 걸러내지만, 그 전에 Bronze 단계에서 추이를 관찰해두면 급증을 더 빨리 알 수 있다.
+
+source_name: bronze_bikeman_event
+target_table: bronze.bikeman_event
+partition_column: occurred_date_partition
+
+checks:
+  - check_name: event_type_invalid_rate
+    target_column: event_type
+    severity: error
+    comparison: lte
+    threshold: 0.0
+    description: "event_type이 COLLECT/DEPLOY가 아닌 비율 - Postgres 쪽 값 집합이 바뀌면 0을 넘어야 정상"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (
+               WHERE event_type NOT IN ('COLLECT', 'DEPLOY')
+             ) AS DOUBLE) / COUNT(*)
+      FROM {table}
+
+  - check_name: occurred_after_received_rate
+    target_column: occurred_at
+    severity: warn
+    comparison: null
+    threshold: null
+    description: "occurred_at(발생) > received_at(수신) 역전 비율 - Silver quarantine 사유이므로 하드 판정 없이 추이만 관찰"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (
+               WHERE occurred_at IS NOT NULL
+                 AND received_at IS NOT NULL
+                 AND occurred_at > received_at
+             ) AS DOUBLE) / COUNT(*)
+      FROM {table}

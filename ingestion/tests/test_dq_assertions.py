@@ -108,6 +108,7 @@ def test_load_config_parses_yaml(tmp_path):
             """
             source_name: rental_history
             target_table: silver.rental_history
+            partition_column: rent_date_partition
             checks:
               - check_name: sex_cd_null_rate
                 target_column: sex_cd
@@ -129,10 +130,11 @@ def test_load_config_parses_yaml(tmp_path):
         encoding="utf-8",
     )
 
-    source_name, target_table, checks = load_config(config_path)
+    source_name, target_table, partition_column, checks = load_config(config_path)
 
     assert source_name == "rental_history"
     assert target_table == "silver.rental_history"
+    assert partition_column == "rent_date_partition"
     assert len(checks) == 2
     assert checks[0].check_name == "sex_cd_null_rate"
     assert checks[0].severity == "monitor"
