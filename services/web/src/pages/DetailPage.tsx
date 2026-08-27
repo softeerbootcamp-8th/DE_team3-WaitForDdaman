@@ -97,6 +97,27 @@ export function DetailPage({
 
   const activeBike = activeDetailId ? (byId.get(activeDetailId) ?? null) : null;
 
+  const activeStation = useMemo(() => {
+    if (!activeBike) return null;
+    return (
+      mapData.stations.find(
+        (s) =>
+          s.station_name.trim() === activeBike.station_name?.trim() ||
+          s.station_id === activeBike.station_id,
+      ) ?? null
+    );
+  }, [mapData.stations, activeBike]);
+
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setActiveDetailId(null);
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
   const regionPool = useMemo(() => pool.filter((b) => matchesRegion(b, regionFilter)), [pool, regionFilter]);
   const { critCount, warningCount } = useMemo(
     () =>
@@ -125,8 +146,10 @@ export function DetailPage({
         <DistrictMap
           viewBox={mapData.view_box}
           districts={mapData.districts}
+          stations={mapData.stations}
           variant="mini"
           highlight={(gu) => isDistrictActive(gu, regionFilter, guToSide)}
+          highlightStation={activeStation}
           onSelectDistrict={(gu) => onRegionFilterChange({ kind: "gu", name: gu })}
         />
       </div>
@@ -174,8 +197,8 @@ export function DetailPage({
           </div>
         </div>
 
-        <div className="detail-panel">
-          <DetailPanel bike={activeBike} />
+        <div className={`detail-panel${activeBike ? " active" : ""}`}>
+          <DetailPanel bike={activeBike} onClose={() => setActiveDetailId(null)} />
         </div>
       </div>
     </>

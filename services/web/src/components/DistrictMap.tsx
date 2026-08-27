@@ -10,6 +10,7 @@ interface DistrictMapProps {
   onSelectDistrict?: (guName: string) => void;
   showHeatmap?: boolean;
   showStationDots?: boolean;
+  highlightStation?: MapStation | null;
 }
 
 interface HoverInfo {
@@ -27,6 +28,7 @@ export function DistrictMap({
   onSelectDistrict,
   showHeatmap = variant === "full",
   showStationDots = variant === "full",
+  highlightStation,
 }: DistrictMapProps) {
   const mapCardRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -102,6 +104,16 @@ export function DistrictMap({
               />
             );
           })}
+        {highlightStation && (
+          <g className="station-pulse-group" transform={`translate(${highlightStation.x}, ${highlightStation.y})`}>
+            <circle className="station-pulse-ring-outer" r="14" />
+            <circle className="station-pulse-ring-inner" r="7" />
+            <circle className="station-pulse-core" r="3.5" />
+            <text className="station-pulse-label" x="0" y="-7">
+              {highlightStation.station_name}
+            </text>
+          </g>
+        )}
       </svg>
       {showHeatmap && <canvas ref={canvasRef} />}
       {hover && (
