@@ -61,18 +61,18 @@ body{
 
 .capacity-panel{
   background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
-  margin-bottom:16px;overflow:hidden;
+  overflow:hidden;margin-bottom:0;
 }
-.capacity-rows{display:flex;flex-wrap:wrap;gap:10px;padding:14px 16px;}
+.capacity-rows{display:flex;flex-wrap:wrap;gap:8px;padding:10px 14px;}
 .capacity-row{
-  background:var(--moss-deep);color:#fff;border-radius:8px;padding:10px 14px;min-width:150px;
-  display:flex;flex-direction:column;gap:6px;
+  background:var(--moss-deep);color:#fff;border-radius:8px;padding:8px 12px;min-width:120px;flex:1;
+  display:flex;flex-direction:column;gap:4px;
 }
-.capacity-row-label{font-size:11.5px;color:#cfe4d8;display:flex;align-items:center;justify-content:space-between;gap:8px;}
-.capacity-row-value{display:flex;align-items:baseline;gap:5px;font-size:15px;font-weight:650;font-variant-numeric:tabular-nums;}
+.capacity-row-label{font-size:11px;color:#cfe4d8;display:flex;align-items:center;justify-content:space-between;gap:6px;}
+.capacity-row-value{display:flex;align-items:baseline;gap:4px;font-size:14px;font-weight:650;font-variant-numeric:tabular-nums;}
 .capacity-row-value input{
-  width:64px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.3);border-radius:5px;
-  color:#fff;font-size:15px;font-weight:650;font-family:inherit;padding:2px 6px;font-variant-numeric:tabular-nums;
+  width:56px;background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);border-radius:4px;
+  color:#fff;font-size:14px;font-weight:650;font-family:inherit;padding:1px 5px;font-variant-numeric:tabular-nums;
 }
 
 .controls{display:flex;gap:10px;margin-bottom:10px;}
@@ -290,9 +290,20 @@ input[type="checkbox"]{
 .map-card.mini{max-width:220px;}
 .map-side{display:flex;flex-direction:column;gap:14px;}
 
-/* ---------- Detail page: region filter + mini map ---------- */
-.detail-region-layout{display:flex;align-items:flex-start;gap:16px;margin-bottom:16px;}
-.region-filter-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;flex:1;}
+/* ---------- Detail page: region filter + capacity + mini map ---------- */
+.detail-top-grid{
+  display:grid;grid-template-columns:1fr 240px;gap:16px;align-items:stretch;margin-bottom:16px;
+}
+.detail-top-left{
+  display:flex;flex-direction:column;gap:12px;justify-content:space-between;
+}
+.detail-top-map{
+  display:flex;align-items:center;justify-content:center;
+}
+.detail-top-map .map-card.mini{
+  width:100%;max-width:240px;height:100%;
+}
+.region-filter-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
 .page-head + .region-filter-bar{margin-bottom:18px;}
 .region-btn{
   font-family:inherit;font-size:12.5px;font-weight:600;color:var(--ink-soft);
@@ -407,6 +418,6 @@ input[type="checkbox"]{
   .map-layout{grid-template-columns:1fr;}
   .workspace{grid-template-columns:1fr;}
   .summary-row{grid-template-columns:1fr 1fr;}
-  .detail-region-layout{flex-direction:column;}
-  .map-card.mini{max-width:none;}
+  .detail-top-grid{grid-template-columns:1fr;}
+  .detail-top-map .map-card.mini{max-width:none;}
 }

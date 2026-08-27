@@ -141,28 +141,31 @@ export function DetailPage({
         </div>
       </div>
 
-      <div className="detail-region-layout">
-        <RegionFilterBar filter={regionFilter} onChange={onRegionFilterChange} districtNames={districtNames} />
-        <DistrictMap
-          viewBox={mapData.view_box}
-          districts={mapData.districts}
-          stations={mapData.stations}
-          variant="mini"
-          highlight={(gu) => isDistrictActive(gu, regionFilter, guToSide)}
-          highlightStation={activeStation}
-          onSelectDistrict={(gu) => onRegionFilterChange({ kind: "gu", name: gu })}
-        />
+      <div className="detail-top-grid">
+        <div className="detail-top-left">
+          <RegionFilterBar filter={regionFilter} onChange={onRegionFilterChange} districtNames={districtNames} />
+          <CapacityPanel
+            pool={pool}
+            filter={regionFilter}
+            capacity={capacity}
+            confirmCount={confirmTargets.length}
+            confirmed={confirmed}
+            submitState={submitState}
+            onConfirm={handleConfirm}
+          />
+        </div>
+        <div className="detail-top-map">
+          <DistrictMap
+            viewBox={mapData.view_box}
+            districts={mapData.districts}
+            stations={mapData.stations}
+            variant="mini"
+            highlight={(gu) => isDistrictActive(gu, regionFilter, guToSide)}
+            highlightStation={activeStation}
+            onSelectDistrict={(gu) => onRegionFilterChange({ kind: "gu", name: gu })}
+          />
+        </div>
       </div>
-
-      <CapacityPanel
-        pool={pool}
-        filter={regionFilter}
-        capacity={capacity}
-        confirmCount={confirmTargets.length}
-        confirmed={confirmed}
-        submitState={submitState}
-        onConfirm={handleConfirm}
-      />
 
       <Controls
         query={query}
