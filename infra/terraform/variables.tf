@@ -13,7 +13,7 @@ variable "app_env" {
 variable "raw_bucket" {
   description = "S3 bucket name for raw layer storage (config.SETTINGS.raw_bucket과 동일해야 함)"
   type        = string
-  default     = "ttareungyi-raw"
+  default     = "waitforddaman-raw"
 }
 
 variable "seoul_api_key" {
