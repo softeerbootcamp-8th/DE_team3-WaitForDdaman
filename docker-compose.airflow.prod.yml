@@ -1,4 +1,4 @@
-# Airflow 파이프라인 프로덕션 구성 (Airflow 전용 EC2) - deploy trigger 2026-08-26
+# Airflow 파이프라인 프로덕션 구성 (Airflow 전용 EC2)
 x-airflow-common:
   &airflow-common
   image: ${ECR_REGISTRY}/waitforddaman-airflow:${IMAGE_TAG:-latest}
@@ -114,7 +114,7 @@ services:
     # Bronze/Silver/Gold 적재 풀. DUCKDB_MEMORY_LIMIT(기본 2GB, common/duckdb_io.py)과
     # 짝을 이뤄 실제 워커인 t4g.large(8GB)에서 세 풀이 동시에 최대로 돌아도(2GB x 3 = 6GB)
     # OS/Airflow 오버헤드를 뺀 예산 안에 들어오도록 역산한 값이다(기존 3GB 기본값은
-    # t4g.xlarge/16GB로 잘못 가정해 8GB 워커에서 OOM이 재발할 수 있다). Gold는 원래 가드가
+    # t4g.xlarge/16GB로 잘못 가정해 8GB 워커에서 재차 OOM이 났다). Gold는 원래 가드가
     # 아예 없어 OOM으로 이어졌다 (#144/#285). 필요 시 실측 후 조정.
     command:
       - bash
@@ -123,9 +123,11 @@ services:
         airflow version &&
         airflow pools set bronze_ingest 1 "Bronze 적재 동시 실행 제한 (워커 메모리 가드)" &&
         airflow pools set silver_process 1 "Silver 변환 동시 실행 제한 (워커 메모리 가드)" &&
-        airflow pools set gold_process 1 "Gold 빌드 동시 실행 제한 (워커 메모리 가드)" &&
+        airflow pools set gold_process 1 "Gold 빌드 동시 실행 제한 (워커 메모리 가드, #285)" &&
         airflow pools set seoul_api 4 "서울시 API 키별 동시성 제한" &&
-        airflow pools set bronze_rental_history_commit 1 "bronze.rental_history 날짜별 backfill promote 직렬화" &&
+        airflow pools set rental_history_api 3 "대여 이력 API 키 1~3 병렬 수집 제한" &&
+        airflow pools set failure_report_api 1 "고장 신고 API 키 4 단일 수집 제한" &&
+        airflow pools set bronze_rental_history_commit 1 "bronze.rental_history 날짜별 catchup promote 직렬화" &&
         airflow pools set emr_initial_load 3 "EMR Serverless 초기 적재 배치 동시 제출 제한" &&
         airflow pools set s3_initial_load_staging 2 "초기 적재 S3 스테이징 업로드 동시 실행 제한" &&
         airflow variables set RENTAL_HISTORY_T0_ENABLED true &&
