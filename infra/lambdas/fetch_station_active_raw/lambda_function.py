@@ -103,7 +103,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     if not snapshot_date:
         snapshot_date = datetime.now(KST).strftime("%Y-%m-%d")
 
-    raw_bucket = os.environ.get("RAW_BUCKET", "ttareungyi-raw")
+    raw_bucket = os.environ.get("RAW_BUCKET", "waitforddaman-raw")
     api_key = os.environ.get("SEOUL_API_KEY")
     if not api_key:
         raise ValueError("SEOUL_API_KEY environment variable is required")
