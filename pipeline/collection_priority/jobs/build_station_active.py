@@ -125,6 +125,21 @@ def build_station_active(catalog, snapshot_date: str) -> pa.Table:
     return _join_active_stations(master_table, active_ids, snapshot_date, con)
 
 
+def _dedup_by_station_id(table: pa.Table, con: duckdb.DuckDBPyConnection | None = None) -> pa.Table:
+    """has_uniqueness(threshold=0.99) 하드 게이트가 1%까지는 통과시켜, 실패 시
+    전체 적재가 막히는 위험이 있다(#332 PR 리뷰). 쓰기 직전에 여기서 미리 한 행만
+    남겨서 그 하드 게이트가 사실상 항상 통과하게 만든다 - 어느 쪽이 "맞는" 값인지
+    판단하는 로직은 아니라 결정적으로 하나를 고를 뿐이다. 실제 원인 추적은
+    gold_station_active.yaml DQ 어써션(dq.check_result_history)이 계속 담당한다."""
+    conn = con or connect()
+    conn.register("dedup_target", table)
+    deduped = query_arrow(conn, "SELECT DISTINCT ON (station_id) * FROM dedup_target ORDER BY station_id")
+    dropped = len(table) - len(deduped)
+    if dropped:
+        logger.warning("gold.station_active: station_id 중복 %d건 dedup으로 제거", dropped)
+    return deduped
+
+
 def _validate_station_active(table: pa.Table) -> None:
     # 운영 중으로 확인된 대여소가 하나도 없는 경우(station_master/station_active
     # 교집합이 비는 극단적 상황)엔 이 결과도 0행일 수 있다. SQL 어서션은 0행에서
@@ -152,6 +167,7 @@ def run() -> None:
     gold_table = _ensure_gold_table(catalog)
 
     out_table = build_station_active(catalog, snapshot_date).select(GOLD_COLUMNS)
+    out_table = _dedup_by_station_id(out_table)
     row_count = len(out_table)
     try:
         _validate_station_active(out_table)

@@ -12,6 +12,7 @@ import pyarrow as pa
 
 from jobs.build_fact_station_inventory import (
     _aggregate_station_inventory,
+    _dedup_by,
     _merge_bike_last_action,
     _resolve_bike_station,
 )
@@ -215,3 +216,18 @@ def test_aggregate_snapshot_date_is_set():
     result = by_key(_aggregate_station_inventory(res, sa, SNAPSHOT_DATE), "station_id")
 
     assert result["ST-1"]["snapshot_date"].isoformat() == SNAPSHOT_DATE
+
+
+def test_dedup_by_keeps_one_row_per_key():
+    """has_uniqueness(threshold=0.99) 하드 게이트가 1%까지는 통과시키는 위험을
+    쓰기 전에 미리 제거한다(#332 PR 리뷰) - bike_last_action(bike_id)/
+    fact_station_inventory(station_id) 둘 다 이 함수 하나를 공유해서 쓴다."""
+    table = pa.table({
+        "station_id": ["ST-1", "ST-1", "ST-2"],
+        "bike_cnt": [3, 5, 1],
+    })
+
+    result = _dedup_by(table, "station_id")
+
+    assert len(result) == 2
+    assert sorted(result["station_id"].to_pylist()) == ["ST-1", "ST-2"]

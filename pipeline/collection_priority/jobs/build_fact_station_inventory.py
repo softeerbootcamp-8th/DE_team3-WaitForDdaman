@@ -332,6 +332,24 @@ def build_fact_station_inventory(catalog, snapshot_date: date, latest_action: pa
     return _aggregate_station_inventory(resolved, station_active, snapshot_date.strftime("%Y-%m-%d"))
 
 
+def _dedup_by(table: pa.Table, key_column: str, con: duckdb.DuckDBPyConnection | None = None) -> pa.Table:
+    """has_uniqueness(threshold=0.99) 하드 게이트가 1%까지는 통과시켜, 실패 시
+    전체 적재가 막히는 위험이 있다(#332 PR 리뷰). 쓰기 직전에 여기서 미리 한 행만
+    남겨서 그 하드 게이트가 사실상 항상 통과하게 만든다 - 어느 쪽이 "맞는" 값인지
+    판단하는 로직은 아니라 결정적으로 하나를 고를 뿐이다. 실제 원인 추적은
+    gold_bike_last_action.yaml/gold_fact_station_inventory.yaml DQ 어써션
+    (dq.check_result_history)이 계속 담당한다."""
+    conn = con or connect()
+    conn.register("dedup_target", table)
+    deduped = query_arrow(
+        conn, f"SELECT DISTINCT ON ({key_column}) * FROM dedup_target ORDER BY {key_column}"
+    )
+    dropped = len(table) - len(deduped)
+    if dropped:
+        logger.warning("%s 중복 %d건 dedup으로 제거", key_column, dropped)
+    return deduped
+
+
 def _validate_bike_last_action(table: pa.Table) -> None:
     # bikeman_action(수거/배치) 이벤트가 아직 하나도 없는 환경(신규 배포 직후 등)에서는
     # 이 결과가 통째로 0행일 수 있다 - 정상 상태다. common/sql_assert.py(#140)는 0행에서
@@ -371,6 +389,7 @@ def run() -> None:
     # gold.bike_last_action을 먼저 증분 갱신 - 아래 계산에 재사용하고 그대로
     # 테이블에도 써서 다음 실행의 baseline이 되게 한다.
     latest_action = build_bike_last_action(catalog, snapshot_date).select(BIKE_LAST_ACTION_COLUMNS)
+    latest_action = _dedup_by(latest_action, "bike_id")
     try:
         _validate_bike_last_action(latest_action)
     except QualityCheckError as e:
@@ -379,6 +398,7 @@ def run() -> None:
     overwrite_all(bike_last_action_table, latest_action)
 
     out_table = build_fact_station_inventory(catalog, snapshot_date, latest_action).select(GOLD_COLUMNS)
+    out_table = _dedup_by(out_table, "station_id")
     row_count = len(out_table)
     try:
         _validate_fact_station_inventory(out_table)

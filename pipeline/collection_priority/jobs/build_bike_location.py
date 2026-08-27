@@ -259,6 +259,21 @@ def build_bike_location(catalog, snapshot_date: date, t0_enabled: bool = False) 
     return _merge_baseline_delta(baseline, delta, snapshot_date.strftime("%Y-%m-%d"))
 
 
+def _dedup_by_bike_id(table: pa.Table, con: duckdb.DuckDBPyConnection | None = None) -> pa.Table:
+    """has_uniqueness(threshold=0.99) 하드 게이트가 1%까지는 통과시켜, 실패 시
+    전체 적재가 막히는 위험이 있다(#332 PR 리뷰). 쓰기 직전에 여기서 미리 한 행만
+    남겨서 그 하드 게이트가 사실상 항상 통과하게 만든다 - 어느 쪽이 "맞는" 값인지
+    판단하는 로직은 아니라 결정적으로 하나를 고를 뿐이다. 실제 원인 추적은
+    gold_bike_location.yaml DQ 어써션(dq.check_result_history)이 계속 담당한다."""
+    conn = con or connect()
+    conn.register("dedup_target", table)
+    deduped = query_arrow(conn, "SELECT DISTINCT ON (bike_id) * FROM dedup_target ORDER BY bike_id")
+    dropped = len(table) - len(deduped)
+    if dropped:
+        logger.warning("gold.bike_location: bike_id 중복 %d건 dedup으로 제거", dropped)
+    return deduped
+
+
 def _validate_bike_location(table: pa.Table) -> None:
     # 아직 반납 완료된 대여이력이 하나도 없는 환경(서비스 최초 구동 직후 등)에서는
     # 이 결과도 0행일 수 있다. common/sql_assert.py(#140)는 0행에서 위반이 자연히
@@ -286,6 +301,7 @@ def run() -> None:
     gold_table = _ensure_gold_table(catalog)
 
     out_table = build_bike_location(catalog, snapshot_date, t0_enabled=t0_enabled).select(GOLD_COLUMNS)
+    out_table = _dedup_by_bike_id(out_table)
     row_count = len(out_table)
     try:
         _validate_bike_location(out_table)  # 실패 시 QualityCheckError -> 적재 없이 배치 중단
