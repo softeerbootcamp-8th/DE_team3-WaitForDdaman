@@ -55,7 +55,7 @@ default_args = {
 
 @dag(
     dag_id="watermark_staleness_check",
-    # 매일 09:00 KST - bronze_daily_batch_all_sources(06:00)/gold_dim_fact(08:00) 등
+    # 매일 09:00 KST - bronze_daily_batch_all_sources(05:30)/gold_dim_fact(06:00) 등
     # 그날의 배치가 대부분 끝났을 시점 이후로 잡아 오탐(아직 안 끝났을 뿐인데 정체로
     # 오판)을 줄인다.
     schedule="0 9 * * *",

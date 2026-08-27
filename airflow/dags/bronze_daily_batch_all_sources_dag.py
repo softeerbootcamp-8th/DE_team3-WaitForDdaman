@@ -83,7 +83,7 @@ DAG의 daily_batch_station_master/daily_batch_station_active는 그 결과물을
 직접 넣었다 - "같은 원천 안"의 의존성이라 위 "원천 사이에 의존성을 두지 않는다" 원칙과
 충돌하지 않는다(station_master 원천 안에서만 닫혀 있음).
 
-이 변경으로 스냅샷 시점이 00:10 KST -> 06:00 KST(이 DAG 실행 시각)로 밀린다 - 두 원천 다
+이 변경으로 스냅샷 시점이 00:10 KST -> 05:30 KST(이 DAG 실행 시각)로 밀린다 - 두 원천 다
 과거 소급 조회가 안 되는 API라서 "그 날짜의 대표 스냅샷"이라는 의미 자체는 유지되고,
 하루 중 station_master/station_active 데이터가 크게 변하는 소스가 아니라 실질적 영향은
 없다고 판단했다. events:PutRule 권한이 열리면 다시 EventBridge로 분리할 수 있다.
@@ -139,7 +139,7 @@ FETCH_STATION_ACTIVE_RAW_LAMBDA = "fetch_station_active_raw"
 
 @dag(
     dag_id="bronze_daily_batch_all_sources",
-    schedule="0 6 * * *",  # 매일 06:00 KST - 전날 데이터가 확정된 뒤 수집
+    schedule="30 5 * * *",  # 매일 05:30 KST - 전날 데이터가 확정된 뒤 수집
     start_date=pendulum.datetime(2026, 8, 1, tz="Asia/Seoul"),
     catchup=False,
     max_active_runs=1,  # 두 run이 같은 파티션을 동시에 덮어쓰는 것 방지

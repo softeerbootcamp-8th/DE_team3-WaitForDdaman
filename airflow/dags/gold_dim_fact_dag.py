@@ -54,14 +54,6 @@ daily_batch_bikeman_event.py는 항상 "어제까지"만 처리하므로(오늘 
 그대로 넘겨서 이 센서가 워터마크를 영원히 못 따라잡고 매번 타임아웃났다
 (팀원 리뷰로 발견). `macros.ds_add(ds, -1)`로 하루 전 날짜를 넘겨서 고쳤다.
 
-### execution_delta 계산 (ExternalTaskSensor)
-이 DAG는 08:00 KST에 스케줄된다. `external_execution_date = logical_date -
-execution_delta` 공식이므로, "같은 날짜의 데이터"를 가리키는 상류 DAG의
-logical_date와 맞추려면 두 DAG의 스케줄 시각 차이를 그대로 execution_delta로
-넣어야 한다.
-    - rental_history(30 7 * * *): 08:00 - 07:30 = 30분
-    - station_master(0 7 * * *) / station_active(0 7 * * *): 08:00 - 07:00 = 1시간
-
 ### silver.station_active (2026-08-17, 담당 팀원 작업 반영)
 더 이상 더미가 아니다 - `silver_station_active` DAG(`staging/jobs/
 silver_station_active.py`)가 `bronze.station_active`에서 station_id만 추려
@@ -185,7 +177,7 @@ def _collection_priority_bash(job_module: str, extra_env: str = "") -> str:
 
 @dag(
     dag_id="gold_dim_fact",
-    schedule="0 8 * * *",  # 매일 08:00 KST - 상류 Silver DAG(07:00~07:30)가 보통 끝난 뒤
+    schedule="0 6 * * *",  # 매일 06:00 KST - Asset 센서(reschedule)가 Silver 준비를 기다리므로 고정 여유시간 불필요
     start_date=pendulum.datetime(2026, 8, 17, tz="Asia/Seoul"),  # silver_station_active 최초 가용일과 동일
     catchup=False,
     max_active_runs=1,
