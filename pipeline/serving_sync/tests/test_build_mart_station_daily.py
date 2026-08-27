@@ -60,6 +60,26 @@ def test_latitude_longitude_pass_through_unchanged():
     assert result["ST-1"]["longitude"] == 127.0
 
 
+def test_mart_dedups_duplicate_station_active_and_inventory_rows():
+    """gold.station_active/gold.fact_station_inventory는 has_uniqueness(threshold=0.99)
+    하드 게이트라 station_id 중복이 최대 1%까지 통과해서 여기로 들어올 수 있다 - 그런
+    입력이 와도 마트는 대여소당 한 행만 내야 한다(fan-out 방지, mart_bike_risk_daily와
+    동일 원칙). build()는 station_id로 dict를 만들어 행 중복 여부를 못 잡으므로,
+    여기서는 결과 테이블 자체의 행 수를 직접 확인한다."""
+    result_table = build_mart_station_daily(
+        station_active_table(
+            [
+                ("ST-1", "역삼역", "강남", "강남구", 37.5, 127.0, 10),
+                ("ST-1", "역삼역", "강남", "강남구", 37.5, 127.0, 10),  # 중복 2행
+            ]
+        ),
+        inventory_table([("ST-1", 5, 10), ("ST-1", 9, 10)]),  # 중복 2행
+        station_risk_table([]),
+        SNAPSHOT_DATE,
+    )
+    assert len(result_table) == 1
+
+
 def test_healthy_ratio_ge_70_is_sufficient():
     result = build(
         [("ST-1", "역삼역", "강남", "강남구", 37.5, 127.0, 10)],
