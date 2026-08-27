@@ -12,11 +12,11 @@ class Bike(BaseModel):
     district: str
     region: Region
     station_urgency: str
-    healthy_ratio: Optional[float]
+    healthy_ratio: Optional[float] = None
     risk_grade: Tier
     risk_score: float
-    dist_km: float
-    aging: float
+    dist_km: Optional[float] = None
+    aging: Optional[float] = None
     fail_history: list[str]
 
 

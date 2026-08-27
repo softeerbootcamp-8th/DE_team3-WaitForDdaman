@@ -56,6 +56,14 @@ def test_healthy_ratio는_None을_허용한다():
     assert Bike(**_bike(healthy_ratio=None)).healthy_ratio is None
 
 
+def test_aging은_None을_허용한다():
+    assert Bike(**_bike(aging=None)).aging is None
+
+
+def test_dist_km은_None을_허용한다():
+    assert Bike(**_bike(dist_km=None)).dist_km is None
+
+
 def test_필수_필드가_없으면_거부한다():
     payload = _bike()
     del payload["risk_score"]
