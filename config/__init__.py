@@ -77,8 +77,8 @@ class Settings:
     s3_region: str = os.getenv("AWS_DEFAULT_REGION", "ap-northeast-2")
     s3_access_key: str = os.getenv("AWS_ACCESS_KEY_ID", "test")
     s3_secret_key: str = os.getenv("AWS_SECRET_ACCESS_KEY", "test")
-    raw_bucket: str = os.getenv("RAW_BUCKET", "ttareungyi-raw")
-    warehouse_bucket: str = os.getenv("WAREHOUSE_BUCKET", "ttareungyi-warehouse")
+    raw_bucket: str = os.getenv("RAW_BUCKET", "waitforddaman-raw")
+    warehouse_bucket: str = os.getenv("WAREHOUSE_BUCKET", "waitforddaman-warehouse")
     # s3: Lambda가 수집한 S3 raw payload.json을 읽음 (기본값) / api: 직접 호출 fallback
     raw_source: str = os.getenv("RAW_SOURCE", "s3").strip().lower()
 
