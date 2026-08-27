@@ -39,12 +39,12 @@ export function DetailPanel({ bike }: { bike: Bike | null }) {
 
         <div className="detail-grid">
           <div className="stat-box">
-            <div className="s-label">누적 이동거리</div>
-            <div className="s-value">{bike.dist_km.toLocaleString()}km</div>
+             <div className="s-label">누적 이동거리</div>
+            <div className="s-value">{bike.dist_km != null ? `${bike.dist_km.toLocaleString()}km` : "정보없음"}</div>
           </div>
           <div className="stat-box">
             <div className="s-label">노후화</div>
-            <div className="s-value">{bike.aging.toLocaleString()}년</div>
+            <div className="s-value">{bike.aging != null ? `${bike.aging.toLocaleString()}년` : "정보없음"}</div>
           </div>
         </div>
 
