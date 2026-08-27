@@ -151,6 +151,7 @@ def test_other_bronze_sources_stay_independent_of_the_rental_group(dag):
         lambda_task = _task(dag, lambda_task_id)
         assert lambda_task.upstream_task_ids == set()
         assert lambda_task.downstream_task_ids == {task_id}
+        assert '"snapshot_date": "{{ ds }}"' in (lambda_task.payload or "")
 
     all_non_rental_task_ids = {
         task.task_id for task in dag.tasks if not task.task_id.startswith(f"{GROUP}.")
