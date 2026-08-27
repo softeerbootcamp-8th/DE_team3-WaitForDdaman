@@ -88,6 +88,7 @@ DAG의 daily_batch_station_master/daily_batch_station_active는 그 결과물을
 하루 중 station_master/station_active 데이터가 크게 변하는 소스가 아니라 실질적 영향은
 없다고 판단했다. events:PutRule 권한이 열리면 다시 EventBridge로 분리할 수 있다.
 """
+import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -158,6 +159,7 @@ def bronze_daily_batch_all_sources():
         task_id="fetch_station_master_raw",
         function_name=FETCH_STATION_MASTER_RAW_LAMBDA,
         invocation_type="RequestResponse",
+        payload=json.dumps({"snapshot_date": "{{ ds }}"}),
         execution_timeout=timedelta(minutes=5),
         priority_weight=10,
     )
@@ -319,6 +321,7 @@ def bronze_daily_batch_all_sources():
         task_id="fetch_station_active_raw",
         function_name=FETCH_STATION_ACTIVE_RAW_LAMBDA,
         invocation_type="RequestResponse",
+        payload=json.dumps({"snapshot_date": "{{ ds }}"}),
         execution_timeout=timedelta(minutes=5),
     )
     daily_batch_station_active = BashOperator(
