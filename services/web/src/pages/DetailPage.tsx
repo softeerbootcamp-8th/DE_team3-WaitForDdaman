@@ -101,9 +101,7 @@ export function DetailPage({
     if (!activeBike) return null;
     return (
       mapData.stations.find(
-        (s) =>
-          s.station_name.trim() === activeBike.station_name?.trim() ||
-          s.station_id === activeBike.station_id,
+        (s) => s.station_name.trim() === activeBike.station_name?.trim(),
       ) ?? null
     );
   }, [mapData.stations, activeBike]);
