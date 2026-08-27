@@ -42,9 +42,9 @@ cleaning:
   instant_return_max_dist_m: 10
 
 paths:
-  train_sample: "s3a://ttareungyi-warehouse/ml/risk_model/train_sample"
-  label_pos_new: "s3a://ttareungyi-warehouse/ml/risk_model/label_pos_new"
-  model_root: "s3://ttareungyi-warehouse/ml/risk_model/models"
+  train_sample: "s3a://waitforddaman-warehouse/ml/risk_model/train_sample"
+  label_pos_new: "s3a://waitforddaman-warehouse/ml/risk_model/label_pos_new"
+  model_root: "s3://waitforddaman-warehouse/ml/risk_model/models"
 
 quality:
   min_train_rows: 5000
