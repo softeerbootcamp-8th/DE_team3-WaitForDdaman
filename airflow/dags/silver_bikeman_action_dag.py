@@ -33,7 +33,7 @@ import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag
 
-from dag_assets import BIKEMAN_EVENT_BRONZE
+from dag_assets import BIKEMAN_ACTION_SILVER, BIKEMAN_EVENT_BRONZE
 from dag_common import COLLECTION_CUTOFF_AT_TEMPLATE, DEFAULT_ARGS, SILVER_POOL
 
 INGESTION_DIR = "/opt/airflow/ingestion"  # common, .env 출처
@@ -73,6 +73,7 @@ def silver_bikeman_action():
         append_env=True,
         execution_timeout=timedelta(minutes=30),
         pool=SILVER_POOL,
+        outlets=[BIKEMAN_ACTION_SILVER],
     )
 
 

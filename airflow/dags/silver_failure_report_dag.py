@@ -60,7 +60,7 @@ import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag
 
-from dag_assets import FAILURE_REPORT_BRONZE
+from dag_assets import FAILURE_REPORT_BRONZE, FAILURE_REPORT_SILVER
 from dag_common import DEFAULT_ARGS, SILVER_POOL
 
 INGESTION_DIR = "/opt/airflow/ingestion"  # common/(iceberg_catalog, iceberg_io 등), .env 출처
@@ -108,6 +108,7 @@ def silver_failure_report():
         ),
         execution_timeout=timedelta(hours=1),
         pool=SILVER_POOL,
+        outlets=[FAILURE_REPORT_SILVER],
     )
 
 

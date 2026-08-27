@@ -37,7 +37,7 @@ import pendulum
 from airflow.providers.standard.operators.bash import BashOperator
 from airflow.sdk import dag
 
-from dag_assets import STATION_MASTER_BRONZE
+from dag_assets import STATION_MASTER_BRONZE, STATION_MASTER_SILVER
 from dag_common import DEFAULT_ARGS, SILVER_POOL
 
 PYLIB_DIR = "/opt/airflow/pylib"          # config 패키지 (docker-compose가 ./config를 마운트)
@@ -73,6 +73,7 @@ def silver_station_master():
         bash_command=_staging_bash(SILVER_MODULE),
         execution_timeout=timedelta(minutes=20),
         pool=SILVER_POOL,
+        outlets=[STATION_MASTER_SILVER],
     )
 
 

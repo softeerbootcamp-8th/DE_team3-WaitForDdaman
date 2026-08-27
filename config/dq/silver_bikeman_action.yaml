@@ -1,0 +1,33 @@
+# 따맨 행동 이력(bikeman_action) Silver DQ 어써션
+#
+# Silver의 하드 게이트(silver_bikeman_action.py의 validate())는 bike_id/event_type/
+# occurred_at 완전성과 event_type enum만 본다. station_id는 COLLECT(노상 수거)일 때
+# null이 정상값이라 하드 게이트 대상이 아니지만, DEPLOY(배치)는 대여소가 반드시
+# 있어야 하는 행동이라 여기서 그 비즈니스 규칙을 새로 검증한다 - 기존 스키마
+# 문서 어디에도 event_type별로 station_id 필수 여부를 나눈 규칙이 없었다.
+
+source_name: silver_bikeman_action
+target_table: silver.bikeman_action
+partition_column: occurred_date_partition
+
+checks:
+  - check_name: deploy_missing_station_rate
+    target_column: station_id
+    severity: error
+    comparison: lte
+    threshold: 0.0
+    description: "DEPLOY 이벤트인데 station_id가 NULL인 비율 - 배치는 반드시 대여소가 있어야 함"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (WHERE event_type = 'DEPLOY' AND station_id IS NULL) AS DOUBLE)
+             / NULLIF(COUNT(*) FILTER (WHERE event_type = 'DEPLOY'), 0)
+      FROM {table}
+
+  - check_name: station_id_null_rate
+    target_column: station_id
+    severity: monitor
+    comparison: null
+    threshold: null
+    description: "station_id 결측률 - 노상 수거는 정상값이라 하드 판정 없이 비율 추이만 관찰"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (WHERE station_id IS NULL) AS DOUBLE) / COUNT(*)
+      FROM {table}

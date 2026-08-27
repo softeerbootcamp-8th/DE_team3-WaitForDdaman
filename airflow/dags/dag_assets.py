@@ -46,3 +46,12 @@ BIKEMAN_EVENT_BRONZE = Asset("bikeman_event_bronze")
 # outlets로 이 Asset을 갱신하고, silver_station_active_dag.py가
 # 이 Asset의 갱신을 스케줄 트리거로 사용한다.
 STATION_ACTIVE_BRONZE = Asset("station_active_bronze")
+
+# 아래 4개는 각 Silver 변환이 성공적으로 끝났음을 나타내는 Asset이다. RENTAL_HISTORY_SILVER와
+# 같은 이유(dq_rental_history_dag.py 참고)로, Silver Bronze Asset이 아니라 이 Asset을
+# 구독해야 그 실행 시점에 대상 Silver 테이블이 최신 상태다 - dq_silver_dag.py(Bronze 파일럿을
+# rental_history 이외 4개 소스로 확장)가 트리거로 쓴다.
+BIKEMAN_ACTION_SILVER = Asset("bikeman_action_silver")
+STATION_MASTER_SILVER = Asset("station_master_silver")
+STATION_ACTIVE_SILVER = Asset("station_active_silver")
+FAILURE_REPORT_SILVER = Asset("failure_report_silver")
