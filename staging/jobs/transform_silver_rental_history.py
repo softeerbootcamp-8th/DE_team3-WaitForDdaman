@@ -70,7 +70,8 @@ logger = logging.getLogger(__name__)
 SILVER_WATERMARK_KEY = SILVER_RENTAL_HISTORY
 
 # MAX_DAYS_PER_RUN 미지정 시 쓰는 기본 상한 - 평소 daily 운영(구간이 보통 하루)엔 영향 없음.
-DEFAULT_MAX_DAYS_PER_RUN = 31
+# Catch-up Asset 한 번이 현재 Bronze backlog를 소화하되, 무제한 전체 처리는 막는다.
+DEFAULT_MAX_DAYS_PER_RUN = 70
 
 BRONZE_TABLE = "bronze.rental_history"
 SILVER_TABLE = "silver.rental_history"

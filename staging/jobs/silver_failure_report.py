@@ -208,8 +208,8 @@ DEFAULT_MAX_QUARANTINE_RATIO = 0.50
 FUTURE_QUARANTINE_REASON = "reg_date > collection_cutoff"
 
 # 한 실행이 소화할 확정 날짜 수 상한. transform_silver_rental_history와 같은 규칙 -
-# 오래 밀린 워터마크가 한 번에 수개월을 처리하지 않게 자른다.
-DEFAULT_MAX_DAYS_PER_RUN = 31
+# Catch-up Asset 한 번이 현재 Bronze backlog를 소화하되, 무제한 전체 처리는 막는다.
+DEFAULT_MAX_DAYS_PER_RUN = 70
 
 SILVER_SCHEMA = Schema(
     NestedField(1, "bike_no", StringType(), required=False, doc="자전거 번호"),
