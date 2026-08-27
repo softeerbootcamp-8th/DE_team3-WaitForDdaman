@@ -32,6 +32,11 @@ class Config(dict):
 
 def load_config(path: str | None = None) -> Config:
     path = path or os.environ.get("RISK_MODEL_CONFIG", DEFAULT_CONFIG)
+    if is_s3(path):
+        # EMR 커스텀 이미지는 config/를 빌드 시점에 baked-in하므로, 값 하나 바꿀 때마다
+        # 이미지 재빌드+ECR push가 필요했다(#실측 2026-08-26). S3에서 직접 읽으면 그
+        # 배포 단계 없이 RISK_MODEL_CONFIG만 s3:// 경로로 바꿔서 최신 설정을 쓸 수 있다.
+        return Config(yaml.safe_load(read_bytes(path).decode("utf-8")))
     with open(path, "r", encoding="utf-8") as fh:
         return Config(yaml.safe_load(fh))
 

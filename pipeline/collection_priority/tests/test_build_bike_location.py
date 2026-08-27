@@ -11,6 +11,7 @@ import pyarrow as pa
 
 from jobs.build_bike_location import (
     COLD_START_LOOKBACK_DAYS,
+    _dedup_by_bike_id,
     _effective_delta_start,
     _merge_baseline_delta,
     _parse_bool_env,
@@ -158,3 +159,18 @@ def test_parse_bool_env_handles_values_and_defaults(monkeypatch):
     with pytest.raises(ValueError, match="must be 'true' or 'false'"):
         _parse_bool_env("TEST_FLAG")
 
+
+
+def test_dedup_by_bike_id_keeps_one_row_per_bike_id():
+    """has_uniqueness(threshold=0.99) 하드 게이트가 1%까지는 통과시키는 위험을
+    쓰기 전에 미리 제거한다(#332 PR 리뷰) - 중복이 있어도 결과는 bike_id당 1행."""
+    table = pa.table({
+        "bike_id": ["B1", "B1", "B2"],
+        "last_station_id": ["ST-1", "ST-2", "ST-3"],
+        "snapshot_date": [SNAPSHOT_DATE, SNAPSHOT_DATE, SNAPSHOT_DATE],
+    })
+
+    result = _dedup_by_bike_id(table)
+
+    assert len(result) == 2
+    assert sorted(result["bike_id"].to_pylist()) == ["B1", "B2"]

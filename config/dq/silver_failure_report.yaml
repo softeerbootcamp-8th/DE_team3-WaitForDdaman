@@ -1,0 +1,24 @@
+# 고장신고(failure_report) Silver DQ 어써션
+#
+# bike_no/reg_dttm/failure_type 결측과 완전 중복은 이미 validate()/dedupe()가 하드
+# 게이트로 막아 구조적으로 0이라 새 체크 대상이 아니다. reg_date_partition은
+# COALESCE(requested_date, reg_date_partition) 같은 다단 폴백으로 계산되는 파생
+# 컬럼이라(파일 상단 주석 참고) 그 유도 로직에 버그가 생기면 하드 게이트 없이
+# 조용히 잘못된 파티션에 쓰일 수 있다 - 그 정합성을 여기서 관찰한다.
+
+source_name: silver_failure_report
+target_table: silver.failure_report
+partition_column: reg_date_partition
+
+checks:
+  - check_name: partition_date_mismatch_rate
+    target_column: reg_date_partition
+    severity: error
+    comparison: lte
+    threshold: 0.0
+    description: "reg_date_partition이 reg_dttm의 날짜와 불일치하는 비율 - 파생 로직 회귀 감지"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (
+               WHERE reg_date_partition IS DISTINCT FROM strftime(CAST(reg_dttm AS TIMESTAMP), '%Y-%m-%d')
+             ) AS DOUBLE) / COUNT(*)
+      FROM {table}

@@ -109,6 +109,12 @@ from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOpe
 from airflow.providers.standard.sensors.python import PythonSensor
 from airflow.sdk import dag
 
+from dag_assets import (
+    BIKE_LOCATION_GOLD,
+    DIM_BIKE_GOLD,
+    FACT_STATION_INVENTORY_GOLD,
+    STATION_ACTIVE_GOLD,
+)
 from dag_common import GOLD_POOL, notify_slack_on_failure
 
 PYLIB_DIR = "/opt/airflow/pylib"
@@ -234,6 +240,7 @@ def gold_dim_fact():
         ),
         execution_timeout=timedelta(minutes=30),
         pool=GOLD_POOL,
+        outlets=[DIM_BIKE_GOLD],
     )
     build_bike_location = BashOperator(
         task_id="build_bike_location",
@@ -247,18 +254,21 @@ def gold_dim_fact():
         append_env=True,
         execution_timeout=timedelta(minutes=20),
         pool=GOLD_POOL,
+        outlets=[BIKE_LOCATION_GOLD],
     )
     build_station_active = BashOperator(
         task_id="build_station_active",
         bash_command=_collection_priority_bash("build_station_active", "SNAPSHOT_DATE='{{ ds }}' "),
         execution_timeout=timedelta(minutes=20),
         pool=GOLD_POOL,
+        outlets=[STATION_ACTIVE_GOLD],
     )
     build_fact_station_inventory = BashOperator(
         task_id="build_fact_station_inventory",
         bash_command=_collection_priority_bash("build_fact_station_inventory", "SNAPSHOT_DATE='{{ ds }}' "),
         execution_timeout=timedelta(minutes=20),
         pool=GOLD_POOL,
+        outlets=[FACT_STATION_INVENTORY_GOLD],
     )
 
     trigger_risk_decision = TriggerDagRunOperator(

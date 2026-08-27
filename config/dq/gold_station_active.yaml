@@ -1,0 +1,19 @@
+# gold.station_active DQ 어써션 - build_dim_bike와 동일 근거(gold_dim_bike.yaml 참고)
+
+source_name: gold_station_active
+target_table: gold.station_active
+partition_column: snapshot_date
+
+checks:
+  - check_name: station_id_duplicate_rate
+    target_column: station_id
+    severity: error
+    comparison: lte
+    threshold: 0.005
+    description: "station_id 중복 비율 - 하드 게이트(1%)보다 낮은 조기경보 임계"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (WHERE cnt > 1) AS DOUBLE) / COUNT(*)
+      FROM (
+        SELECT station_id, COUNT(*) OVER (PARTITION BY station_id) AS cnt
+        FROM {table}
+      )

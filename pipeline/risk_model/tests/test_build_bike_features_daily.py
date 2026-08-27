@@ -11,6 +11,7 @@ import pyarrow as pa
 from pyiceberg.expressions import And, GreaterThanOrEqual, LessThan
 
 from jobs.build_bike_features_daily import (
+    _dedup_by_bike_id,
     _exclude_suspended_rental_days,
     _parse_bool_env,
     _rental_scan_row_filter,
@@ -105,3 +106,16 @@ def test_parse_bool_env_handles_failure_report_t0(monkeypatch):
 
     monkeypatch.setenv("FAILURE_REPORT_T0_ENABLED", "false")
     assert _parse_bool_env("FAILURE_REPORT_T0_ENABLED") is False
+
+def test_dedup_by_bike_id_keeps_one_row_per_bike_id():
+    """has_uniqueness(threshold=0.99) 하드 게이트가 1%까지는 통과시키는 위험을
+    쓰기 전에 미리 제거한다(#332 PR 리뷰) - 중복이 있어도 결과는 bike_id당 1행."""
+    table = pa.table({
+        "bike_id": ["B1", "B1", "B2"],
+        "trips": [3, 5, 1],
+    })
+
+    result = _dedup_by_bike_id(table)
+
+    assert len(result) == 2
+    assert sorted(result["bike_id"].to_pylist()) == ["B1", "B2"]

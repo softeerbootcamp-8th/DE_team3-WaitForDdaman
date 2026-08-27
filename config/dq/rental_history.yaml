@@ -11,6 +11,7 @@
 
 source_name: rental_history
 target_table: silver.rental_history
+partition_column: rent_date_partition
 
 checks:
   - check_name: zero_distance_station_mismatch_rate

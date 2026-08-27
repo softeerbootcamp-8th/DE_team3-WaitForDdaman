@@ -1,0 +1,23 @@
+# gold.fact_bike_risk DQ 어써션
+#
+# build_fact_bike_risk.py의 하드 게이트는 완전성/risk_grade enum/risk_score 범위(0~100)/
+# has_uniqueness(threshold=0.99)를 이미 본다. 범위/enum 위반은 raise로 구조적으로 0이라
+# 새 체크 대상이 아니다 - bike_id 중복률만 다른 Gold 테이블과 동일하게 조기경보로 추가한다.
+
+source_name: gold_fact_bike_risk
+target_table: gold.fact_bike_risk
+partition_column: snapshot_date
+
+checks:
+  - check_name: bike_id_duplicate_rate
+    target_column: bike_id
+    severity: error
+    comparison: lte
+    threshold: 0.005
+    description: "bike_id 중복 비율 - 하드 게이트(1%)보다 낮은 조기경보 임계"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (WHERE cnt > 1) AS DOUBLE) / COUNT(*)
+      FROM (
+        SELECT bike_id, COUNT(*) OVER (PARTITION BY bike_id) AS cnt
+        FROM {table}
+      )

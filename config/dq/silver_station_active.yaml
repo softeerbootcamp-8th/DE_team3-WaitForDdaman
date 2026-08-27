@@ -1,0 +1,22 @@
+# 실시간 대여정보(station_active) Silver DQ 어써션
+#
+# 이 테이블은 컬럼이 snapshot_date/station_id 2개뿐이고, null/중복 station_id는
+# normalize()에서 이미 드롭/제거되므로(NORMALIZE_SQL 참고) 그 비율은 항상 0으로
+# 구조적으로 보장돼 새 체크로서 의미가 없다. 대신 "그날 활성 대여소가 몇 개였는지"
+# 자체를 추이로 남긴다 - 급감하면 station_active 원천(bikeList) 자체의 이상을
+# 의심할 신호다.
+
+source_name: silver_station_active
+target_table: silver.station_active
+partition_column: snapshot_date
+
+checks:
+  - check_name: active_station_count
+    target_column: station_id
+    severity: monitor
+    comparison: null
+    threshold: null
+    description: "그날 활성 대여소 수 (distinct station_id) - 급감 탐지용 추이 관찰"
+    metric_sql: |
+      SELECT CAST(COUNT(DISTINCT station_id) AS DOUBLE)
+      FROM {table}

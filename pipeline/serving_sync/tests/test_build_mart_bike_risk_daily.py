@@ -119,6 +119,25 @@ def test_mart_omits_action_column():
     assert "action" not in result["B1"]
 
 
+def test_mart_dedups_duplicate_location_and_features_rows():
+    """gold.bike_location/gold.bike_features_daily는 has_uniqueness(threshold=0.99)
+    하드 게이트라 bike_id 중복이 최대 1%까지 통과해서 여기로 들어올 수 있다 - 그런
+    입력이 와도 마트는 자전거당 한 행만 내야 한다(fan-out 방지, dim_bike와 동일 원칙)."""
+    result_table = build_mart_bike_risk_daily(
+        risk_table([("B1", 90.0, "Critical")]),
+        decision_table([("B1", "대여중단")]),
+        location_table([("B1", "ST-1"), ("B1", "ST-2")]),  # 중복 2행
+        station_active_table([("ST-1", "테스트대여소", "강북", "마포구")]),
+        dim_bike_table([("B1", 2020)]),
+        features_table([("B1", 12.5), ("B1", 99.9)]),  # 중복 2행
+        station_risk_table([]),
+        failure_table([]),
+        SNAPSHOT_DATE,
+    )
+
+    assert len(result_table) == 1
+
+
 def test_mart_keeps_only_decided_bikes():
     result = build(
         [("B1", 90.0, "Critical"), ("B2", 10.0, "Normal")],

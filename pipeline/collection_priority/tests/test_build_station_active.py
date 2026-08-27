@@ -8,7 +8,7 @@ _latest_snapshot()은 Iceberg 카탈로그를 직접 읽으므로 여기서는 �
 """
 import pyarrow as pa
 
-from jobs.build_station_active import _join_active_stations
+from jobs.build_station_active import _dedup_by_station_id, _join_active_stations
 
 SNAPSHOT_DATE = "2026-08-17"
 
@@ -68,3 +68,17 @@ def test_snapshot_date_is_set():
     result = by_station(_join_active_stations(master, active_ids, SNAPSHOT_DATE))
 
     assert result["ST-1"]["snapshot_date"].isoformat() == SNAPSHOT_DATE
+
+
+def test_dedup_by_station_id_keeps_one_row_per_station_id():
+    """has_uniqueness(threshold=0.99) 하드 게이트가 1%까지는 통과시키는 위험을
+    쓰기 전에 미리 제거한다(#332 PR 리뷰) - 중복이 있어도 결과는 station_id당 1행."""
+    table = pa.table({
+        "station_id": ["ST-1", "ST-1", "ST-2"],
+        "station_name": ["역삼역", "역삼역(중복)", "선릉역"],
+    })
+
+    result = _dedup_by_station_id(table)
+
+    assert len(result) == 2
+    assert sorted(result["station_id"].to_pylist()) == ["ST-1", "ST-2"]

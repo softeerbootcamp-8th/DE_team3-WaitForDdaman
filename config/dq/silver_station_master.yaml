@@ -1,0 +1,21 @@
+# 대여소정보(station_master) Silver DQ 어써션
+#
+# silver_station_master.py의 _log_quality()는 위경도 0/결측을 이미 검사하지만
+# raise_if_failed()를 부르지 않는 순수 로그 - 실행마다 Airflow 태스크 로그에만
+# 남고 사라진다("위경도가 0인 대여소가 실제로 3곳 있다"는 게 알려진 허용 결함).
+# 여기서는 그 비율을 dq.check_result_history에 남겨 추이로 급증 여부를 볼 수 있게 한다.
+
+source_name: silver_station_master
+target_table: silver.station_master
+partition_column: snapshot_date
+
+checks:
+  - check_name: zero_coordinate_rate
+    target_column: latitude
+    severity: error
+    comparison: lte
+    threshold: 0.01
+    description: "위도 또는 경도가 0인 비율 - 알려진 허용 결함(3곳) 기준보다 여유를 둔 임계값"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (WHERE latitude = 0 OR longitude = 0) AS DOUBLE) / COUNT(*)
+      FROM {table}

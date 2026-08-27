@@ -74,7 +74,26 @@ GOLD_PARTITION_SPEC = PartitionSpec(
 
 # inventory.bike_cnt / station_risk.risk_cnt 이름 그대로 조인하고 최종 select까지
 # 그대로 유지한다 - gold mart와 postgres 서빙 테이블의 컬럼명을 동일하게 맞춘다.
+#
+# station_active_dedup/inventory_dedup: gold.station_active/gold.fact_station_inventory
+# 둘 다 has_uniqueness(threshold=0.99) 하드 게이트라 station_id 중복이 최대 1%까지는
+# 그대로 통과해서 여기로 들어올 수 있다 (build_mart_bike_risk_daily.py의
+# bike_location/bike_features_daily와 동일한 위험 - 그쪽에서 SELECT DISTINCT ON으로
+# 막은 것과 같은 방식을 여기도 적용한다). station_active는 base FROM이라 중복이
+# 있으면 그대로 중복 행이 남고, inventory는 LEFT JOIN이라 fan-out된다 - 근본 원인은
+# gold_station_active.yaml/gold_fact_station_inventory.yaml의 DQ 어써션이 감시한다.
 _MART_SQL = """
+    WITH station_active_dedup AS (
+        SELECT DISTINCT ON (station_id)
+            station_id, station_name, region, district, latitude, longitude, hold_num
+        FROM station_active
+        ORDER BY station_id
+    ),
+    inventory_dedup AS (
+        SELECT DISTINCT ON (station_id) station_id, bike_cnt
+        FROM inventory
+        ORDER BY station_id
+    )
     SELECT
         sa.station_id,
         sa.station_name,
@@ -88,8 +107,8 @@ _MART_SQL = """
         COALESCE(sr.healthy_ratio, 100.0) AS healthy_ratio,
         CASE WHEN COALESCE(sr.healthy_ratio, 100.0) >= ? THEN '여유있음' ELSE '부족함' END AS urgency,
         CAST(? AS DATE) AS snapshot_date
-    FROM station_active sa
-    LEFT JOIN inventory inv ON sa.station_id = inv.station_id
+    FROM station_active_dedup sa
+    LEFT JOIN inventory_dedup inv ON sa.station_id = inv.station_id
     LEFT JOIN station_risk sr ON sa.station_id = sr.station_id
 """
 

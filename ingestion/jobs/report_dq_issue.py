@@ -23,7 +23,7 @@ from common.dq_interpreter import DEFAULT_LOOKBACK_DAYS, fetch_history
 from common.iceberg_catalog import build_iceberg_catalog
 from common.s3_utils import ensure_bucket, get_json, put_json
 from jobs.interpret_dq_results import interpretation_key
-from jobs.run_dq_assertions_rental_history import pending_result_key
+from jobs.run_dq_assertions import pending_result_key
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)

@@ -16,7 +16,7 @@ from common.dq_assertions import CheckResult
 from common.dq_result_store import append_results, results_to_arrow
 from common.iceberg_catalog import build_iceberg_catalog
 from common.s3_utils import get_json
-from jobs.run_dq_assertions_rental_history import pending_result_key
+from jobs.run_dq_assertions import pending_result_key
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)

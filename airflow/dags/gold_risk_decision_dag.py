@@ -38,6 +38,7 @@ from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOpe
 from airflow.providers.standard.sensors.python import PythonSensor
 from airflow.sdk import dag
 
+from dag_assets import BIKE_FEATURES_DAILY_GOLD, FACT_BIKE_RISK_GOLD
 from dag_common import GOLD_POOL, notify_slack_on_failure
 
 PYLIB_DIR = "/opt/airflow/pylib"
@@ -147,6 +148,7 @@ def gold_risk_decision():
         append_env=True,
         execution_timeout=timedelta(minutes=30),
         pool=GOLD_POOL,
+        outlets=[BIKE_FEATURES_DAILY_GOLD],
     )
 
     # 3. run_risk_scoring_model + build_fact_bike_risk
@@ -157,6 +159,7 @@ def gold_risk_decision():
         bash_command=_bash("build_fact_bike_risk", f"SNAPSHOT_DATE='{snapshot_date_expr}' "),
         execution_timeout=timedelta(minutes=30),
         pool=GOLD_POOL,
+        outlets=[FACT_BIKE_RISK_GOLD],
     )
 
     # 4. build_fact_bike_decision

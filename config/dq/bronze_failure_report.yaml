@@ -1,0 +1,20 @@
+# 고장신고(failure_report) Bronze DQ 어써션
+#
+# 컬럼이 bike_no/reg_dttm/failure_type 3개뿐이라(failure_report_schema.py) 전부 필수
+# 컬럼이다. failure_type이 비어있으면 "무슨 고장인지" 알 수 없어 레코드 자체가 사실상
+# 무의미해진다.
+
+source_name: bronze_failure_report
+target_table: bronze.failure_report
+partition_column: reg_date_partition
+
+checks:
+  - check_name: failure_type_null_rate
+    target_column: failure_type
+    severity: error
+    comparison: lte
+    threshold: 0.001
+    description: "고장구분(failure_type) 결측률 - 비어있으면 레코드 자체가 사실상 무의미"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (WHERE failure_type IS NULL) AS DOUBLE) / COUNT(*)
+      FROM {table}

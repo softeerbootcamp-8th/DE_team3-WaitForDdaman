@@ -1,0 +1,32 @@
+# 실시간 대여정보(station_active) Bronze DQ 어써션
+#
+# station_id는 station_master와 동일하게 골드 조인 키다. shared(거치율)는
+# station_active_schema.py 주석에 "100 넘는 값도 관측됨"이라고 실측 기록돼있어
+# 이상치가 아니라 정상 범위의 일부다 - 하드 판정 없이 비율 추이만 관찰한다.
+
+source_name: bronze_station_active
+target_table: bronze.station_active
+partition_column: snapshot_date
+
+checks:
+  - check_name: station_id_null_rate
+    target_column: station_id
+    severity: error
+    comparison: lte
+    threshold: 0.001
+    description: "골드 조인 키(station_id) 결측률"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (WHERE station_id IS NULL) AS DOUBLE) / COUNT(*)
+      FROM {table}
+
+  - check_name: shared_over_100_rate
+    target_column: shared
+    severity: monitor
+    comparison: null
+    threshold: null
+    description: "거치율(shared) 100 초과 비율 - 정상 범위로 확인된 현상이라 급증 추이만 관찰"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (
+               WHERE TRY_CAST(shared AS DOUBLE) > 100
+             ) AS DOUBLE) / COUNT(*)
+      FROM {table}

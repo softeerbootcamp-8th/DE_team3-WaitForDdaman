@@ -72,6 +72,23 @@ def _ensure_fact_bike_risk_table(catalog):
         return catalog.create_table(GOLD_TABLE, schema=GOLD_SCHEMA, partition_spec=GOLD_PARTITION_SPEC)
 
 
+def _dedup_by_bike_id(table: pa.Table, con: duckdb.DuckDBPyConnection | None = None) -> pa.Table:
+    """has_uniqueness(threshold=0.99) 하드 게이트가 1%까지는 통과시켜, 실패 시
+    전체 적재가 막히는 위험이 있다(#332 PR 리뷰). 이 잡은 검증이 커밋 뒤에 도는
+    구조라(overwrite_partition 먼저, validate는 그 뒤 재조회) 실패해도 롤백이
+    안 된다 - 그래서 커밋 전인 여기서 미리 한 행만 남겨서 애초에 그 상황 자체가
+    안 생기게 한다. 어느 쪽이 "맞는" 값인지 판단하는 로직은 아니라 결정적으로
+    하나를 고를 뿐이다. 실제 원인 추적은 gold_fact_bike_risk.yaml DQ 어써션
+    (dq.check_result_history)이 계속 담당한다."""
+    conn = con or connect()
+    conn.register("dedup_target", table)
+    deduped = query_arrow(conn, "SELECT DISTINCT ON (bike_id) * FROM dedup_target ORDER BY bike_id")
+    dropped = len(table) - len(deduped)
+    if dropped:
+        logger.warning("gold.fact_bike_risk: bike_id 중복 %d건 dedup으로 제거", dropped)
+    return deduped
+
+
 def _validate_fact_bike_risk(table: pa.Table) -> None:
     """오늘자 파티션만 검증한다 (OVERWRITE 구조라 dim_bike처럼 테이블 전체를 볼 필요 없음)."""
     (
@@ -195,6 +212,7 @@ def _process_date(catalog, gold_table, target_date: date) -> int:
 
     # 5: run_risk_scoring_model, 6: build_fact_bike_risk
     out_table = _score_features(eligible_table, target_date)
+    out_table = _dedup_by_bike_id(out_table)
     overwrite_partition(gold_table, out_table, PARTITION_COLUMN, date_str)
 
     written = catalog.load_table(GOLD_TABLE).scan(row_filter=EqualTo("snapshot_date", date_str)).to_arrow()

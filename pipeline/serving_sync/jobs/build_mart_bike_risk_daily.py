@@ -105,15 +105,31 @@ _FAIL_HISTORY_SQL = """
 
 # base: risk와 decision(의사결정 대상)을 INNER JOIN해서 오늘 의사결정 대상 자전거만
 # 남기고, bike_location에서 현재 station_id를 붙인다.
+#
+# location_dedup/features_dedup: gold.bike_location/gold.bike_features_daily는
+# has_uniqueness(threshold=0.99) 하드 게이트라 bike_id 중복이 최대 1%까지는 그대로
+# 통과해서 여기로 들어올 수 있다. dim_bike는 이미 호출부(_read_and_build)에서
+# SELECT DISTINCT ON (bike_id)로 방어하는데 location/features는 안 그래서, 중복
+# 행이 있으면 LEFT JOIN이 그대로 fan-out(자전거 한 대가 마트에 여러 행)돼버린다.
+# dim_bike와 동일한 방식(ORDER BY bike_id로 결정적으로 하나만 선택)으로 여기서도
+# 막는다 - 어느 쪽 값이 "맞는지" 판단할 근거가 없는 조인용 보조 테이블이라, DQ
+# 어써션(gold_bike_location.yaml/gold_bike_features_daily.yaml)이 근본 원인을
+# 감시하는 동안 마트는 항상 안전하게 한 행만 쓰도록 한다.
 _MART_SQL = """
     WITH decision_dedup AS (
         SELECT DISTINCT bike_id FROM decision
+    ),
+    location_dedup AS (
+        SELECT DISTINCT ON (bike_id) bike_id, last_station_id FROM location ORDER BY bike_id
+    ),
+    features_dedup AS (
+        SELECT DISTINCT ON (bike_id) bike_id, dist_km FROM features ORDER BY bike_id
     ),
     base AS (
         SELECT r.bike_id, r.risk_score, r.risk_grade, l.last_station_id AS station_id
         FROM risk r
         INNER JOIN decision_dedup d ON r.bike_id = d.bike_id
-        LEFT JOIN location l ON r.bike_id = l.bike_id
+        LEFT JOIN location_dedup l ON r.bike_id = l.bike_id
     )
     SELECT
         b.bike_id,
@@ -132,7 +148,7 @@ _MART_SQL = """
     FROM base b
     LEFT JOIN station_active sa ON b.station_id = sa.station_id
     LEFT JOIN dim_bike db ON b.bike_id = db.bike_id
-    LEFT JOIN features f ON b.bike_id = f.bike_id
+    LEFT JOIN features_dedup f ON b.bike_id = f.bike_id
     LEFT JOIN station_risk sr ON b.station_id = sr.station_id
     LEFT JOIN fail_history fh ON b.bike_id = fh.bike_id
 """

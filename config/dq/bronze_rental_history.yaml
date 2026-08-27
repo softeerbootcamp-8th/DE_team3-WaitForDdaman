@@ -1,0 +1,30 @@
+# 대여이력(rental_history) Bronze DQ 어써션
+#
+# Bronze 스키마 계약(ingestion/schema/rental_history_schema.py)은 "필수 표준 컬럼이
+# 매핑됐는가"만 본다 - 컬럼이 존재해도 개별 행 값이 비어있는지는 안 본다. 여기서는 그
+# 값 수준 결측률을 측정한다. 승격을 막지 않는다 - 기록만 남긴다.
+
+source_name: bronze_rental_history
+target_table: bronze.rental_history
+partition_column: rent_date_partition
+
+checks:
+  - check_name: bike_id_null_rate
+    target_column: bike_id
+    severity: error
+    comparison: lte
+    threshold: 0.001
+    description: "자전거 고유번호 결측률 - 골드까지 이어지는 조인/식별 키라 결측이 사실상 없어야 함"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (WHERE bike_id IS NULL) AS DOUBLE) / COUNT(*)
+      FROM {table}
+
+  - check_name: rent_dt_null_rate
+    target_column: rent_dt
+    severity: error
+    comparison: lte
+    threshold: 0.001
+    description: "대여일시 결측률 - 워터마크/파티션 판단의 기준 컬럼이라 결측이 사실상 없어야 함"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (WHERE rent_dt IS NULL) AS DOUBLE) / COUNT(*)
+      FROM {table}
