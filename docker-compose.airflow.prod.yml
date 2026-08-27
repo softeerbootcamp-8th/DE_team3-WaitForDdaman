@@ -119,7 +119,17 @@ services:
     command:
       - bash
       - -c
-      - airflow version && airflow pools set bronze_ingest 1 'Bronze 적재 동시 실행 제한 (워커 메모리 가드)' && airflow pools set silver_process 1 'Silver 변환 동시 실행 제한 (워커 메모리 가드)' && airflow pools set gold_process 1 'Gold 빌드 동시 실행 제한 (워커 메모리 가드, #285)'
+      - >-
+        airflow version &&
+        airflow pools set bronze_ingest 1 "Bronze 적재 동시 실행 제한 (워커 메모리 가드)" &&
+        airflow pools set silver_process 1 "Silver 변환 동시 실행 제한 (워커 메모리 가드)" &&
+        airflow pools set gold_process 1 "Gold 빌드 동시 실행 제한 (워커 메모리 가드, #285)" &&
+        airflow pools set seoul_api 4 "서울시 API 키별 동시성 제한" &&
+        airflow pools set rental_history_api 3 "대여 이력 API 키 1~3 병렬 수집 제한" &&
+        airflow pools set failure_report_api 1 "고장 신고 API 키 4 단일 수집 제한" &&
+        airflow pools set bronze_rental_history_commit 1 "bronze.rental_history 날짜별 catchup promote 직렬화" &&
+        airflow pools set emr_initial_load 3 "EMR Serverless 초기 적재 배치 동시 제출 제한" &&
+        airflow pools set s3_initial_load_staging 2 "초기 적재 S3 스테이징 업로드 동시 실행 제한"
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'
