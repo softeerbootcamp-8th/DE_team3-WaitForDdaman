@@ -7,6 +7,7 @@ exit(1)하는지)은 그 함수를 모킹해서 Spark 없이도 검증할 수 �
 단위 테스트가 이미 다룬다.
 """
 from unittest import mock
+import logging
 
 import pytest
 
@@ -22,6 +23,21 @@ def test_run_succeeds_when_all_files_succeed():
         job.run(["a.csv", "b.csv"])
 
     assert mocked.call_count == 2
+
+
+def test_run_logs_batch_progress_for_each_input_file(caplog):
+    caplog.set_level(logging.INFO, logger=job.__name__)
+    with mock.patch.object(
+        job, "_process_one_input_file", side_effect=[(100, False, False), (50, False, False)]
+    ), mock.patch.object(job, "build_spark_session"), mock.patch.object(
+        job, "_ensure_bronze_table"
+    ), mock.patch.object(job, "ensure_bucket"):
+        job.run(["a.csv", "b.csv"])
+
+    assert "초기 적재 배치 시작: 파일 2개" in caplog.text
+    assert "[1/2] 파일 처리 시작: a.csv" in caplog.text
+    assert "[1/2] 파일 처리 완료: a.csv (100행, 누적 100행)" in caplog.text
+    assert "[2/2] 파일 처리 완료: b.csv (50행, 누적 150행)" in caplog.text
 
 
 def test_run_exits_nonzero_when_any_file_fails():

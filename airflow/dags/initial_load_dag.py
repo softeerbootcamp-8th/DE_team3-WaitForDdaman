@@ -136,6 +136,7 @@ from dag_common import (
     bash_job,
     bash_staging_job,
     chunk_list,
+    chunk_files_by_size,
     is_aws_env,
     notify_slack_on_failure,
     run_emr_serverless_spark_job,
@@ -169,9 +170,10 @@ default_args = {
         "rental_history_dir": f"{INGESTION_DIR}/data/rental_history",
         "rental_history_pattern": "*",
         "rental_history_watermark_date": "2026-06-30",
-        # 배치 하나 = EMR JobRun 하나 (#249). 대여이력은 반기 파일이 최대 700MB급이라
-        # 배치를 작게 잡아 배치 실패 시 재시도 비용(이미 성공한 파일 재처리)을 낮춘다.
-        "rental_history_emr_batch_size": "3",
+        # 배치 하나 = EMR JobRun 하나 (#249). 대여이력은 대형 파일이 많으므로
+        # 최대 6개/누적 4GB 기준으로 묶어 JobRun 시작 오버헤드와 재시도 비용을 절충한다.
+        "rental_history_emr_batch_size": "6",
+        "rental_history_emr_batch_max_bytes": str(4 * 1024**3),
         # S3 스테이징 업로드 배치 크기 (#255) - 대여이력은 연 12개 파일이므로
         # 반기 단위(6개)로 묶는다. S3_STAGING_POOL 슬롯 수(2)에 맞춰 배치
         # 하나(파일 최대 700MB급 x 이 값)가 워커 메모리/네트워크를 과도하게 잡지 않게 한다.
@@ -267,16 +269,32 @@ def initial_load():
             stage_rental_history_files_batch.output
         )
 
-        # 파일 목록을 배치로 미리 잘라서(dag_common.chunk_list, #249) 배치 단위로
+        # 스테이징된 파일 목록을 크기/개수 기준으로 배치로 미리 잘라서(#249) 배치 단위로
         # Dynamic Task Mapping을 편다 - 배치 하나 = EMR JobRun 하나. 이렇게 해야 파일이
         # 수십 개여도 EMR JobRun 시작 오버헤드가 배치 수만큼만 발생한다("EMR Serverless
         # 초기 적재: 파일당 JobRun -> 배치당 JobRun" 문단 참고).
         @task(task_id="chunk_rental_history_files")
-        def chunk_rental_history_files(files: list[str], batch_size: str) -> list[list[str]]:
-            return chunk_list(files, int(batch_size))
+        def chunk_rental_history_files(
+            files: list[str], batch_size: str, max_bytes: str
+        ) -> list[list[str]]:
+            import boto3
+
+            s3 = boto3.client("s3")
+
+            def object_size(uri: str) -> int:
+                if not uri.startswith("s3://"):
+                    raise ValueError(f"S3 URI가 아닙니다: {uri}")
+                bucket, _, key = uri[5:].partition("/")
+                return int(s3.head_object(Bucket=bucket, Key=key)["ContentLength"])
+
+            return chunk_files_by_size(
+                files, int(batch_size), int(max_bytes), size_fn=object_size
+            )
 
         rental_history_file_batches = chunk_rental_history_files(
-            rental_history_staged_uris, "{{ params.rental_history_emr_batch_size }}"
+            rental_history_staged_uris,
+            "{{ params.rental_history_emr_batch_size }}",
+            "{{ params.rental_history_emr_batch_max_bytes }}",
         )
 
         @task(
