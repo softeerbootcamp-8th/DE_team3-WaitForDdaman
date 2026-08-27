@@ -13,8 +13,8 @@ export interface Bike {
   healthy_ratio: number | null;
   risk_grade: Tier;
   risk_score: number;
-  dist_km: number;
-  aging: number;
+  dist_km: number | null;
+  aging: number | null;
   fail_history: string[];
 }
 

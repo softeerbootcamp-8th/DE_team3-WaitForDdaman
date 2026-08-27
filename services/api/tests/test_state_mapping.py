@@ -60,6 +60,14 @@ def test_healthy_ratio_0은_None으로_바뀌지_않는다():
     assert _to_bike(_row(healthy_ratio=0.0))["healthy_ratio"] == 0.0
 
 
+def test_aging은_None을_보존한다():
+    assert _to_bike(_row(aging=None))["aging"] is None
+
+
+def test_dist_km은_None을_보존한다():
+    assert _to_bike(_row(dist_km=None))["dist_km"] is None
+
+
 def test_to_bike는_스키마가_요구하는_키를_모두_만든다():
     from services.api.app.schemas import Bike
 
