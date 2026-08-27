@@ -903,3 +903,7 @@ def test_dq_failure_leaves_both_tables_unchanged(monkeypatch, iceberg_env):
     silver_table.refresh()
     assert len(silver_table.metadata.snapshots) == before
     assert quarantine_rows(iceberg_env) == []
+
+def test_default_max_days_per_run_is_seventy_days():
+    """Asset-triggered Catch-up이 한 실행에서 제한된 backlog를 처리한다."""
+    assert tsr.DEFAULT_MAX_DAYS_PER_RUN == 70
