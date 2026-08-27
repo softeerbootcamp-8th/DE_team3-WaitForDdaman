@@ -248,6 +248,44 @@ resource "aws_ecr_repository_policy" "emr_spark" {
   policy     = data.aws_iam_policy_document.emr_spark_ecr_policy_doc.json
 }
 
+# ---- IAM: Airflow 워커 -> emr_spark ECR push 권한 ----
+# config/risk_model.yaml 등 이미지 baked-in 파일을 고칠 때마다 이 리포에 새 이미지를
+# push해야 하는데, 지금까지 이걸 할 수 있는 identity-based policy가 어디에도 없었다
+# (실측 2026-08-27: waitforddaman-ec2-role로 push 시도 -> ecr:InitiateLayerUpload에
+# "no identity-based policy allows" AccessDenied). GetAuthorizationToken은 리소스를
+# 특정할 수 없는 API라 별도 statement(resources=["*"])로 분리한다.
+data "aws_iam_policy_document" "emr_spark_ecr_push_doc" {
+  statement {
+    sid       = "EmrSparkEcrAuth"
+    effect    = "Allow"
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+  statement {
+    sid    = "EmrSparkEcrPush"
+    effect = "Allow"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:InitiateLayerUpload",
+      "ecr:UploadLayerPart",
+      "ecr:CompleteLayerUpload",
+      "ecr:PutImage",
+    ]
+    resources = [aws_ecr_repository.emr_spark.arn]
+  }
+}
+
+resource "aws_iam_policy" "emr_spark_ecr_push_policy" {
+  name        = "emr-spark-ecr-push-policy"
+  description = "Allows the Airflow worker role to push new images to waitforddaman-emr-spark-prod"
+  policy      = data.aws_iam_policy_document.emr_spark_ecr_push_doc.json
+}
+
+resource "aws_iam_role_policy_attachment" "emr_spark_ecr_push_attach" {
+  role       = var.airflow_worker_role_name
+  policy_arn = aws_iam_policy.emr_spark_ecr_push_policy.arn
+}
+
 # ---- IAM: EMR Serverless job 실행 Role ----
 # 트러스트 정책은 AWS 공식 가이드 패턴 그대로 (Principal=emr-serverless.amazonaws.com,
 # aws:SourceAccount 조건).

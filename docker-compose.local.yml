@@ -29,14 +29,27 @@ x-airflow-common:
     AWS_LOCAL_SIMULATION: ${AWS_LOCAL_SIMULATION:-false}
     EMR_SERVERLESS_DRY_RUN: ${EMR_SERVERLESS_DRY_RUN:-false}
     SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+    # risk_model_train_local이 실 EMR Serverless(APP_ENV=aws)를 쓸 때만 필요 - 로컬
+    # LocalStack 워크플로(APP_ENV=local)에서는 전부 빈 값이라 영향 없다.
+    EMR_SPARK_APPLICATION_ID: ${EMR_SPARK_APPLICATION_ID:-}
+    EMR_SPARK_EXECUTION_ROLE_ARN: ${EMR_SPARK_EXECUTION_ROLE_ARN:-}
+    EMR_SPARK_POLL_INTERVAL_SECONDS: ${EMR_SPARK_POLL_INTERVAL_SECONDS:-30}
+    EMR_SPARK_POLL_MAX_SECONDS: ${EMR_SPARK_POLL_MAX_SECONDS:-21600}
+    EMR_RISK_MODEL_CONFIG: ${EMR_RISK_MODEL_CONFIG:-/opt/app/config/risk_model.yaml}
+    ICEBERG_CATALOG_NAME: ${ICEBERG_CATALOG_NAME:-}
+    ICEBERG_WAREHOUSE_PATH: ${ICEBERG_WAREHOUSE_PATH:-}
+    ICEBERG_CATALOG_SECRET_ARN: ${ICEBERG_CATALOG_SECRET_ARN:-}
+    RAW_BUCKET: ${RAW_BUCKET:-}
+    WAREHOUSE_BUCKET: ${WAREHOUSE_BUCKET:-}
     ICEBERG_CATALOG_TYPE: ${ICEBERG_CATALOG_TYPE:-jdbc}
-    # jdbc 카탈로그 인증 - config.py의 fallback(ICEBERG_JDBC_CATALOG_USER 없으면
-    # POSTGRES_USER, 그것도 없으면 하드코딩 "airflow")이 여기 컨테이너 환경에
-    # POSTGRES_USER/PASSWORD 자체가 없어서 항상 "airflow"로 떨어지는 버그가 있었다
-    # (postgres 서비스 블록에만 있고 airflow 컨테이너들엔 안 넘어옴, #169에서 실측
-    # 발견 - 로컬 실제 계정과 안 맞아 JDBC 인증 실패). 여기서 명시로 고정한다.
-    ICEBERG_JDBC_CATALOG_USER: ${POSTGRES_USER:-airflow}
-    ICEBERG_JDBC_CATALOG_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+    # ICEBERG_JDBC_CATALOG_URI가 없어서(선언 자체가 빠짐) risk_model_train_local이
+    # 실 RDS 카탈로그 대신 EMR 이미지 baked-in 기본값(로컬 postgres 컨테이너 호스트명)으로
+    # 접속을 시도해 실패했다(#실측 2026-08-26 - UnknownHostException: postgres). 명시로 추가.
+    # USER/PASSWORD도 ICEBERG_JDBC_CATALOG_USER/PASSWORD가 설정돼 있으면 그 값을 쓰고,
+    # 없으면 기존처럼 POSTGRES_USER/PASSWORD(로컬 LocalStack 카탈로그용)로 폴백한다.
+    ICEBERG_JDBC_CATALOG_URI: ${ICEBERG_JDBC_CATALOG_URI:-}
+    ICEBERG_JDBC_CATALOG_USER: ${ICEBERG_JDBC_CATALOG_USER:-${POSTGRES_USER:-airflow}}
+    ICEBERG_JDBC_CATALOG_PASSWORD: ${ICEBERG_JDBC_CATALOG_PASSWORD:-${POSTGRES_PASSWORD:-airflow}}
     RISK_MODEL_CONFIG: ${RISK_MODEL_CONFIG:-/opt/airflow/pylib/config/risk_model.local.yaml}
     PYTHONPATH: /opt/airflow/pylib
   volumes:
