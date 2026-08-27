@@ -74,8 +74,8 @@ export function ConfirmedPage() {
             </div>
           </div>
 
-          <div className="detail-panel">
-            <DetailPanel bike={activeBike} />
+          <div className={`detail-panel${activeBike ? " active" : ""}`}>
+            <DetailPanel bike={activeBike} onClose={() => setActiveDetailId(null)} />
           </div>
         </div>
       )}
