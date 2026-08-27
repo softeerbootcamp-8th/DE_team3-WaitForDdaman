@@ -15,7 +15,7 @@ daily 배치가 컴팩션 실패에 영향받게 되므로 분리했다(자세�
 pipeline/collection_priority/jobs/compact_iceberg_tables.py docstring 참고).
 
 ### 스케줄
-매주 일요일 03:00 KST - daily 배치(08:00 KST)와 겹치지 않는 새벽 시간대,
+매주 일요일 03:00 KST - daily 배치(gold_dim_fact 06:00 KST)와 겹치지 않는 새벽 시간대,
 트래픽이 가장 적은 주기로 선택.
 """
 from datetime import timedelta
