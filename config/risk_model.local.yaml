@@ -48,9 +48,9 @@ cleaning:
   instant_return_max_dist_m: 10
 
 paths:
-  train_sample: "s3a://ttareungyi-warehouse/ml/risk_model/train_sample"   # Spark 쓰기 → s3a
-  label_pos_new: "s3a://ttareungyi-warehouse/ml/risk_model/label_pos_new" # Spark 쓰기 → s3a
-  model_root: "s3://ttareungyi-warehouse/ml/risk_model/models"            # boto3 쓰기 → s3
+  train_sample: "s3a://waitforddaman-warehouse/ml/risk_model/train_sample"   # Spark 쓰기 → s3a
+  label_pos_new: "s3a://waitforddaman-warehouse/ml/risk_model/label_pos_new" # Spark 쓰기 → s3a
+  model_root: "s3://waitforddaman-warehouse/ml/risk_model/models"            # boto3 쓰기 → s3
 
 quality:
   min_train_rows: 2000          # 13개 유효앵커 × 3만여대 감안하면 충분히 넘을 것

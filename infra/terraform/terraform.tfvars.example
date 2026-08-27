@@ -45,8 +45,8 @@ airflow_worker_role_name = "REPLACE_ME"
 
 # aws_region         = "ap-northeast-2"
 # app_env            = "prod"
-# raw_bucket         = "ttareungyi-raw"
-# warehouse_bucket   = "ttareungyi-warehouse"
+# raw_bucket         = "waitforddaman-raw"
+# warehouse_bucket   = "waitforddaman-warehouse"
 # iceberg_catalog_name = "bike_catalog"
 # seoul_api_base_url = "http://openapi.seoul.go.kr:8088"
 
