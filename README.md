@@ -68,11 +68,11 @@
 ## 결과
 
 ### 수거 반장님 화면
-![수거 반장님 화면](docs/images/recommended-list.png)
+![수거 반장님 화면](docs/images/recommended_list.png)
 - 짧은 설명
 
 ### 현장 작업자
-![현장 작업자 화면](docs/images/final-list.png)
+![현장 작업자 화면](docs/images/final_list.png)
 - 짧은 설명
 
 ### 사이트
