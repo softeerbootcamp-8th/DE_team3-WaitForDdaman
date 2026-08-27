@@ -55,3 +55,16 @@ BIKEMAN_ACTION_SILVER = Asset("bikeman_action_silver")
 STATION_MASTER_SILVER = Asset("station_master_silver")
 STATION_ACTIVE_SILVER = Asset("station_active_silver")
 FAILURE_REPORT_SILVER = Asset("failure_report_silver")
+
+# 아래 6개는 각 Gold 빌드가 성공적으로 끝났음을 나타내는 Asset이다. Gold DAG(gold_dim_fact,
+# gold_risk_decision)는 Bronze/Silver와 달리 Asset이 아니라 고정 스케줄 + PythonSensor
+# 대기로 도는데, DQ 파이프라인(dq_gold_dag.py)만큼은 "그 Gold 테이블이 이번에 실제로
+# 갱신된 시점"에 정확히 맞춰 돌아야 하므로 이 6개만 신규로 추가한다.
+# gold.bike_last_action은 build_fact_station_inventory 태스크가 같이 쓰므로
+# FACT_STATION_INVENTORY_GOLD를 공유한다(별도 Asset 불필요 - 항상 같은 시점에 갱신됨).
+DIM_BIKE_GOLD = Asset("dim_bike_gold")
+BIKE_LOCATION_GOLD = Asset("bike_location_gold")
+STATION_ACTIVE_GOLD = Asset("station_active_gold")
+FACT_STATION_INVENTORY_GOLD = Asset("fact_station_inventory_gold")
+BIKE_FEATURES_DAILY_GOLD = Asset("bike_features_daily_gold")
+FACT_BIKE_RISK_GOLD = Asset("fact_bike_risk_gold")

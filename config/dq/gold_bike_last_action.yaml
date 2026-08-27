@@ -1,0 +1,21 @@
+# gold.bike_last_action DQ 어써션 - build_fact_station_inventory.py가 같이 쓰는
+# 중간 테이블. FACT_STATION_INVENTORY_GOLD Asset(같은 태스크가 두 테이블을 함께
+# 갱신)으로 트리거된다. 근거는 gold_dim_bike.yaml과 동일.
+
+source_name: gold_bike_last_action
+target_table: gold.bike_last_action
+partition_column: snapshot_date
+
+checks:
+  - check_name: bike_id_duplicate_rate
+    target_column: bike_id
+    severity: error
+    comparison: lte
+    threshold: 0.005
+    description: "bike_id 중복 비율 - 하드 게이트(1%)보다 낮은 조기경보 임계"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (WHERE cnt > 1) AS DOUBLE) / COUNT(*)
+      FROM (
+        SELECT bike_id, COUNT(*) OVER (PARTITION BY bike_id) AS cnt
+        FROM {table}
+      )
