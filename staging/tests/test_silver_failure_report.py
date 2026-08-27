@@ -31,6 +31,11 @@ from jobs.silver_failure_report import (
 def mod_default_max_days() -> int:
     return DEFAULT_MAX_DAYS_PER_RUN
 
+
+def test_default_max_days_per_run_is_seventy_days():
+    """Catch-up Asset 한 번으로 현재 Bronze backlog를 소화할 수 있는 기본 상한이다."""
+    assert DEFAULT_MAX_DAYS_PER_RUN == 70
+
 # Bronze는 API 요청일(PARTITION_COLUMN)도 갖는다 - transform이 요청일을 함께 뽑아
 # quarantine 구간 교체 키로 쓴다(#288, #304).
 BRONZE_COLUMNS = ["bike_no", "reg_dttm", "failure_type", PARTITION_COLUMN]

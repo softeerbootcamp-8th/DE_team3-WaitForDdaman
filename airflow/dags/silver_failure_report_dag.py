@@ -94,7 +94,7 @@ def _staging_bash(job_module: str, extra_env: str = "") -> str:
     default_args=DEFAULT_ARGS,
     tags=["silver", "asset_triggered", "main"],
     params={
-        # 미지정이면 잡의 DEFAULT_MAX_DAYS_PER_RUN(31)을 쓴다. 오래 밀린 워터마크를
+        # 미지정이면 잡의 DEFAULT_MAX_DAYS_PER_RUN(70)을 쓴다. 오래 밀린 워터마크를
         # 한 번에 소화시키고 싶을 때만 수동 실행에서 올린다.
         "max_days_per_run": "",
     },
