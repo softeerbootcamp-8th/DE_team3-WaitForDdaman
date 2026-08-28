@@ -39,13 +39,17 @@ def _load_ingestion_env(env_path: str) -> None:
             os.environ[key.strip()] = value.strip()
 
 
-_load_ingestion_env(f"{INGESTION_DIR}/.env")
-if PYLIB_DIR not in sys.path:
-    sys.path.insert(0, PYLIB_DIR)
-if INGESTION_DIR not in sys.path:
-    sys.path.insert(0, INGESTION_DIR)
+def _check_watermark_staleness_callable():
+    _load_ingestion_env(f"{INGESTION_DIR}/.env")
+    if PYLIB_DIR not in sys.path:
+        sys.path.insert(0, PYLIB_DIR)
+    if INGESTION_DIR not in sys.path:
+        sys.path.insert(0, INGESTION_DIR)
 
-from jobs.check_watermark_staleness import run as check_watermark_staleness  # noqa: E402
+    from jobs.check_watermark_staleness import run as check_watermark_staleness
+
+    return check_watermark_staleness()
+
 
 default_args = {
     "retries": 1,  # S3 일시 장애 대비 - 그 이상 재시도해도 워터마크 값 자체는 안 바뀐다
@@ -55,7 +59,7 @@ default_args = {
 
 @dag(
     dag_id="watermark_staleness_check",
-    # 매일 09:00 KST - bronze_daily_batch_all_sources(06:00)/gold_dim_fact(08:00) 등
+    # 매일 09:00 KST - bronze_daily_batch_all_sources(05:30)/gold_dim_fact(06:00) 등
     # 그날의 배치가 대부분 끝났을 시점 이후로 잡아 오탐(아직 안 끝났을 뿐인데 정체로
     # 오판)을 줄인다.
     schedule="0 9 * * *",
@@ -69,7 +73,7 @@ default_args = {
 def watermark_staleness_check():
     PythonOperator(
         task_id="check_watermark_staleness",
-        python_callable=check_watermark_staleness,
+        python_callable=_check_watermark_staleness_callable,
     )
 
 

@@ -1,0 +1,94 @@
+name: Deploy API
+
+on:
+  push:
+    branches:
+      - production
+    paths:
+      - "services/api/**"
+      - "docker-compose.services.prod.yml"
+      - ".github/workflows/deploy-api.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-api
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-northeast-2
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy API
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push API Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/api/Dockerfile.prod
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.login-ecr.outputs.registry }}/waitforddaman-api:latest
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Get runner public IP
+        id: runner-ip
+        run: echo "ip=$(curl -sf --retry 3 https://checkip.amazonaws.com | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Open SSH for this runner
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${{ secrets.SERVICES_SSH_SECURITY_GROUP_ID || secrets.SSH_SECURITY_GROUP_ID }} \
+            --protocol tcp --port 22 \
+            --cidr ${{ steps.runner-ip.outputs.ip }}/32 || true
+          sleep 10
+
+      - name: Deploy API to EC2
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          # docker-compose.services.prod.yml 동기화 (재시도)
+          for i in {1..6}; do
+            scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key docker-compose.services.prod.yml ${{ secrets.EC2_SSH_USER }}@${{ secrets.SERVICES_EC2_HOST || secrets.EC2_HOST }}:/opt/waitforddaman/docker-compose.services.prod.yml && break || sleep 5
+          done
+
+          DEPLOY_CMD="cd /opt/waitforddaman && ACCOUNT_ID=\$(aws sts get-caller-identity --query Account --output text) && export ECR_REGISTRY=\"\${ACCOUNT_ID}.dkr.ecr.ap-northeast-2.amazonaws.com\" && export IMAGE_TAG=\"latest\" && aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin \"\$ECR_REGISTRY\" && echo '==> Pulling and restarting API container' && docker compose -f docker-compose.services.prod.yml pull api && docker compose -f docker-compose.services.prod.yml up -d api && (docker image prune -a -f --filter 'until=24h' || docker image prune -f) && docker compose -f docker-compose.services.prod.yml ps api"
+
+          for i in {1..6}; do
+            ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ServerAliveInterval=15 -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key ${{ secrets.EC2_SSH_USER }}@${{ secrets.SERVICES_EC2_HOST || secrets.EC2_HOST }} "$DEPLOY_CMD" && break || sleep 5
+          done
+
+          rm -f ~/.ssh/deploy_key
+
+      - name: Close SSH for this runner
+        if: always() && steps.runner-ip.outputs.ip != ''
+        run: |
+          aws ec2 revoke-security-group-ingress \
+            --group-id ${{ secrets.SERVICES_SSH_SECURITY_GROUP_ID || secrets.SSH_SECURITY_GROUP_ID }} \
+            --protocol tcp --port 22 \
+            --cidr ${{ steps.runner-ip.outputs.ip }}/32 || true

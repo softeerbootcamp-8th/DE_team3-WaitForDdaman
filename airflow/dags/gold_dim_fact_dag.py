@@ -54,14 +54,6 @@ daily_batch_bikeman_event.py는 항상 "어제까지"만 처리하므로(오늘 
 그대로 넘겨서 이 센서가 워터마크를 영원히 못 따라잡고 매번 타임아웃났다
 (팀원 리뷰로 발견). `macros.ds_add(ds, -1)`로 하루 전 날짜를 넘겨서 고쳤다.
 
-### execution_delta 계산 (ExternalTaskSensor)
-이 DAG는 08:00 KST에 스케줄된다. `external_execution_date = logical_date -
-execution_delta` 공식이므로, "같은 날짜의 데이터"를 가리키는 상류 DAG의
-logical_date와 맞추려면 두 DAG의 스케줄 시각 차이를 그대로 execution_delta로
-넣어야 한다.
-    - rental_history(30 7 * * *): 08:00 - 07:30 = 30분
-    - station_master(0 7 * * *) / station_active(0 7 * * *): 08:00 - 07:00 = 1시간
-
 ### silver.station_active (2026-08-17, 담당 팀원 작업 반영)
 더 이상 더미가 아니다 - `silver_station_active` DAG(`staging/jobs/
 silver_station_active.py`)가 `bronze.station_active`에서 station_id만 추려
@@ -138,20 +130,41 @@ def _load_ingestion_env(env_path: str) -> None:
             os.environ[key.strip()] = value.strip()
 
 
-_load_ingestion_env(f"{INGESTION_DIR}/.env")
+def _watermark_ready(dataset: str, target_date: str, required_offset_days: int = 0) -> bool:
+    _load_ingestion_env(f"{INGESTION_DIR}/.env")
+    if PYLIB_DIR not in sys.path:
+        sys.path.insert(0, PYLIB_DIR)
+    if INGESTION_DIR not in sys.path:
+        sys.path.insert(0, INGESTION_DIR)
 
-# PythonSensor가 Spark/서브프로세스 없이 판정 함수를 직접 호출할 수 있도록,
-# pylib(config)와 ingestion을 네임스페이스 패키지 루트로 sys.path에 얹는다
-# (bikeman_event_generator_dag.py와 동일한 패턴). config가 위에서 로드한
-# ingestion/.env 값으로 평가되도록 반드시 _load_ingestion_env 다음에 import한다.
-if PYLIB_DIR not in sys.path:
-    sys.path.insert(0, PYLIB_DIR)
-if INGESTION_DIR not in sys.path:
-    sys.path.insert(0, INGESTION_DIR)
+    from jobs.check_silver_watermark import is_ready
 
-from jobs.check_silver_bikeman_action_watermark import is_ready as bikeman_action_ready  # noqa: E402
-from jobs.check_silver_snapshot_date import is_ready as snapshot_date_ready  # noqa: E402
-from jobs.check_silver_watermark import is_ready as watermark_ready  # noqa: E402
+    return is_ready(dataset=dataset, target_date=target_date, required_offset_days=required_offset_days)
+
+
+def _snapshot_date_ready(table_name: str, target_date: str) -> bool:
+    _load_ingestion_env(f"{INGESTION_DIR}/.env")
+    if PYLIB_DIR not in sys.path:
+        sys.path.insert(0, PYLIB_DIR)
+    if INGESTION_DIR not in sys.path:
+        sys.path.insert(0, INGESTION_DIR)
+
+    from jobs.check_silver_snapshot_date import is_ready
+
+    return is_ready(table_name=table_name, target_date=target_date)
+
+
+def _bikeman_action_ready(target_date: str) -> bool:
+    _load_ingestion_env(f"{INGESTION_DIR}/.env")
+    if PYLIB_DIR not in sys.path:
+        sys.path.insert(0, PYLIB_DIR)
+    if INGESTION_DIR not in sys.path:
+        sys.path.insert(0, INGESTION_DIR)
+
+    from jobs.check_silver_bikeman_action_watermark import is_ready
+
+    return is_ready(target_date=target_date)
+
 
 SENSOR_TIMEOUT = timedelta(hours=6).total_seconds()  # 전부 Asset 트리거라 여유 있게
 POKE_INTERVAL = 300  # 5분
@@ -179,7 +192,7 @@ def _collection_priority_bash(job_module: str, extra_env: str = "") -> str:
 
 @dag(
     dag_id="gold_dim_fact",
-    schedule="0 8 * * *",  # 매일 08:00 KST - 상류 Silver DAG(07:00~07:30)가 보통 끝난 뒤
+    schedule="0 6 * * *",  # 매일 06:00 KST - Asset 센서(reschedule)가 Silver 준비를 기다리므로 고정 여유시간 불필요
     start_date=pendulum.datetime(2026, 8, 17, tz="Asia/Seoul"),  # silver_station_active 최초 가용일과 동일
     catchup=False,
     max_active_runs=1,
@@ -193,7 +206,7 @@ def _collection_priority_bash(job_module: str, extra_env: str = "") -> str:
 def gold_dim_fact():
     wait_rental_history = PythonSensor(
         task_id="wait_for_silver_rental_history",
-        python_callable=watermark_ready,
+        python_callable=_watermark_ready,
         op_kwargs={"dataset": "rental_history", "target_date": "{{ ds }}", "required_offset_days": 1},
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
@@ -201,7 +214,7 @@ def gold_dim_fact():
     )
     wait_station_master = PythonSensor(
         task_id="wait_for_silver_station_master",
-        python_callable=snapshot_date_ready,
+        python_callable=_snapshot_date_ready,
         op_kwargs={"table_name": "silver.station_master", "target_date": "{{ ds }}"},
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
@@ -209,7 +222,7 @@ def gold_dim_fact():
     )
     wait_station_active = PythonSensor(
         task_id="wait_for_silver_station_active",
-        python_callable=snapshot_date_ready,
+        python_callable=_snapshot_date_ready,
         op_kwargs={"table_name": "silver.station_active", "target_date": "{{ ds }}"},
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
@@ -217,7 +230,7 @@ def gold_dim_fact():
     )
     wait_bikeman_action = PythonSensor(
         task_id="wait_for_silver_bikeman_action",
-        python_callable=bikeman_action_ready,
+        python_callable=_bikeman_action_ready,
         op_kwargs={"target_date": "{{ macros.ds_add(ds, -1) }}"},
         mode="reschedule",
         poke_interval=POKE_INTERVAL,
