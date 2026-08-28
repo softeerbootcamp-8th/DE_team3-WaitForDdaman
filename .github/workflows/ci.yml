@@ -1,0 +1,221 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [production, develop, services]
+
+jobs:
+  # 세 base 브랜치의 레이아웃이 서로 겹치지 않는 반쪽이다 - develop엔 파이썬
+  # 파이프라인만(ingestion/airflow/staging/pipeline), services엔 services/(web·api)만,
+  # production엔 둘 다 + *.Dockerfile.prod. 브랜치마다 잡을 지워서 맞추면 같은 경로의
+  # 파일이 브랜치별로 달라져 release/develop-to-production PR마다 add/add 충돌이 나고,
+  # 충돌을 잘못 해결해 게이트가 빠져도 develop은 자기 사본으로 계속 잘 돌기 때문에
+  # production의 퇴행을 아무도 눈치채지 못한다. 그래서 파일은 세 브랜치에서 동일하게
+  # 두고, 잡은 파일 존재 여부로 켜고 끈다 - 계열이 합쳐지면 해당 잡이 자동으로 켜진다.
+  #
+  # 이 판정을 잡 레벨 `if: hashFiles(...)`로 못 하는 이유: 잡 레벨 if는 체크아웃 전에
+  # 평가되고 그 시점엔 워크스페이스가 비어 있어서 hashFiles가 항상 ''를 돌려준다.
+  # 그래서 체크아웃하는 별도 잡의 output으로 넘긴다.
+  #
+  # paths 필터를 쓰지 않는 이유: required status check와 조합하면 paths로 스킵된 체크가
+  # pending으로 남아 머지가 영구히 막힌다. 잡 스킵(if: false)은 그 문제가 없다.
+  detect-layout:
+    runs-on: ubuntu-latest
+    outputs:
+      has_python: ${{ steps.check.outputs.has_python }}
+      has_web: ${{ steps.check.outputs.has_web }}
+      has_prod_dockerfiles: ${{ steps.check.outputs.has_prod_dockerfiles }}
+      has_api: ${{ steps.check.outputs.has_api }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # `[ -f x ] && v=true` 형태로 쓰면 파일이 없을 때 이 스텝의 종료코드가 1이 되어
+      # bash -e로 실행되는 스텝 자체가 실패한다. if 블록으로 쓴다.
+      - id: check
+        run: |
+          has_python=false
+          if [ -f ingestion/requirements.txt ] && [ -f airflow/requirements.txt ]; then
+            has_python=true
+          fi
+
+          has_web=false
+          if [ -f services/web/package-lock.json ]; then
+            has_web=true
+          fi
+
+          has_prod=false
+          if find . -path ./.git -prune -o -name Dockerfile.prod -print -quit | grep -q .; then
+            has_prod=true
+          fi
+
+          has_api=false
+          if [ -f services/api/requirements-dev.txt ] && [ -d services/api/tests ]; then
+            has_api=true
+          fi
+
+          echo "has_python=$has_python" >> "$GITHUB_OUTPUT"
+          echo "has_web=$has_web" >> "$GITHUB_OUTPUT"
+          echo "has_prod_dockerfiles=$has_prod" >> "$GITHUB_OUTPUT"
+          echo "has_api=$has_api" >> "$GITHUB_OUTPUT"
+          echo "has_python=$has_python  has_web=$has_web  has_prod_dockerfiles=$has_prod  has_api=$has_api"
+
+  python-tests:
+    needs: detect-layout
+    if: needs.detect-layout.outputs.has_python == 'true'
+    runs-on: ubuntu-latest
+    env:
+      # 실행 컨테이너(airflow/Dockerfile.local)와 같은 버전을 쓴다
+      AIRFLOW_VERSION: "3.3.0"
+      PYTHON_VERSION: "3.11"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system deps (libgomp1 for lightgbm)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
+
+      - name: Install Python deps
+        run: |
+          pip install --no-cache-dir -r ingestion/requirements.txt
+          pip install --no-cache-dir -r airflow/requirements.txt
+
+          # DAG 구조 테스트는 DagBag으로 실제 파싱하므로 Airflow 본체가 필요하다.
+          # 저장소 루트의 airflow/ 디렉터리가 PYTHONPATH에서 네임스페이스 패키지로
+          # 잡히는 탓에, 설치 안 된 상태에서는 import airflow만 성공하고 하위
+          # 모듈이 없어서 원인을 찾기 어려운 에러가 난다.
+          # provider 버전 충돌을 막기 위해 공식 constraints와 함께 설치한다.
+          pip install --no-cache-dir -r airflow/requirements-ci.txt \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
+
+      # 네임스페이스 껍데기가 아니라 실제 설치본을 잡았는지 확인한다.
+      # 껍데기면 __file__이 None이라 DAG 테스트가 조용히 깨진다.
+      - name: Verify Airflow install
+        run: |
+          python - <<'PYCHECK'
+          import airflow
+          from airflow.dag_processing.dagbag import DagBag  # noqa: F401
+          assert airflow.__file__, "airflow가 네임스페이스 패키지로 잡혔다 (설치 실패)"
+          print("airflow", airflow.__version__, airflow.__file__)
+          PYCHECK
+
+      # 각 모듈 테스트는 해당 디렉터리를 cwd로 두고 import하도록 작성되어 있어서
+      # (ingestion/tests는 `from schema...`, staging/tests는 `from common...`,
+      # pipeline/*/tests는 jobs/ 안의 모듈을 직접 import) 저장소 루트에서 한 번에
+      # 돌리면 ModuleNotFoundError로 수집 자체가 실패한다. 모듈별로 cwd와
+      # PYTHONPATH를 맞춰 실행한다 - 각 모듈 README에 문서화된 방식과 동일.
+      #
+      # PYSPARK_PYTHON을 명시하는 이유: 안 잡아주면 Spark 워커가 드라이버와 다른
+      # 파이썬(시스템 기본)을 집어서 PYTHON_VERSION_MISMATCH로 전부 실패한다.
+      - name: Run tests
+        env:
+          ROOT: ${{ github.workspace }}
+        run: |
+          set -e
+          export PYSPARK_PYTHON="$(which python)"
+          export PYSPARK_DRIVER_PYTHON="$PYSPARK_PYTHON"
+
+          echo "::group::ingestion"
+          # bikeman_event_generator_dag이 컨테이너 절대경로를 sys.path에 넣고 jobs를
+          # import한다. DagBag 파싱 테스트가 dags 폴더 전체를 읽으므로 그 경로도 필요하다.
+          (cd ingestion && PYTHONPATH="$ROOT:$ROOT/ingestion:$ROOT/staging:$ROOT/pipeline/bikeman_event_generator/jobs" pytest tests -q)
+          echo "::endgroup::"
+
+          echo "::group::staging"
+          (cd staging && PYTHONPATH="$ROOT:$ROOT/ingestion:$ROOT/staging" pytest tests -q)
+          echo "::endgroup::"
+
+          for mod in bikeman_event_generator serving_sync collection_priority risk_model; do
+            echo "::group::pipeline/$mod"
+            (cd "pipeline/$mod" && PYTHONPATH="$ROOT/pipeline/$mod:$ROOT/pipeline/$mod/jobs:$ROOT:$ROOT/ingestion" pytest tests -q)
+            echo "::endgroup::"
+          done
+
+          # train_risk_model만 규칙이 다르다: tests/ 디렉터리가 아니라 모듈 루트에
+          # test_risk_model.py가 있고, `from pipeline.train_risk_model...` 절대
+          # 임포트를 써서 저장소 루트를 cwd/PYTHONPATH로 둬야 한다.
+          # $ROOT/ingestion도 필요하다 - #148로 resolve_anchors가 common.partition_listing
+          # (bare import, ingestion/common/s3_utils.py를 그 안에서 또 bare import)을
+          # 쓰게 되면서, 다른 pipeline/* 모듈들과 동일하게 ingestion을 경로에 얹어야 한다.
+          echo "::group::pipeline/train_risk_model"
+          PYTHONPATH="$ROOT:$ROOT/ingestion" pytest pipeline/train_risk_model/test_risk_model.py -q
+          echo "::endgroup::"
+
+  api-tests:
+    needs: detect-layout
+    if: needs.detect-layout.outputs.has_api == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # services/api/Dockerfile(.prod)이 python:3.11-slim이라 런타임과 같은 마이너
+      # 버전으로 맞춘다.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # requirements-dev.txt가 `-r requirements.txt`로 런타임 의존성을 끌어온다
+      # (pip은 이 상대 경로를 requirements 파일 기준으로 해석한다).
+      - name: Install Python deps
+        run: pip install --no-cache-dir -r services/api/requirements-dev.txt
+
+      # app이 `services.api.app.*` 절대 임포트를 쓰는데 services/ 와 services/api/ 에
+      # __init__.py가 없어 네임스페이스 패키지로 해석된다 - 저장소 루트가
+      # PYTHONPATH에 있어야 import가 된다. seed_dim_district.py도 같은 전제로 동작한다.
+      - name: Run tests
+        run: PYTHONPATH="$GITHUB_WORKSPACE" pytest services/api/tests -q
+
+  web-lint-build:
+    needs: detect-layout
+    if: needs.detect-layout.outputs.has_web == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: services/web/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  docker-build-check:
+    needs: detect-layout
+    if: needs.detect-layout.outputs.has_prod_dockerfiles == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build prod images (no push)
+        run: |
+          set -e
+
+          if [ -f airflow/Dockerfile.prod ]; then
+            docker build -f airflow/Dockerfile.prod -t ci-check-airflow .
+          fi
+
+          if [ -f services/api/Dockerfile.prod ]; then
+            docker build -f services/api/Dockerfile.prod -t ci-check-api .
+          fi
+
+          if [ -f services/web/Dockerfile.prod ]; then
+            docker build -f services/web/Dockerfile.prod -t ci-check-web services/web
+          fi
+
+          if [ -f spark/Dockerfile.prod ]; then
+            docker build -f spark/Dockerfile.prod -t ci-check-emr-spark .
+            bash spark/verify_emr_image.sh ci-check-emr-spark
+          fi

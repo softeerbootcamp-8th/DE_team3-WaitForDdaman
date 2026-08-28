@@ -1,0 +1,66 @@
+# EMR Serverless(Spark) 커스텀 이미지.
+# AWS 규칙: USER root로 수정 후 마지막엔 반드시 USER hadoop:hadoop로 복귀해야
+# EMR Serverless가 이 이미지를 워커로 실행할 수 있다. JAVA_HOME/SPARK_HOME 등
+# 베이스 이미지의 환경변수는 건드리지 않는다.
+FROM public.ecr.aws/emr-serverless/spark/emr-7.2.0:latest
+
+USER root
+
+# JDBC 카탈로그 드라이버 jar (Postgres).
+# EMR Serverless 워커는 런타임에 인터넷이 없어 spark.jars.packages(Maven 런타임
+# 다운로드, ingestion/common/spark_session.py의 로컬/EC2 실행 방식)를 그대로 못
+# 쓴다. 빌드 시점(이 이미지를 만드는 CI/로컬 머신)엔 인터넷이 있으므로 여기서
+# 미리 받아 $SPARK_HOME/jars/에 넣는다.
+#
+# Iceberg / Hadoop-AWS는 여기서 굽지 않는다. 베이스 이미지의
+# spark-defaults.conf가 spark.driver/executor.extraClassPath에
+# /usr/share/aws/iceberg/lib/iceberg-spark3-runtime.jar,
+# /usr/lib/hadoop/hadoop-aws.jar을 이미 올려두고, extraClassPath는
+# $SPARK_HOME/jars보다 앞선다 - 즉 우리가 구워도 실제 로딩되는 건 항상 EMR
+# 자체 빌드다(실측 확인). 같은 런타임 jar를 중복으로 올리면
+# spark.driver.userClassPathFirst 등으로 우선순위가 바뀌는 순간 버전 충돌만
+# 생기므로 굽지 않는 게 맞다. Postgres JDBC 드라이버만 베이스 이미지에 없어
+# 실제로 이 baked-in 사본이 클래스를 공급한다.
+RUN curl -fsSL -o "$SPARK_HOME/jars/postgresql-42.7.3.jar" \
+      "https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.3/postgresql-42.7.3.jar"
+
+# 앱 코드. 로컬/Airflow 실행과 동일한 상대 구조를 /opt/app 아래 그대로 재현한다 -
+# import config / from common.xxx / from schema.xxx (bare) 와
+# from ingestion.common.xxx / from pipeline.train_risk_model.xxx (qualified) 가
+# 코드 수정 없이 그대로 동작하려면 디렉터리 이름과 깊이가 로컬과 같아야 한다.
+# 대상 잡: ingestion/jobs/initial_load_{rental_history,failure_report}.py,
+# pipeline/train_risk_model/samples.py,
+# pipeline/collection_priority/jobs/compact_gold_tables.py, airflow/scripts/check_*.py.
+COPY config/ /opt/app/config/
+COPY ingestion/common/ /opt/app/ingestion/common/
+COPY ingestion/jobs/ /opt/app/ingestion/jobs/
+COPY ingestion/schema/ /opt/app/ingestion/schema/
+COPY pipeline/collection_priority/jobs/ /opt/app/pipeline/collection_priority/jobs/
+COPY pipeline/train_risk_model/ /opt/app/pipeline/train_risk_model/
+COPY airflow/scripts/ /opt/app/airflow/scripts/
+
+# Python 의존성. pyspark는 베이스 이미지가 이미 제공하므로 재설치하지 않는다.
+COPY spark/requirements-emr.txt /opt/app/requirements-emr.txt
+RUN pip3 install --no-cache-dir -r /opt/app/requirements-emr.txt
+
+# 로컬 bash 실행과 동일한 PYTHONPATH 2분할 규칙:
+#   /opt/app            -> config, ingestion.common.*, pipeline.train_risk_model.*
+#                          (namespace package)
+#   /opt/app/ingestion  -> common.*, schema.*
+# 두 경로가 동시에 있어야 파일별로 다른 import 스타일(bare / qualified)이
+# 코드 수정 없이 전부 해결된다.
+ENV PYTHONPATH="/opt/app:/opt/app/ingestion"
+
+# 필요한 jar가 전부 이미 클래스패스에 있으므로(Iceberg/Hadoop-AWS는 베이스
+# 이미지의 extraClassPath, Postgres JDBC는 위 baked-in 사본), spark_session.py가
+# spark.jars.packages(Ivy 런타임 다운로드)를 설정하지 않도록 끈다.
+ENV SPARK_JARS_ALREADY_BAKED="true"
+
+# pipeline/train_risk_model/settings.py의 DEFAULT_CONFIG는 Airflow compose 전용
+# 마운트 경로(/opt/airflow/pylib/config/risk_model.yaml)라 이 컨테이너엔 없다.
+# load_config()를 인자 없이 부를 수 있는 잡(pipeline/train_risk_model/samples.py)이
+# 시작 즉시 FileNotFoundError로 죽지 않도록 위 COPY로 들어온 실제 경로를 가리킨다.
+ENV RISK_MODEL_CONFIG="/opt/app/config/risk_model.yaml"
+
+# EMR Serverless는 이 이미지를 hadoop 유저로 실행한다.
+USER hadoop:hadoop
