@@ -1,0 +1,69 @@
+"""날짜별 completion marker의 연속 성공 구간만 Bronze 워터마크에 반영한다."""
+from __future__ import annotations
+
+import json
+import os
+from datetime import date, timedelta
+
+import config
+from common.s3_utils import ensure_bucket, get_json
+from common.watermark import read_watermark, write_watermark
+from config.watermark_keys import DATASET_WATERMARK_KEYS
+
+COMPLETION_PREFIXES = {
+    "rental_history": "_meta/completion/bronze_rental_history",
+    "failure_report": "_meta/completion/bronze_failure_report",
+}
+ACCEPTED_STATUS = {
+    "rental_history": {"COMPLETE", "MANUALLY_CONFIRMED_EMPTY"},
+    "failure_report": {"COMPLETE", "COMPLETE_EMPTY"},
+}
+
+
+def _marker_key(dataset: str, target_date: date) -> str:
+    return f"{COMPLETION_PREFIXES[dataset]}/target_date={target_date.isoformat()}/completion.json"
+
+
+def run() -> dict:
+    dataset = os.getenv("DATASET", "").strip()
+    target_value = os.getenv("RECONCILIATION_TARGET_DATE", "").strip()
+    if dataset not in COMPLETION_PREFIXES or not target_value:
+        raise ValueError("DATASET와 RECONCILIATION_TARGET_DATE가 필요합니다")
+
+    target_date = date.fromisoformat(target_value)
+    bucket = config.SETTINGS.raw_bucket
+    ensure_bucket(bucket)
+    before = read_watermark(watermark_key=DATASET_WATERMARK_KEYS[dataset])
+    cursor = before + timedelta(days=1)
+    confirmed: list[str] = []
+    while cursor <= target_date:
+        marker = get_json(bucket, _marker_key(dataset, cursor))
+        if not isinstance(marker, dict) or marker.get("status") not in ACCEPTED_STATUS[dataset]:
+            break
+        confirmed.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+
+    after = date.fromisoformat(confirmed[-1]) if confirmed else before
+    if after > before:
+        write_watermark(after, watermark_key=DATASET_WATERMARK_KEYS[dataset])
+
+    incomplete = cursor <= target_date
+    if incomplete and os.getenv("RECONCILIATION_FAIL_ON_INCOMPLETE", "false").lower() == "true":
+        raise RuntimeError(
+            f"{dataset} completion marker가 연속으로 완료되지 않음: "
+            f"다음 필요 날짜={cursor.isoformat()} target={target_date.isoformat()}"
+        )
+
+    result = {
+        "dataset": dataset,
+        "before": before.isoformat(),
+        "after": after.isoformat(),
+        "confirmed_dates": confirmed,
+        "noop": after == before,
+    }
+    print(json.dumps(result, ensure_ascii=False))
+    return result
+
+
+if __name__ == "__main__":
+    run()

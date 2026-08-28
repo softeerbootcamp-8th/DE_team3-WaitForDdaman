@@ -1,0 +1,224 @@
+x-airflow-common:
+  &airflow-common
+  build:
+    context: .
+    dockerfile: airflow/Dockerfile
+    args:
+      AIRFLOW_VERSION: "3.3.0"
+      PYTHON_VERSION: "3.11"
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres/${POSTGRES_DB:-airflow}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+    AIRFLOW__WEBSERVER__BASE_URL: ${AIRFLOW_BASE_URL:-http://localhost:8080}
+    AIRFLOW__API__BASE_URL: ${AIRFLOW_BASE_URL:-http://localhost:8080}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow_jwt_secret}
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-ap-northeast-2}
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+    APP_ENV: ${APP_ENV:-local}
+    AWS_LOCAL_SIMULATION: ${AWS_LOCAL_SIMULATION:-false}
+    EMR_SERVERLESS_DRY_RUN: ${EMR_SERVERLESS_DRY_RUN:-false}
+    SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+    ICEBERG_CATALOG_TYPE: ${ICEBERG_CATALOG_TYPE:-hadoop}
+    ICEBERG_CATALOG_NAME: ${ICEBERG_CATALOG_NAME:-bike_catalog}
+    ICEBERG_WAREHOUSE_PATH: ${ICEBERG_WAREHOUSE_PATH:-}
+    ICEBERG_JDBC_CATALOG_URI: ${ICEBERG_JDBC_CATALOG_URI:-}
+    ICEBERG_JDBC_CATALOG_USER: ${ICEBERG_JDBC_CATALOG_USER:-}
+    ICEBERG_JDBC_CATALOG_PASSWORD: ${ICEBERG_JDBC_CATALOG_PASSWORD:-}
+    ICEBERG_CATALOG_SECRET_ARN: ${ICEBERG_CATALOG_SECRET_ARN:-}
+    RAW_BUCKET: ${RAW_BUCKET:-}
+    WAREHOUSE_BUCKET: ${WAREHOUSE_BUCKET:-}
+    EMR_SPARK_APPLICATION_ID: ${EMR_SPARK_APPLICATION_ID:-}
+    EMR_SPARK_EXECUTION_ROLE_ARN: ${EMR_SPARK_EXECUTION_ROLE_ARN:-}
+    EMR_SPARK_POLL_INTERVAL_SECONDS: ${EMR_SPARK_POLL_INTERVAL_SECONDS:-30}
+    EMR_SPARK_POLL_MAX_SECONDS: ${EMR_SPARK_POLL_MAX_SECONDS:-21600}
+    EMR_RISK_MODEL_CONFIG: ${EMR_RISK_MODEL_CONFIG:-/opt/app/config/risk_model.yaml}
+    PYTHONPATH: /opt/airflow/pylib
+  volumes:
+    - ./.env:/opt/airflow/.env:ro
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./airflow/config:/opt/airflow/config
+    - ./ingestion:/opt/airflow/ingestion
+    - ./staging:/opt/airflow/staging
+    - ./pipeline:/opt/airflow/pipeline
+    - ./config:/opt/airflow/pylib/config
+    - ./airflow/scripts:/opt/airflow/scripts
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  api:
+    container_name: service-api
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres/${POSTGRES_DB:-airflow}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./services/api/app:/app/services/api/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    container_name: service-web
+    build:
+      context: services/web
+      dockerfile: Dockerfile
+    environment:
+      VITE_API_PROXY_TARGET: http://api:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./services/web:/app
+      - /app/node_modules
+    depends_on:
+      - api
+
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${POSTGRES_DB:-airflow}
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-airflow}"]
+      interval: 5s
+      retries: 5
+    restart: always
+  
+  localstack:
+    image: localstack/localstack:2026.06.0
+    container_name: localstack
+    ports:
+      - "4566:4566"       # 모든 AWS 서비스가 이 포트로 통합 접근
+    environment:
+      - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN}
+      - SERVICES=s3
+      - DEFAULT_REGION=ap-northeast-2
+      - DEBUG=0
+      - PERSISTENCE=1      # 컨테이너 재시작해도 데이터 유지
+    volumes:
+      - "./localstack/volume:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: airflow-apiserver
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: airflow-dag-processor
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: airflow-triggerer
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    # 운영에서도 DAG이 참조하는 pool 전체를 재배포 시 자동 보장한다.
+    # 일부만 만들어 두면 나머지를 쓰는 태스크가 scheduled에서 영원히 대기한다.
+    # pools set은 이미 존재하면 슬롯/설명을 갱신하고 없으면 생성하므로 멱등적이다.
+    command:
+      - bash
+      - -c
+      - >-
+        airflow version &&
+        airflow pools set bronze_ingest 2 "Bronze 적재 워커 메모리 가드 (PyArrow 동시 실행 제한)" &&
+        airflow pools set silver_process 2 "Silver 변환 워커 메모리 가드 (DuckDB 동시 실행 제한)" &&
+        airflow pools set seoul_api 4 "서울시 API 키별 동시성 제한 (rental_history 1~3, failure_report 4)" &&
+        airflow pools set rental_history_api 3 "대여이력 Catchup API 키 1~3 전용 (failure_report와 슬롯 경쟁 없음)" &&
+        airflow pools set failure_report_api 1 "고장신고 Catchup API 키 4 전용 (rental 병렬도와 무관하게 항상 1슬롯 확보)" &&
+        airflow pools set bronze_rental_history_commit 1 "bronze.rental_history 날짜별 promote(Iceberg commit) 직렬화" &&
+        airflow pools set emr_initial_load 3 "EMR Serverless 초기 적재 배치 동시 제출 제한 (pre-initialized executor 3개)" &&
+        airflow pools set s3_initial_load_staging 2 "초기 적재 S3 스테이징 업로드 동시 실행 제한 (EC2 t4g.large 워커 자원 보호, #255)" &&
+        airflow variables set RENTAL_HISTORY_T0_ENABLED true &&
+        airflow variables set RENTAL_HISTORY_FALLBACK_ENABLED true &&
+        airflow variables set FAILURE_REPORT_T0_ENABLED true
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
+
+volumes:
+  postgres-db-volume:

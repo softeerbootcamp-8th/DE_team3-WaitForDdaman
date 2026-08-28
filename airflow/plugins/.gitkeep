@@ -1,0 +1,2 @@
+# 빈 디렉터리를 git이 추적하도록 유지하기 위한 파일.
+# airflow/Dockerfile.prod가 이 경로를 COPY하므로 디렉터리가 체크아웃에 존재해야 한다.

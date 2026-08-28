@@ -1,0 +1,39 @@
+# 대여이력(rental_history) Silver DQ 어써션 선언 (#217 파일럿)
+#
+# comparison/threshold가 둘 다 null이면 "monitor" - 하드 pass/fail 없이 지표값만
+# dq.check_result_history에 기록하고, 추세 급변 여부는 해석 에이전트가 판단한다.
+#
+# birth_year/sex_cd 체크는 이번 범위에서 제외했다 - silver.rental_history는
+# transform_silver_rental_history.py의 SILVER_COLUMNS에 그 두 컬럼을 원래부터
+# 포함하지 않는다(Bronze에만 존재, Silver 변환에서 버려짐). Silver 스키마/변환
+# 잡을 건드리지 않고 기존 코드를 최대한 그대로 두기로 했으므로, 이번 파일럿은
+# Silver에 실제로 존재하는 컬럼만 검증한다.
+
+source_name: rental_history
+target_table: silver.rental_history
+
+checks:
+  - check_name: zero_distance_station_mismatch_rate
+    target_column: use_distance_m
+    severity: error
+    comparison: lte
+    threshold: 0.01
+    description: "이동거리 0인데 대여소가 다른 경우 - 센서 오류 의심"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (
+               WHERE use_distance_m = 0
+                 AND rent_station_id IS DISTINCT FROM return_station_id
+             ) AS DOUBLE) / COUNT(*)
+      FROM {table}
+
+  - check_name: return_columns_null_rate
+    target_column: return_dt
+    severity: warn
+    comparison: lte
+    threshold: 0.005
+    description: "반납(rtn) 관련 컬럼 결측률 (기존 확인분 ~0.2%)"
+    metric_sql: |
+      SELECT CAST(COUNT(*) FILTER (
+               WHERE return_dt IS NULL OR return_station_id IS NULL
+             ) AS DOUBLE) / COUNT(*)
+      FROM {table}
