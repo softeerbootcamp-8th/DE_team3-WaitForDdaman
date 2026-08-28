@@ -18,7 +18,7 @@ from airflow.sdk import dag
 from dag_common import COLLECTION_CUTOFF_AT_TEMPLATE, DEFAULT_ARGS, bash_job
 
 PRELIMINARY_SCHEDULE = os.getenv(
-    "PRELIMINARY_SCHEDULE", "0 5 * * *"
+    "PRELIMINARY_SCHEDULE", "0 4 * * *"
 )
 
 

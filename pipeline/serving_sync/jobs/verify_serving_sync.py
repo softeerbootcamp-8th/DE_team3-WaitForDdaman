@@ -57,8 +57,11 @@ def _partition_row_count(parts_df: pd.DataFrame, snapshot_date: date) -> int:
 def verify_counts(catalog, iceberg_table: str, postgres_table: str, snapshot_date_str: str) -> None:
     table_identifier = _strip_catalog_prefix(iceberg_table, config.SETTINGS.iceberg_catalog_name)
     table = catalog.load_table(table_identifier)
-    parts_df = table.inspect.partitions().to_pandas()
-    iceberg_count = _partition_row_count(parts_df, date.fromisoformat(snapshot_date_str))
+    if table.current_snapshot() is None:
+        iceberg_count = 0
+    else:
+        parts_df = table.inspect.partitions().to_pandas()
+        iceberg_count = _partition_row_count(parts_df, date.fromisoformat(snapshot_date_str))
 
     pg_count = count_rows(postgres_table, snapshot_date_str)
     if iceberg_count != pg_count:
