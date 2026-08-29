@@ -48,7 +48,7 @@
 
 > 직전 30일 동안 고장 신고가 없었던 신규 고장 자전거 중, 실제 신고가 접수되기 전에 당일 정비소 수용력 범위의 수거 우선순위 목록에 포함된 자전거의 비율
 >
-> 2026년 7월 한 달 동안 **신규 고장 선제 포착률 Before 0% → After XX%**
+> 2026년 4~6월 동안 무작위 수거 방법 대비 **신규 고장 선제 포착률 2.76배 향상**
 
 ### 기대 효과와 측정 지표
 
@@ -67,17 +67,15 @@
 
 ## 결과
 
-### 수거 반장님 화면
-![수거 반장님 화면](docs/images/recommended-list.png)
-- 짧은 설명
+[서비스 링크](http://ec2-15-165-230-137.ap-northeast-2.compute.amazonaws.com/)
 
-### 현장 작업자
-![현장 작업자 화면](docs/images/final-list.png)
-- 짧은 설명
+![수거 반장님 화면](docs/images/recommended_list.png)
+- 오늘 정비소가 받을 수 있는 대수를 입력
+- 수거 후보가 수용력 안에 들어오는 '수거 대상'과, 초과분인 '대여중단'으로 분류
+- '확인' 누를 시 그날의 수거 목록 확정
 
-### 사이트
-- 사이트: http://ec2-15-165-230-137.ap-northeast-2.compute.amazonaws.com/
-- 짧은 설명
+![현장 작업자 화면](docs/images/final_list.png)
+- 현장 작업자가 당일에 수거해야 하는 목록
 
 ## 구성
 
@@ -147,8 +145,8 @@
 | Distributed Processing | ![Spark](https://img.shields.io/badge/spark-%23E25A1C.svg?style=for-the-badge&logo=apachespark&logoColor=white) | 대용량 초기 적재와 모델 피처 집계 |
 | In-process Analytics | ![Duckdb](https://img.shields.io/badge/duckdb-%23FFF000.svg?style=for-the-badge&logo=duckdb&logoColor=black) | 일별 SQL 변환, Window Function과 조인을 낮은 기동 비용으로 처리 |
 | Data Interface | ![PyArrow](https://img.shields.io/badge/PyArrow-%23000000.svg?style=for-the-badge&logo=apachearrow&logoColor=white) | DuckDB와 Iceberg 사이의 컬럼형 데이터 전달 |
-| Data Lakehouse | ![Amazon S3](https://img.shields.io/badge/S3-%23569A31.svg?style=for-the-badge&logo=amazons3&logoColor=white) Apache Iceberg PyIceberg | 파티셔닝, 원자적 커밋, Snapshot, 재처리와 변경 이력 관리 |
-| ML | ![scikit-learn](https://img.shields.io/badge/scikit--learn-%23F7931E.svg?style=for-the-badge&logo=scikitlearn&logoColor=white) LightGBM | 규칙·선형·트리 모델 비교와 Champion 관리 |
+| Data Lakehouse | ![Amazon S3](https://img.shields.io/badge/S3-%23569A31.svg?style=for-the-badge&logo=amazons3&logoColor=white) ![Apache Iceberg](https://img.shields.io/badge/Apache%20Iceberg-1E88E5.svg?style=for-the-badge&logoColor=white) ![PyIceberg](https://img.shields.io/badge/PyIceberg-0EA5E9.svg?style=for-the-badge&logoColor=white) | 파티셔닝, 원자적 커밋, Snapshot, 재처리와 변경 이력 관리 |
+| ML | ![scikit-learn](https://img.shields.io/badge/scikit--learn-%23F7931E.svg?style=for-the-badge&logo=scikitlearn&logoColor=white) ![LightGBM](https://img.shields.io/badge/LightGBM-4CAF50.svg?style=for-the-badge&logoColor=white) | 규칙·선형·트리 모델 비교와 Champion 관리 |
 | Serving DB | ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-%234169E1.svg?style=for-the-badge&logo=postgresql&logoColor=white) | 일별 Mart 적재와 읽기 전용 API 제공 |
 | Infrastructure | ![AWS Lambda](https://img.shields.io/badge/Lambda-%23FF9900.svg?style=for-the-badge&logo=awslambda&logoColor=white) ![Amazon EC2](https://img.shields.io/badge/EC2-%23FF9900.svg?style=for-the-badge&logo=amazonec2&logoColor=white) ![Amazon RDS](https://img.shields.io/badge/RDS-%23527FFF.svg?style=for-the-badge&logo=amazonrds&logoColor=white) ![Amazon ECR](https://img.shields.io/badge/ECR-%23FF9900.svg?style=for-the-badge&logo=amazonecr&logoColor=white) | Raw 수집, 실행 환경, 서빙 DB와 이미지 배포 |
 | Monitoring | ![CloudWatch](https://img.shields.io/badge/CloudWatch-%23FF9900.svg?style=for-the-badge&logo=cloudwatch&logoColor=white) ![Amazon SNS](https://img.shields.io/badge/SNS-%23FF9900.svg?style=for-the-badge&logo=amazonsns&logoColor=white) ![Slack](https://img.shields.io/badge/Slack-%234A154B.svg?style=for-the-badge&logo=slack&logoColor=white) | Lambda·DLQ 감지와 Airflow 실패 알림 |
@@ -163,13 +161,24 @@
 
 ## 한계 및 향후 작업
 
-- 현재 모델 평가는 제한적인 로컬 데이터와 짧은 홀드아웃 구간에서 수행되어 장기간 운영 데이터 기반 재평가가 필요합니다.
-- 위험 등급 임계값은 모델과 데이터 분포 변화에 따라 다시 검증해야 합니다.
-- 업무 시작 전 제공을 위한 운영 SLA와 전체 End-to-End 실행시간을 실제 운영 환경에서 확정해야 합니다.
-- Slack 실패 알림은 현재 일부 주요 DAG에만 적용되어 전체 파이프라인으로 확대할 필요가 있습니다.
-- 실제 수거 결과가 축적되면 신규 고장 선제 포착률 및 수거 적중률, 고장 감소율과 작업시간 절감 효과를 측정해야 합니다.
-- 데이터 규모 증가에 따라 실행 시간, 메모리, 파일 크기와 저장 비용을 지속적으로 관찰해야 합니다.
-- 작업자별 업무 배정, 완료 상태, 사용자 인증과 이동 경로 최적화는 향후 서비스 확장 영역입니다.
+### 한계
+
+- 모델 평가가 제한적인 로컬 데이터, 짧은 홀드아웃 구간 기반이라 장기 재평가 필요
+- 위험 등급 임계값이 고정값이라 데이터 분포 변화 시 재검증 필요
+- Iceberg Bronze 테이블은 최초 생성만 자동화되어 있고, 스키마 변경은 수동 반영
+- Terraform 상태를 원격 backend 없이 관리, 인프라 적용도 CI/CD에 미통합
+- Slack 실패 알림이 일부 주요 DAG에만 적용
+- 운영 SLA, 전체 E2E 실행시간이 실 운영 환경 기준으로 미확정
+
+### 향후 작업
+
+- Iceberg 스키마 마이그레이션 절차·검증 도구 정립
+- Terraform 원격 state backend 도입, 인프라 적용 CI/CD 통합
+- Slack 실패 알림 전체 DAG로 확대
+- 모델, 위험 등급 임계값 주기적 재검증 체계 수립
+- 수거 결과 축적 후 신규 고장 선제 포착률, 고장 감소율, 작업시간 절감 효과 측정
+- 데이터 규모 증가에 따른 실행시간, 메모리, 비용 지속 관찰
+- 작업자 배정, 인증, 경로 최적화 등 서비스 확장 검토
 
 ## 팀원 소개
 
