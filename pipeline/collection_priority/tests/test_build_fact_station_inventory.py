@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 import pyarrow as pa
 
-from jobs.build_fact_station_inventory import (
+from gold.build_fact_station_inventory import (
     _aggregate_station_inventory,
     _dedup_by,
     _merge_bike_last_action,

@@ -18,8 +18,8 @@ from unittest import mock
 import pyarrow as pa
 import pytest
 
-import jobs.transform_silver_rental_history as tsr
-from jobs.transform_silver_rental_history import (
+import silver.transform_silver_rental_history as tsr
+from silver.transform_silver_rental_history import (
     PARTITION_COLUMN,
     QUARANTINE_ARROW_SCHEMA,
     QUARANTINE_SCHEMA,

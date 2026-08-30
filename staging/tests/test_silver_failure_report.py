@@ -13,7 +13,7 @@ from datetime import date, datetime, timezone
 import pyarrow as pa
 import pytest
 
-from jobs.silver_failure_report import (
+from silver.silver_failure_report import (
     DECLARED_COLUMN,
     DEFAULT_MAX_DAYS_PER_RUN,
     PARTITION_COLUMN,
@@ -233,14 +233,14 @@ def test_confirmed_range_default_cap_is_applied_when_env_is_empty():
 
 
 def _with_declared(*overrides) -> pa.Table:
-    from jobs.silver_failure_report import transform_with_declared
+    from silver.silver_failure_report import transform_with_declared
 
     return transform_with_declared(bronze_table(*overrides))
 
 
 def test_declared_date_prefers_the_explicit_requested_date_column():
     """신규 수집분은 requested_date를 싣는다 - 파티션 값보다 그쪽이 우선이다."""
-    from jobs.silver_failure_report import REQUESTED_DATE_COLUMN, transform_with_declared
+    from silver.silver_failure_report import REQUESTED_DATE_COLUMN, transform_with_declared
 
     bronze = pa.table({
         "bike_no": pa.array(["SPB-1"], type=pa.string()),
@@ -266,7 +266,7 @@ def test_declared_date_falls_back_to_the_partition_for_backfilled_rows():
 
 def test_report_date_different_from_the_request_date_is_no_longer_quarantined():
     """31일 응답에서는 이게 정상이다 - 격리하면 데이터 대부분이 본 테이블에서 사라진다."""
-    from jobs.silver_failure_report import _split_future_rows
+    from silver.silver_failure_report import _split_future_rows
 
     table = _with_declared(
         {"reg_dttm": "2026-08-21 09:00:00", PARTITION_COLUMN: "2026-07-25"},
@@ -280,7 +280,7 @@ def test_report_date_different_from_the_request_date_is_no_longer_quarantined():
 
 def test_quarantine_schema_is_fixed():
     """감사 테이블 스키마를 고정한다 - 원본 컬럼 + 요청일 + 사유/시각."""
-    from jobs.silver_failure_report import _split_future_rows
+    from silver.silver_failure_report import _split_future_rows
 
     _kept, quarantined = _split_future_rows(
         _with_declared({"reg_dttm": "2026-09-10 09:00:00", PARTITION_COLUMN: "2026-07-25"}),
@@ -336,12 +336,12 @@ class _FakeCatalog:
     ],
 )
 def test_bronze_max_partition(values, expected):
-    from jobs.silver_failure_report import bronze_max_partition
+    from silver.silver_failure_report import bronze_max_partition
 
     assert bronze_max_partition(_FakeCatalog(_FakeBronze(values))) == expected
 
 
 def test_bronze_max_partition_is_none_when_table_missing():
-    from jobs.silver_failure_report import bronze_max_partition
+    from silver.silver_failure_report import bronze_max_partition
 
     assert bronze_max_partition(_FakeCatalog(None)) is None

@@ -32,7 +32,7 @@ from airflow.sdk import dag
 from dag_assets import RENTAL_HISTORY_SILVER
 from dag_common import DEFAULT_ARGS, SILVER_POOL
 
-INGESTION_DIR = "/opt/airflow/ingestion"
+INGESTION_DIR = "/opt/airflow/src"
 PYTHON = "python"
 SOURCE_NAME = "rental_history"
 DQ_ASSERTIONS_CONFIG = "/opt/airflow/pylib/config/dq/rental_history.yaml"
@@ -40,7 +40,7 @@ DQ_ASSERTIONS_CONFIG = "/opt/airflow/pylib/config/dq/rental_history.yaml"
 
 def _bash(job_module: str) -> str:
     return (
-        f"cd {INGESTION_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
+        f"cd {INGESTION_DIR} && set -a && source /opt/airflow/.env && set +a && "
         f"PYTHONPATH={INGESTION_DIR}:$PYTHONPATH "
         "EXECUTION_DATE='{{ ds }}' "
         f"DQ_SOURCE_NAME={SOURCE_NAME} "

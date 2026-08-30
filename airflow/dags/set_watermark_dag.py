@@ -30,7 +30,7 @@ from airflow.sdk import dag
 from dag_common import notify_slack_on_failure
 
 PYLIB_DIR = "/opt/airflow/pylib"
-INGESTION_DIR = "/opt/airflow/ingestion"
+INGESTION_DIR = "/opt/airflow/src"
 
 
 def _set_watermark_callable(params, **kwargs):
@@ -39,7 +39,7 @@ def _set_watermark_callable(params, **kwargs):
     if INGESTION_DIR not in sys.path:
         sys.path.insert(0, INGESTION_DIR)
 
-    from jobs.set_watermark import run as run_set_watermark
+    from operations.set_watermark import run as run_set_watermark
 
     watermark_date = params.get("watermark_date")
     dataset = params.get("dataset")

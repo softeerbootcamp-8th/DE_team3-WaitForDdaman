@@ -8,7 +8,7 @@ from datetime import date
 
 import pytest
 
-from jobs import promote_rental_history_catchup_batch as batch_job
+from bronze import promote_rental_history_catchup_batch as batch_job
 
 VALID_ROW = {
     "BIKE_ID": "SPB-1",

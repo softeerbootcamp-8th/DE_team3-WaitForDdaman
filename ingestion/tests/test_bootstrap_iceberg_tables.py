@@ -11,9 +11,9 @@ import pytest
 from pyiceberg.catalog.sql import SqlCatalog
 from pyiceberg.exceptions import NoSuchTableError
 
-from jobs.bootstrap_iceberg_tables import BRONZE_TABLE_SPECS, _bootstrap_table, run
-from jobs.daily_batch_station_active import ARROW_SCHEMA as STATION_ACTIVE_ARROW_SCHEMA
-from jobs.daily_batch_station_master import ARROW_SCHEMA as STATION_MASTER_ARROW_SCHEMA
+from operations.bootstrap_iceberg_tables import BRONZE_TABLE_SPECS, _bootstrap_table, run
+from bronze.daily_batch_station_active import ARROW_SCHEMA as STATION_ACTIVE_ARROW_SCHEMA
+from bronze.daily_batch_station_master import ARROW_SCHEMA as STATION_MASTER_ARROW_SCHEMA
 
 EXPECTED_IDENTIFIERS = {
     "bronze.rental_history",

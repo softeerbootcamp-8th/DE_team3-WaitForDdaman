@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 def test_run_returns_local_paths_regardless_of_env(tmp_path, monkeypatch):
     import config as config_module
-    from jobs import list_input_files
+    from bronze import list_input_files
 
     monkeypatch.setattr(config_module, "SETTINGS", config_module.Settings(env="aws"))
 

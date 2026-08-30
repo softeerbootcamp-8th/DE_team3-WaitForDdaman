@@ -63,8 +63,8 @@ from airflow.sdk import dag
 from dag_assets import FAILURE_REPORT_BRONZE, FAILURE_REPORT_SILVER
 from dag_common import DEFAULT_ARGS, SILVER_POOL
 
-INGESTION_DIR = "/opt/airflow/ingestion"  # common/(iceberg_catalog, iceberg_io 등), .env 출처
-STAGING_DIR = "/opt/airflow/staging"      # 잡 실행 위치
+INGESTION_DIR = "/opt/airflow/src"  # common/(iceberg_catalog, iceberg_io 등), .env 출처
+STAGING_DIR = "/opt/airflow/src"      # 잡 실행 위치
 PYTHON_BIN = "python"
 
 SILVER_MODULE = "silver_failure_report"  # staging/jobs/silver_failure_report.py
@@ -78,7 +78,7 @@ def _staging_bash(job_module: str, extra_env: str = "") -> str:
     찾긴다. 설정값(.env)도 ingestion/.env를 그대로 source한다.
     """
     return (
-        f"cd {STAGING_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
+        f"cd {STAGING_DIR} && set -a && source /opt/airflow/.env && set +a && "
         f"PYTHONPATH={INGESTION_DIR}:{STAGING_DIR}:$PYTHONPATH "
         f"{extra_env}{PYTHON_BIN} -m jobs.{job_module}"
     )

@@ -125,16 +125,16 @@ jobs:
           echo "::group::ingestion"
           # bikeman_event_generator_dag이 컨테이너 절대경로를 sys.path에 넣고 jobs를
           # import한다. DagBag 파싱 테스트가 dags 폴더 전체를 읽으므로 그 경로도 필요하다.
-          (cd ingestion && PYTHONPATH="$ROOT:$ROOT/ingestion:$ROOT/staging:$ROOT/pipeline/bikeman_event_generator/jobs" pytest tests -q)
+          (cd ingestion && PYTHONPATH="$ROOT/src:$ROOT" pytest tests -q)
           echo "::endgroup::"
 
           echo "::group::staging"
-          (cd staging && PYTHONPATH="$ROOT:$ROOT/ingestion:$ROOT/staging" pytest tests -q)
+          (cd staging && PYTHONPATH="$ROOT/src:$ROOT" pytest tests -q)
           echo "::endgroup::"
 
           for mod in bikeman_event_generator serving_sync collection_priority risk_model; do
             echo "::group::pipeline/$mod"
-            (cd "pipeline/$mod" && PYTHONPATH="$ROOT/pipeline/$mod:$ROOT/pipeline/$mod/jobs:$ROOT:$ROOT/ingestion" pytest tests -q)
+            (cd "pipeline/$mod" && PYTHONPATH="$ROOT/src:$ROOT" pytest tests -q)
             echo "::endgroup::"
           done
 
@@ -145,7 +145,7 @@ jobs:
           # (bare import, ingestion/common/s3_utils.py를 그 안에서 또 bare import)을
           # 쓰게 되면서, 다른 pipeline/* 모듈들과 동일하게 ingestion을 경로에 얹어야 한다.
           echo "::group::pipeline/train_risk_model"
-          PYTHONPATH="$ROOT:$ROOT/ingestion" pytest pipeline/train_risk_model/test_risk_model.py -q
+          PYTHONPATH="$ROOT/src:$ROOT" pytest src/ml/test_risk_model.py -q
           echo "::endgroup::"
 
   api-tests:

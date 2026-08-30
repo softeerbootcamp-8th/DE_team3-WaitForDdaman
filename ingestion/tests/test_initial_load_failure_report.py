@@ -8,7 +8,7 @@ import logging
 
 import pytest
 
-import jobs.initial_load_failure_report as job
+import bronze.initial_load_failure_report as job
 
 
 def test_run_succeeds_when_all_files_succeed():

@@ -58,10 +58,9 @@ x-airflow-common:
     - ./airflow/logs:/opt/airflow/logs
     - ./airflow/plugins:/opt/airflow/plugins
     - ./airflow/config:/opt/airflow/config
-    - ./ingestion:/opt/airflow/ingestion
-    - ./staging:/opt/airflow/staging
-    - ./pipeline:/opt/airflow/pipeline
-    - ./config:/opt/airflow/pylib/config
+    - ./src:/opt/airflow/src
+    - ./ingestion/data:/opt/airflow/ingestion/data:ro
+    - ./src/config:/opt/airflow/pylib/config
     - ./airflow/scripts:/opt/airflow/scripts
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:

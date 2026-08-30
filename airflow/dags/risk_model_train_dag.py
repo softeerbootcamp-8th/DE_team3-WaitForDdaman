@@ -21,7 +21,7 @@ import os
 import sys
 from datetime import timedelta
 
-# /opt/airflow/pipeline 은 PYTHONPATH 에 없으므로 부모 경로를 넣어준다.
+# 소스는 /opt/airflow/src에 있으므로 공통 PYTHONPATH 설정을 사용한다.
 PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "/opt/airflow")
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -35,7 +35,7 @@ if PYLIB_DIR not in sys.path:
 # sys.path에 얹는다. .env도 같은 이유로 먼저 로드한다 - 안 하면 컨테이너의
 # 루트 .env(배포용, APP_ENV=aws)가 그대로 새어 들어와 LocalStack 대신 실제
 # AWS S3로 나가는 문제가 재현된다(#145/#153에서 Gold 센서가 겪었던 것과 동일).
-INGESTION_DIR = os.environ.get("INGESTION_DIR", "/opt/airflow/ingestion")
+INGESTION_DIR = os.environ.get("INGESTION_DIR", "/opt/airflow/src")
 
 
 def _load_ingestion_env(env_path: str) -> None:
@@ -50,7 +50,7 @@ def _load_ingestion_env(env_path: str) -> None:
             os.environ[key.strip()] = value.strip()
 
 
-_load_ingestion_env(f"{INGESTION_DIR}/.env")
+_load_ingestion_env("/opt/airflow/.env")
 if INGESTION_DIR not in sys.path:
     sys.path.insert(0, INGESTION_DIR)
 
@@ -112,11 +112,11 @@ def risk_model_train():
     @task
     def resolve_anchors() -> dict:
         """원천 최신일에서 as_of_end 를 도출하고 학습/홀드아웃 앵커를 확정한다."""
-        from pipeline.train_risk_model.samples import (
+        from ml.samples import (
             detect_label_ready_max,
             resolve_anchors as _resolve,
         )
-        from pipeline.train_risk_model.settings import load_config
+        from ml.settings import load_config
 
         params = _params()
         cfg = load_config()
@@ -187,7 +187,7 @@ def risk_model_train():
     @task(retries=0)  # Spark job 은 재시도보다 로그 확인이 먼저다
     def build_train_samples(plan: dict, _gate: dict) -> dict:
         """앵커별 피처+라벨을 gold.fact_bike_train_sample 파티션에 dynamic overwrite."""
-        from pipeline.train_risk_model.settings import load_config
+        from ml.settings import load_config
 
         cfg = load_config()
         app_env = os.getenv("APP_ENV", "local")
@@ -195,7 +195,7 @@ def risk_model_train():
         if app_env == "aws":
             emr_plan = {k: v for k, v in plan.items() if k != "source_probe"}
             run_emr_serverless_spark_job(
-                entry_point="local:///opt/app/pipeline/train_risk_model/samples.py",
+                entry_point="local:///opt/app/src/ml/samples.py",
                 entry_point_arguments=[
                     "--anchor-plan-json",
                     json.dumps(emr_plan, ensure_ascii=False, separators=(",", ":")),
@@ -222,7 +222,7 @@ def risk_model_train():
         if app_env != "local":
             raise ValueError(f"지원하지 않는 APP_ENV={app_env!r} 입니다. local 또는 aws만 허용합니다.")
 
-        from pipeline.train_risk_model.samples import get_spark, write_samples
+        from ml.samples import get_spark, write_samples
 
         spark = get_spark(cfg, f"risk-model-samples-{plan['run_key']}")
         try:
@@ -235,8 +235,8 @@ def risk_model_train():
     @task
     def assert_train_table(plan: dict, stats: dict) -> dict:
         """행수·앵커수·양성비율·결측률 게이트."""
-        from pipeline.train_risk_model.settings import load_config
-        from pipeline.train_risk_model.train import assert_quality, load_samples
+        from ml.settings import load_config
+        from ml.train import assert_quality, load_samples
 
         cfg = load_config()
         df = load_samples(stats["sample_path"], "train", plan["train_anchors"])
@@ -265,10 +265,10 @@ def risk_model_train():
 
         학습된 모델 객체는 XCom 으로 넘기지 않는다. 저장까지 이 태스크에서 끝낸다.
         """
-        from pipeline.train_risk_model import registry
-        from pipeline.train_risk_model.evaluate import apply_gate, select_best, walk_forward
-        from pipeline.train_risk_model.settings import load_config
-        from pipeline.train_risk_model.train import (
+        from ml import registry
+        from ml.evaluate import apply_gate, select_best, walk_forward
+        from ml.settings import load_config
+        from ml.train import (
             feature_importance,
             load_pos_new,
             load_samples,

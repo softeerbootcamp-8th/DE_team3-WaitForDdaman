@@ -4,7 +4,7 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from unittest.mock import patch
 
-from jobs.collect_failure_report_raw import (
+from bronze.collect_failure_report_raw import (
     collect_one_day,
     parse_collection_cutoff,
     snapshot_keys,

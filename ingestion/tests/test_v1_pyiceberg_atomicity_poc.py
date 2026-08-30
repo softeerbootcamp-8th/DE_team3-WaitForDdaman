@@ -12,7 +12,7 @@ import pyarrow as pa
 import pytest
 
 from common.iceberg_io import overwrite_partition
-from schema.station_active_schema import REQUIRED_STANDARD_COLUMNS
+from schemas.station_active_schema import REQUIRED_STANDARD_COLUMNS
 
 
 def _make_station_active_arrow_data(snapshot_date: str, row_count: int = 2735) -> pa.Table:

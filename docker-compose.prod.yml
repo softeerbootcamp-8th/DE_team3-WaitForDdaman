@@ -56,12 +56,11 @@ x-airflow-common:
     PYTHONPATH: /opt/airflow/pylib
   volumes:
     - airflow-logs-volume:/opt/airflow/logs
-    # 모든 DAG의 BashOperator 커맨드가 `cd ingestion && source .env && python -m jobs.X`
-    # 형태로 /opt/airflow/ingestion/.env를 직접 source한다(dag_common.py 등 참고) -
+    # 모든 DAG의 BashOperator 커맨드가 `cd /opt/airflow/src && source /opt/airflow/.env`
+    # 형태로 /opt/airflow/.env를 직접 source한다(dag_common.py 등 참고) -
     # environment: 블록과는 별개 경로라 이 마운트가 없으면 모든 DAG 태스크가 실패한다.
     # SERVING_DB_*, BIKEMAN_DB_*, SEOUL_API_KEY 등도 전부 이 파일에서 읽힌다.
     - ./.env:/opt/airflow/.env:ro
-    - ./.env:/opt/airflow/ingestion/.env:ro
   user: "${AIRFLOW_UID:-50000}:0"
 
 services:

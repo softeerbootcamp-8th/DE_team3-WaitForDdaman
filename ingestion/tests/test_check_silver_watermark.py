@@ -32,7 +32,7 @@ def s3_env(monkeypatch):
 def test_is_ready_true_when_watermark_covers_target(s3_env):
     from common.watermark import write_watermark
     from config.watermark_keys import SILVER_RENTAL_HISTORY
-    from jobs.check_silver_watermark import is_ready
+    from operations.check_silver_watermark import is_ready
 
     write_watermark(date(2026, 8, 17), watermark_key=SILVER_RENTAL_HISTORY)
 
@@ -42,7 +42,7 @@ def test_is_ready_true_when_watermark_covers_target(s3_env):
 def test_is_ready_false_when_watermark_behind_target(s3_env):
     from common.watermark import write_watermark
     from config.watermark_keys import SILVER_RENTAL_HISTORY
-    from jobs.check_silver_watermark import is_ready
+    from operations.check_silver_watermark import is_ready
 
     write_watermark(date(2026, 8, 16), watermark_key=SILVER_RENTAL_HISTORY)
 
@@ -53,7 +53,7 @@ def test_is_ready_applies_required_offset_days(s3_env):
     """T-1 구조(rental_history): 워터마크가 target보다 하루 늦어도 offset=1이면 통과."""
     from common.watermark import write_watermark
     from config.watermark_keys import SILVER_RENTAL_HISTORY
-    from jobs.check_silver_watermark import is_ready
+    from operations.check_silver_watermark import is_ready
 
     write_watermark(date(2026, 8, 16), watermark_key=SILVER_RENTAL_HISTORY)
 
@@ -61,6 +61,6 @@ def test_is_ready_applies_required_offset_days(s3_env):
 
 
 def test_is_ready_false_for_unknown_dataset(s3_env):
-    from jobs.check_silver_watermark import is_ready
+    from operations.check_silver_watermark import is_ready
 
     assert is_ready("unknown_dataset", "2026-08-17") is False

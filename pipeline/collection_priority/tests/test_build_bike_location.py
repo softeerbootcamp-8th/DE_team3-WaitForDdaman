@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pyarrow as pa
 
-from jobs.build_bike_location import (
+from gold.build_bike_location import (
     COLD_START_LOOKBACK_DAYS,
     _dedup_by_bike_id,
     _effective_delta_start,

@@ -3,7 +3,7 @@ jobs/report_dq_issue.py 단위 테스트 (#217)
 """
 from unittest.mock import MagicMock
 
-import jobs.report_dq_issue as job
+import operations.report_dq_issue as job
 
 
 def _interpretation(checks):

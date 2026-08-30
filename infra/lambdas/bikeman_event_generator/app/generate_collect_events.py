@@ -15,7 +15,7 @@ from ._secrets import load_bikeman_db_secret
 
 load_bikeman_db_secret()
 
-from generate_collect_events import run  # noqa: E402 (자격증명을 채운 뒤에 import해야 함)
+from bronze.generate_collect_events import run  # noqa: E402 (자격증명을 채운 뒤에 import해야 함)
 
 
 def handler(event: dict, context: Any) -> dict:

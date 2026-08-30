@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from jobs.run_risk_scoring_model import (
+from gold.run_risk_scoring_model import (
     DEFAULT_CRITICAL_PERCENTILE,
     DEFAULT_WARNING_PERCENTILE,
     score,

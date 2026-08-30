@@ -42,8 +42,8 @@ from dag_assets import BIKE_FEATURES_DAILY_GOLD, FACT_BIKE_RISK_GOLD
 from dag_common import GOLD_POOL, notify_slack_on_failure
 
 PYLIB_DIR = "/opt/airflow/pylib"
-RISK_MODEL_DIR = "/opt/airflow/pipeline/risk_model"
-INGESTION_DIR = "/opt/airflow/ingestion"
+RISK_MODEL_DIR = "/opt/airflow/src/gold"
+INGESTION_DIR = "/opt/airflow/src"
 AIRFLOW_HOME_DIR = "/opt/airflow"
 PYTHON = "python"
 
@@ -64,7 +64,7 @@ def _load_ingestion_env(env_path: str) -> None:
             os.environ[key.strip()] = value.strip()
 
 
-_load_ingestion_env(f"{INGESTION_DIR}/.env")
+_load_ingestion_env("/opt/airflow/.env")
 
 # PythonSensor가 판정 함수를 직접 호출할 수 있도록 ingestion과 pylib(config)를
 # sys.path에 얹는다 (gold_dim_fact_dag.py와 동일한 패턴). config가 위에서
@@ -74,7 +74,7 @@ if PYLIB_DIR not in sys.path:
 if INGESTION_DIR not in sys.path:
     sys.path.insert(0, INGESTION_DIR)
 
-from jobs.check_silver_watermark import is_ready as watermark_ready  # noqa: E402
+from operations.check_silver_watermark import is_ready as watermark_ready  # noqa: E402
 
 DAG_ID = "gold_risk_decision"
 
@@ -93,10 +93,10 @@ default_args = {
 
 
 def _bash(job_module: str, extra_env: str = "") -> str:
-    # /opt/airflow 를 넣어야 jobs/*.py 에서 pipeline.train_risk_model.* 을 import 할 수 있다
+    # /opt/airflow/src를 PYTHONPATH에 넣어 ml.* 모듈을 import할 수 있다.
     # (train_risk_model 계약 - registry/score/features 공유) - 컨테이너에서 직접 검증함.
     return (
-        f"cd {RISK_MODEL_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
+        f"cd {RISK_MODEL_DIR} && set -a && source /opt/airflow/.env && set +a && "
         f"PYTHONPATH={INGESTION_DIR}:{AIRFLOW_HOME_DIR}:$PYTHONPATH {extra_env}{PYTHON} -m jobs.{job_module}"
     )
 

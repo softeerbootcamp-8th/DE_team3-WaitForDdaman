@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 
 import config
-from ingestion.common.spark_session import build_spark_session
+from common.spark_session import build_spark_session
 from pyspark.sql import SparkSession
 
 SILVER_TABLES = ["rental_history", "failure_report", "station_master", "station_active", "bikeman_action"]

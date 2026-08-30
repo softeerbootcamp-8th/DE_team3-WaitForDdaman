@@ -11,7 +11,7 @@ from pyiceberg.exceptions import NoSuchTableError
 from pyiceberg.expressions import EqualTo, Or
 
 import config as config_module
-from jobs import promote_rental_history_raw as promoter
+from bronze import promote_rental_history_raw as promoter
 
 KST = ZoneInfo("Asia/Seoul")
 BUCKET = "test-promotion-bucket"

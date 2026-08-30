@@ -5,8 +5,8 @@ from zoneinfo import ZoneInfo
 from unittest.mock import patch
 
 from common.cutoff_utils import parse_collection_cutoff
-from jobs.daily_batch_failure_report import run as run_failure_report
-from jobs.daily_batch_bikeman_event import run as run_bikeman_event
+from bronze.daily_batch_failure_report import run as run_failure_report
+from bronze.daily_batch_bikeman_event import run as run_bikeman_event
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -74,7 +74,7 @@ def test_bikeman_event_backfill_deterministic_date(monkeypatch):
 
 def test_silver_bikeman_action_backfill_deterministic_date(monkeypatch):
     """Silver bikeman_action도 과거 cutoff 주입 시 cutoff.date() - 1일까지를 처리한다."""
-    from jobs.silver_bikeman_action import run as run_silver_bikeman_action
+    from silver.silver_bikeman_action import run as run_silver_bikeman_action
 
     processed_dates = []
 

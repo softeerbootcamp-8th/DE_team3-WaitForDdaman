@@ -94,21 +94,21 @@ def test_fetch_station_active_lambda_success(s3_env, monkeypatch):
 # Ingestion S3 raw source branch tests
 # ------------------------------------------------------------------------------
 def test_station_master_process_snapshot_missing_raw_fails_fast(s3_env, monkeypatch):
-    from jobs.daily_batch_station_master import _process_snapshot
+    from bronze.daily_batch_station_master import _process_snapshot
 
     with pytest.raises(FileNotFoundError, match="S3 raw payload가 존재하지 않습니다"):
         _process_snapshot("2026-08-22")
 
 
 def test_station_active_process_snapshot_missing_raw_fails_fast(s3_env, monkeypatch):
-    from jobs.daily_batch_station_active import _process_snapshot
+    from bronze.daily_batch_station_active import _process_snapshot
 
     with pytest.raises(FileNotFoundError, match="S3 raw payload가 존재하지 않습니다"):
         _process_snapshot("2026-08-22")
 
 
 def test_station_master_process_snapshot_reads_s3_payload(s3_env, monkeypatch):
-    from jobs.daily_batch_station_master import _process_snapshot
+    from bronze.daily_batch_station_master import _process_snapshot
 
     sample_rows = [
         {
@@ -138,7 +138,7 @@ def test_station_master_process_snapshot_reads_s3_payload(s3_env, monkeypatch):
 
 
 def test_station_active_process_snapshot_reads_s3_payload(s3_env, monkeypatch):
-    from jobs.daily_batch_station_active import _process_snapshot
+    from bronze.daily_batch_station_active import _process_snapshot
 
     sample_rows = [
         {

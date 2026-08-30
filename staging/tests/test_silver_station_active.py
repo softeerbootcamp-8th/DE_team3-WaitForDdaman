@@ -12,7 +12,7 @@ from datetime import date
 
 import pyarrow as pa
 
-from jobs.silver_station_active import SILVER_COLUMNS, normalize
+from silver.silver_station_active import SILVER_COLUMNS, normalize
 
 # 실버가 읽는 브론즈 컬럼 (전부 STRING, daily_batch_station_active.py 참고)
 BRONZE_COLUMNS = ["snapshot_date", "station_id"]

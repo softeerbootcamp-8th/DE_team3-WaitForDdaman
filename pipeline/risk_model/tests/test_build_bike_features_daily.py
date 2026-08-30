@@ -10,7 +10,7 @@ from datetime import date, datetime, timezone
 import pyarrow as pa
 from pyiceberg.expressions import And, GreaterThanOrEqual, LessThan
 
-from jobs.build_bike_features_daily import (
+from gold.build_bike_features_daily import (
     _dedup_by_bike_id,
     _exclude_suspended_rental_days,
     _parse_bool_env,

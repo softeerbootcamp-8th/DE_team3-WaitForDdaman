@@ -67,7 +67,7 @@ from dag_common import (
     load_env_file,
 )
 
-INGESTION_DIR = os.getenv("INGESTION_DIR", "/opt/airflow/ingestion")
+INGESTION_DIR = os.getenv("INGESTION_DIR", "/opt/airflow/src")
 TARGET_DATE = "{{ data_interval_end.in_timezone('Asia/Seoul').subtract(days=2).strftime('%Y-%m-%d') }}"
 
 

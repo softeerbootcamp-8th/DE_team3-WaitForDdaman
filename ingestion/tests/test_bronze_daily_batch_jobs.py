@@ -10,15 +10,15 @@ from moto import mock_aws
 
 import config as config_module
 from common.s3_utils import get_s3_client, put_json
-from jobs.daily_batch_bikeman_event import _build_arrow_table as build_bikeman_event_arrow
-from jobs.daily_batch_bikeman_event import _process_one_day as process_bikeman_event
-from jobs.daily_batch_failure_report import _build_arrow_table as build_failure_report_arrow
-from jobs.daily_batch_failure_report import _parse_bool_env as parse_failure_report_bool_env
-from jobs.daily_batch_failure_report import _process_one_day as process_failure_report
-from jobs.daily_batch_station_active import _build_arrow_table as build_station_active_arrow
-from jobs.daily_batch_station_active import _process_snapshot as process_station_active
-from jobs.daily_batch_station_master import _build_arrow_table as build_station_master_arrow
-from jobs.daily_batch_station_master import _process_snapshot as process_station_master
+from bronze.daily_batch_bikeman_event import _build_arrow_table as build_bikeman_event_arrow
+from bronze.daily_batch_bikeman_event import _process_one_day as process_bikeman_event
+from bronze.daily_batch_failure_report import _build_arrow_table as build_failure_report_arrow
+from bronze.daily_batch_failure_report import _parse_bool_env as parse_failure_report_bool_env
+from bronze.daily_batch_failure_report import _process_one_day as process_failure_report
+from bronze.daily_batch_station_active import _build_arrow_table as build_station_active_arrow
+from bronze.daily_batch_station_active import _process_snapshot as process_station_active
+from bronze.daily_batch_station_master import _build_arrow_table as build_station_master_arrow
+from bronze.daily_batch_station_master import _process_snapshot as process_station_master
 
 BUCKET = "test-bronze-batch-bucket"
 

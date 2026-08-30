@@ -12,7 +12,7 @@ from datetime import date
 import pyarrow as pa
 import pytest
 
-from jobs.silver_station_master import (
+from silver.silver_station_master import (
     REGION_BY_DISTRICT,
     SILVER_COLUMNS,
     UnknownDistrictError,

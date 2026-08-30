@@ -93,7 +93,7 @@ def _set_watermark(watermark: date) -> None:
 
 def test_selects_final_and_writes_normal_selection(s3_env, base_env, capsys):
     from common.s3_utils import get_json
-    from jobs import select_rental_history_snapshot as selector
+    from bronze import select_rental_history_snapshot as selector
 
     _set_watermark(date(2026, 8, 20))
     final = _put_snapshot("2026-08-21", CUTOFF, "FINAL", list(range(24)))
@@ -126,7 +126,7 @@ def test_selects_final_and_writes_normal_selection(s3_env, base_env, capsys):
 
 
 def test_falls_back_to_latest_valid_preliminary(s3_env, base_env, monkeypatch):
-    from jobs import select_rental_history_snapshot as selector
+    from bronze import select_rental_history_snapshot as selector
 
     monkeypatch.setenv("RENTAL_HISTORY_FALLBACK_ENABLED", "true")
     _set_watermark(date(2026, 8, 20))
@@ -155,7 +155,7 @@ def test_falls_back_to_latest_valid_preliminary(s3_env, base_env, monkeypatch):
 
 
 def test_fallback_disabled_fails_instead_of_hiding_final_failure(s3_env, base_env):
-    from jobs import select_rental_history_snapshot as selector
+    from bronze import select_rental_history_snapshot as selector
 
     _set_watermark(date(2026, 8, 20))
     _put_snapshot(
@@ -179,7 +179,7 @@ def test_fallback_disabled_fails_instead_of_hiding_final_failure(s3_env, base_en
 def test_unusable_preliminary_is_never_selected(
     s3_env, base_env, monkeypatch, overrides, extra
 ):
-    from jobs import select_rental_history_snapshot as selector
+    from bronze import select_rental_history_snapshot as selector
 
     monkeypatch.setenv("RENTAL_HISTORY_FALLBACK_ENABLED", "true")
     _set_watermark(date(2026, 8, 20))
@@ -203,7 +203,7 @@ def test_unusable_preliminary_is_never_selected(
 def test_stale_or_cross_day_preliminary_is_rejected(
     s3_env, base_env, monkeypatch, observed_at
 ):
-    from jobs import select_rental_history_snapshot as selector
+    from bronze import select_rental_history_snapshot as selector
 
     monkeypatch.setenv("RENTAL_HISTORY_FALLBACK_ENABLED", "true")
     _set_watermark(date(2026, 8, 20))
@@ -216,7 +216,7 @@ def test_stale_or_cross_day_preliminary_is_rejected(
 def test_preliminary_current_day_uses_its_own_observed_hours_when_t0_enabled(
     s3_env, base_env, monkeypatch
 ):
-    from jobs import select_rental_history_snapshot as selector
+    from bronze import select_rental_history_snapshot as selector
 
     monkeypatch.setenv("RENTAL_HISTORY_FALLBACK_ENABLED", "true")
     monkeypatch.setenv("RENTAL_HISTORY_T0_ENABLED", "true")
@@ -240,7 +240,7 @@ def test_preliminary_current_day_uses_its_own_observed_hours_when_t0_enabled(
 def test_optional_current_day_snapshot_is_not_promoted_when_t0_disabled(
     s3_env, base_env
 ):
-    from jobs import select_rental_history_snapshot as selector
+    from bronze import select_rental_history_snapshot as selector
 
     _set_watermark(date(2026, 8, 20))
     _put_snapshot("2026-08-21", CUTOFF, "FINAL", list(range(24)))
@@ -253,7 +253,7 @@ def test_optional_current_day_snapshot_is_not_promoted_when_t0_disabled(
 
 
 def test_selection_is_noop_when_watermark_already_current(s3_env, base_env):
-    from jobs import select_rental_history_snapshot as selector
+    from bronze import select_rental_history_snapshot as selector
 
     _set_watermark(date(2026, 8, 21))
 
@@ -265,7 +265,7 @@ def test_selection_is_noop_when_watermark_already_current(s3_env, base_env):
 
 
 def test_final_from_another_run_is_not_reused(s3_env, base_env):
-    from jobs import select_rental_history_snapshot as selector
+    from bronze import select_rental_history_snapshot as selector
 
     _set_watermark(date(2026, 8, 20))
     _put_snapshot(

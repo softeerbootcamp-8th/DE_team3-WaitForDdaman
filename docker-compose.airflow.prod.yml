@@ -42,7 +42,6 @@ x-airflow-common:
   volumes:
     - airflow-logs-volume:/opt/airflow/logs
     - ./.env:/opt/airflow/.env:ro
-    - ./.env:/opt/airflow/ingestion/.env:ro
   user: "${AIRFLOW_UID:-50000}:0"
 
 services:

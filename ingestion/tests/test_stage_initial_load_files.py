@@ -28,7 +28,7 @@ def aws_env(monkeypatch):
 
 def test_run_uploads_new_files_and_returns_deterministic_uris(aws_env, tmp_path):
     from common import s3_utils
-    from jobs import stage_initial_load_files
+    from bronze import stage_initial_load_files
 
     local = tmp_path / "2601.csv"
     local.write_bytes(b"csv-body")
@@ -44,7 +44,7 @@ def test_run_uploads_new_files_and_returns_deterministic_uris(aws_env, tmp_path)
 
 def test_run_skips_reupload_when_already_staged(aws_env, tmp_path, monkeypatch):
     from common import s3_utils
-    from jobs import stage_initial_load_files
+    from bronze import stage_initial_load_files
 
     local = tmp_path / "2601.csv"
     local.write_bytes(b"csv-body")
@@ -74,7 +74,7 @@ def test_run_reuses_legacy_key_via_server_side_copy_without_touching_local_file(
     이미 S3에 있으면, 로컬 파일을 다시 읽어 MD5를 계산하거나 업로드하지 않고 서버사이드
     CopyObject만으로 새 deterministic key에 재사용해야 한다(#255)."""
     from common import s3_utils
-    from jobs import stage_initial_load_files
+    from bronze import stage_initial_load_files
 
     legacy_name = "서울시 공공자전거 대여이력_2601.csv"
     legacy_key = f"raw/rental_history/_initial_load_staging/{legacy_name}"
@@ -107,7 +107,7 @@ def test_run_reuses_legacy_key_via_server_side_copy_without_touching_local_file(
 
 
 def test_run_never_returns_hidden_spark_input_key(aws_env, tmp_path):
-    from jobs import stage_initial_load_files
+    from bronze import stage_initial_load_files
 
     local = tmp_path / "서울특별시 공공자전거 대여이력 정보_1603.csv"
     local.write_bytes(b"csv-body")
@@ -120,7 +120,7 @@ def test_run_never_returns_hidden_spark_input_key(aws_env, tmp_path):
 
 
 def test_run_handles_batch_of_multiple_files(aws_env, tmp_path):
-    from jobs import stage_initial_load_files
+    from bronze import stage_initial_load_files
 
     a = tmp_path / "a.csv"
     b = tmp_path / "b.csv"
