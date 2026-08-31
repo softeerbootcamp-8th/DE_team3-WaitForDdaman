@@ -9,7 +9,7 @@ from datetime import date
 
 import pyarrow as pa
 
-from jobs.build_fact_bike_decision import HOLD, SUSPEND, _decide_actions
+from gold.build_fact_bike_decision import HOLD, SUSPEND, _decide_actions
 
 SNAPSHOT_DATE = date(2026, 8, 17)
 

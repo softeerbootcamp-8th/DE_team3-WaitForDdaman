@@ -11,7 +11,7 @@ import logging
 
 import pytest
 
-import jobs.initial_load_rental_history as job
+import bronze.initial_load_rental_history as job
 
 
 def test_run_succeeds_when_all_files_succeed():

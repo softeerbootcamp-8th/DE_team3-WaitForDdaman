@@ -16,14 +16,11 @@ FROM public.ecr.aws/lambda/python:3.11
 # (common/__init__.py가 없는 네임스페이스 패키지라 다른 common/* 모듈을 끌어오지
 # 않음), config.SETTINGS도 watermark_keys.py는 이 3개 잡이 안 쓰지만 config
 # 패키지 자체가 import하지 않으므로 __init__.py만으로 충분하다.
-COPY config/__init__.py ${LAMBDA_TASK_ROOT}/config/__init__.py
-COPY ingestion/common/iceberg_catalog.py ${LAMBDA_TASK_ROOT}/common/iceberg_catalog.py
+COPY src/config/ ${LAMBDA_TASK_ROOT}/config/
+COPY src/common/ ${LAMBDA_TASK_ROOT}/common/
 
-# serving_sync 잡 본체 - 로컬 실행(`python -m jobs.X`)과 완전히 같은 코드를 그대로 쓴다.
-COPY pipeline/serving_sync/jobs/serving_db.py ${LAMBDA_TASK_ROOT}/serving_db.py
-COPY pipeline/serving_sync/jobs/write_bike_risk_daily.py ${LAMBDA_TASK_ROOT}/write_bike_risk_daily.py
-COPY pipeline/serving_sync/jobs/write_station_daily.py ${LAMBDA_TASK_ROOT}/write_station_daily.py
-COPY pipeline/serving_sync/jobs/verify_serving_sync.py ${LAMBDA_TASK_ROOT}/verify_serving_sync.py
+# serving 잡 본체 - 로컬과 동일한 패키지 경로를 유지한다.
+COPY src/serving/ ${LAMBDA_TASK_ROOT}/serving/
 
 # Lambda 진입점(app.<모듈>.handler) - Secrets Manager에서 DB 자격증명을 채운 뒤
 # 위 잡의 run()/verify_counts()를 그대로 부르는 얇은 래퍼.

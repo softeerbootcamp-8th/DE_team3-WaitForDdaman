@@ -93,7 +93,7 @@ def test_confirmed_empty_records_audit_marker_and_advances_contiguous_watermarks
     from common.s3_utils import get_json
     from common.watermark import read_watermark
     from config.watermark_keys import SILVER_RENTAL_HISTORY
-    from jobs import confirm_rental_history_empty as job
+    from bronze import confirm_rental_history_empty as job
 
     _put_complete_empty_manifest()
     _set_previous_watermarks()
@@ -118,7 +118,7 @@ def test_confirmed_empty_records_audit_marker_and_advances_contiguous_watermarks
 def test_confirmed_empty_rejects_non_contiguous_watermark_jump(s3_env):
     from common.watermark import write_watermark
     from config.watermark_keys import SILVER_RENTAL_HISTORY
-    from jobs import confirm_rental_history_empty as job
+    from bronze import confirm_rental_history_empty as job
 
     _put_complete_empty_manifest()
     write_watermark(date(2026, 8, 19))
@@ -133,7 +133,7 @@ def test_confirmed_empty_rejects_non_contiguous_watermark_jump(s3_env):
 
 
 def test_confirmed_empty_rejects_incomplete_hour_range(s3_env):
-    from jobs import confirm_rental_history_empty as job
+    from bronze import confirm_rental_history_empty as job
 
     _put_complete_empty_manifest(completed_hours=list(range(23)))
     _set_previous_watermarks()
@@ -147,7 +147,7 @@ def test_confirmed_empty_rejects_incomplete_hour_range(s3_env):
 
 
 def test_confirmed_empty_rejects_observation_before_target_day_closed(s3_env):
-    from jobs import confirm_rental_history_empty as job
+    from bronze import confirm_rental_history_empty as job
 
     _put_complete_empty_manifest(observed_at="2026-08-21T06:00:00+09:00")
     _set_previous_watermarks()
@@ -161,7 +161,7 @@ def test_confirmed_empty_rejects_observation_before_target_day_closed(s3_env):
 
 
 def test_confirmed_empty_rejects_when_newer_manifest_has_rows(s3_env):
-    from jobs import confirm_rental_history_empty as job
+    from bronze import confirm_rental_history_empty as job
 
     _put_complete_empty_manifest(observed_at="2026-08-22T06:00:00+09:00")
     _put_manifest(
@@ -181,7 +181,7 @@ def test_confirmed_empty_rejects_when_newer_manifest_has_rows(s3_env):
 
 
 def test_confirmed_empty_rejects_when_older_manifest_had_rows(s3_env):
-    from jobs import confirm_rental_history_empty as job
+    from bronze import confirm_rental_history_empty as job
 
     _put_manifest(
         observed_at="2026-08-22T06:00:00+09:00",

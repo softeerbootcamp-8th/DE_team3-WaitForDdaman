@@ -3,9 +3,9 @@ Silver/Gold 테이블 상태 확인용 스크립트.
 
 사용법 (컨테이너 안에서, docker-compose.local.yml이 ./scripts를 /opt/airflow/scripts로 마운트함):
     docker exec airflow-scheduler bash -c '
-    cd /opt/airflow/ingestion &&
-    set -a && source .env && set +a &&
-    PYTHONPATH=/opt/airflow/ingestion:$PYTHONPATH python /opt/airflow/scripts/check_silver_gold.py
+    cd /opt/airflow/src &&
+    set -a && source /opt/airflow/.env && set +a &&
+    PYTHONPATH=/opt/airflow/src:$PYTHONPATH python /opt/airflow/scripts/check_silver_gold.py
     '
 """
 from pyspark.sql import functions as F

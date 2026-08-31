@@ -89,7 +89,7 @@ def _current_watermark() -> date:
 
 
 def test_full_day_preliminary_advances_confirmed_watermark(s3_env):
-    from jobs import update_rental_history_confirmed_watermark as watermark_job
+    from bronze import update_rental_history_confirmed_watermark as watermark_job
 
     _set_watermark(date(2026, 8, 20))
     _put_promotion([_snapshot("2026-08-21", "PRELIMINARY", list(range(24)))])
@@ -104,7 +104,7 @@ def test_full_day_preliminary_advances_confirmed_watermark(s3_env):
 
 
 def test_t0_partial_partition_does_not_advance_watermark(s3_env):
-    from jobs import update_rental_history_confirmed_watermark as watermark_job
+    from bronze import update_rental_history_confirmed_watermark as watermark_job
 
     _set_watermark(date(2026, 8, 20))
     _put_promotion(
@@ -122,7 +122,7 @@ def test_t0_partial_partition_does_not_advance_watermark(s3_env):
 
 
 def test_gap_is_not_skipped(s3_env):
-    from jobs import update_rental_history_confirmed_watermark as watermark_job
+    from bronze import update_rental_history_confirmed_watermark as watermark_job
 
     _set_watermark(date(2026, 8, 18))
     _put_promotion([_snapshot("2026-08-21", "FINAL", list(range(24)))])
@@ -135,7 +135,7 @@ def test_gap_is_not_skipped(s3_env):
 
 
 def test_contiguous_backlog_advances_to_the_last_day(s3_env):
-    from jobs import update_rental_history_confirmed_watermark as watermark_job
+    from bronze import update_rental_history_confirmed_watermark as watermark_job
 
     _set_watermark(date(2026, 8, 17))
     _put_promotion(
@@ -152,7 +152,7 @@ def test_contiguous_backlog_advances_to_the_last_day(s3_env):
 
 
 def test_watermark_never_regresses(s3_env):
-    from jobs import update_rental_history_confirmed_watermark as watermark_job
+    from bronze import update_rental_history_confirmed_watermark as watermark_job
 
     _set_watermark(date(2026, 8, 21))
     _put_promotion([_snapshot("2026-08-19", "FINAL", list(range(24)))])
@@ -164,7 +164,7 @@ def test_watermark_never_regresses(s3_env):
 
 
 def test_empty_promotion_is_a_noop(s3_env):
-    from jobs import update_rental_history_confirmed_watermark as watermark_job
+    from bronze import update_rental_history_confirmed_watermark as watermark_job
 
     _set_watermark(date(2026, 8, 21))
     _put_promotion([])
@@ -176,7 +176,7 @@ def test_empty_promotion_is_a_noop(s3_env):
 
 
 def test_missing_promotion_marker_is_rejected(s3_env):
-    from jobs import update_rental_history_confirmed_watermark as watermark_job
+    from bronze import update_rental_history_confirmed_watermark as watermark_job
 
     _set_watermark(date(2026, 8, 20))
 
@@ -187,7 +187,7 @@ def test_missing_promotion_marker_is_rejected(s3_env):
 
 
 def test_incomplete_promotion_marker_is_rejected(s3_env):
-    from jobs import update_rental_history_confirmed_watermark as watermark_job
+    from bronze import update_rental_history_confirmed_watermark as watermark_job
 
     _set_watermark(date(2026, 8, 20))
     _put_promotion(
@@ -201,7 +201,7 @@ def test_incomplete_promotion_marker_is_rejected(s3_env):
 
 
 def test_partition_missing_from_commit_marker_is_not_confirmed(s3_env):
-    from jobs import update_rental_history_confirmed_watermark as watermark_job
+    from bronze import update_rental_history_confirmed_watermark as watermark_job
 
     _set_watermark(date(2026, 8, 20))
     _put_promotion(

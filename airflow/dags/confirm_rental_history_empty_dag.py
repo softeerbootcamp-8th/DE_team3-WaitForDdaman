@@ -23,7 +23,7 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import dag
 
 PYLIB_DIR = "/opt/airflow/pylib"
-INGESTION_DIR = "/opt/airflow/ingestion"
+INGESTION_DIR = "/opt/airflow/src"
 
 
 def _confirm_empty_callable(target_date_str: str, confirmed_by: str, reason: str):
@@ -32,7 +32,7 @@ def _confirm_empty_callable(target_date_str: str, confirmed_by: str, reason: str
     if INGESTION_DIR not in sys.path:
         sys.path.insert(0, INGESTION_DIR)
 
-    from jobs.confirm_rental_history_empty import run
+    from bronze.confirm_rental_history_empty import run
 
     return run(
         target_date_str=target_date_str,

@@ -13,7 +13,7 @@ import pytest
 from moto import mock_aws
 
 import config as config_module
-import jobs.advance_silver_rental_history_watermark as finalizer
+import operations.advance_silver_rental_history_watermark as finalizer
 from common.s3_utils import ensure_bucket
 from common.silver_rental_history_completion import (
     SILVER_RENTAL_HISTORY_CONTRACT_VERSION,

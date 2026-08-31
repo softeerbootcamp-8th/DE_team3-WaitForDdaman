@@ -14,7 +14,7 @@ def test_emr_dry_run_does_not_call_aws(monkeypatch, capsys):
     monkeypatch.setattr(boto3, "client", fail_if_called)
 
     result = run_emr_serverless_spark_job(
-        entry_point="local:///opt/app/ingestion/jobs/initial_load_rental_history.py",
+        entry_point="local:///opt/app/src/bronze/initial_load_rental_history.py",
         name="test-initial-load",
         entry_point_arguments=["--input-files-json", '["s3://bucket/a.csv"]'],
     )

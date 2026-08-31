@@ -19,8 +19,8 @@ from airflow.sdk import dag, task
 from dag_assets import RENTAL_HISTORY_BRONZE, RENTAL_HISTORY_SILVER
 from dag_common import DEFAULT_ARGS, SILVER_POOL
 
-INGESTION_DIR = "/opt/airflow/ingestion"
-STAGING_DIR = "/opt/airflow/staging"
+INGESTION_DIR = "/opt/airflow/src"
+STAGING_DIR = "/opt/airflow/src"
 PYTHON = "python"
 
 # daily_batch DAG과 같은 Variable을 공유한다 (bronze_daily_batch_all_sources_dag.py 참고).
@@ -28,11 +28,11 @@ T0_ENABLED_TEMPLATE = "{{ var.value.get('RENTAL_HISTORY_T0_ENABLED', 'false') }}
 
 
 def _bash(job_dir: str, job_module: str, extra_env: str = "") -> str:
-    # staging 잡은 자체 common 패키지가 없다 - ingestion/common(iceberg_catalog,
+    # Silver 잡은 자체 common 패키지가 없다 - src/common(iceberg_catalog,
     # iceberg_io, sql_assert, watermark 등)을 그대로 재사용해 중복을 피한다. PYTHONPATH에
-    # ingestion을 추가하면 `from common import ...`가 ingestion/common으로 해석된다.
+    # src를 추가하면 `from common import ...`가 src/common으로 해석된다.
     return (
-        f"cd {job_dir} && set -a && source {INGESTION_DIR}/.env && set +a && "
+        f"cd {job_dir} && set -a && source /opt/airflow/.env && set +a && "
         f"PYTHONPATH={INGESTION_DIR}:$PYTHONPATH {extra_env}{PYTHON} -m jobs.{job_module}"
     )
 

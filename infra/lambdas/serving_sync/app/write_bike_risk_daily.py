@@ -17,7 +17,7 @@ from ._secrets import load_serving_db_secret
 
 load_serving_db_secret()
 
-from write_bike_risk_daily import run  # noqa: E402 (자격증명을 채운 뒤에 import해야 함)
+from serving.write_bike_risk_daily import run  # noqa: E402 (자격증명을 채운 뒤에 import해야 함)
 
 
 def handler(event: dict, context: Any) -> dict:

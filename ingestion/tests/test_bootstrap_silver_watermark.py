@@ -3,7 +3,7 @@
 import pytest
 
 from config.watermark_keys import SILVER_FAILURE_REPORT, SILVER_RENTAL_HISTORY
-from jobs.bootstrap_silver_watermark import DATASETS
+from operations.bootstrap_silver_watermark import DATASETS
 
 
 def test_failure_report_is_a_bootstrap_target():

@@ -34,8 +34,8 @@ from airflow.sdk import dag
 from dag_common import notify_slack_on_failure
 
 PYLIB_DIR = "/opt/airflow/pylib"
-SERVING_SYNC_DIR = "/opt/airflow/pipeline/serving_sync"
-INGESTION_DIR = "/opt/airflow/ingestion"
+SERVING_SYNC_DIR = "/opt/airflow/src/serving"
+INGESTION_DIR = "/opt/airflow/src"
 
 # write_*/verify_* 4개 태스크가 부르는 Lambda 함수 이름 - infra/terraform/serving_sync.tf의
 # aws_lambda_function.function_name과 반드시 같아야 한다 (#172).
@@ -45,7 +45,7 @@ VERIFY_SERVING_SYNC_LAMBDA = "serving-sync-verify"
 
 
 def _load_ingestion_env(env_path: str) -> None:
-    """`source .env`(BashOperator 시절)와 동일하게, ingestion/.env의 값을 컨테이너
+    """`source /opt/airflow/.env`(BashOperator 시절)와 동일하게, ingestion/.env의 값을 컨테이너
     환경변수 위에 그대로 덮어쓴다 (gold_dim_fact_dag.py와 동일한 패턴 - 안 하면
     컨테이너 루트 .env(배포용)가 그대로 새어 들어와 LocalStack 대신 실제 AWS로
     나가는 문제가 재현된다). 이 파일은 docker-compose.local.yml 컨테이너에만
@@ -61,21 +61,16 @@ def _load_ingestion_env(env_path: str) -> None:
             os.environ[key.strip()] = value.strip()
 
 
-_load_ingestion_env(f"{INGESTION_DIR}/.env")
+_load_ingestion_env("/opt/airflow/.env")
 
 # build_mart_*가 Spark/서브프로세스 없이 DuckDB로 직접 실행되므로(#172), PythonOperator가
-# 잡 모듈을 직접 import해서 호출할 수 있도록 pylib(config), ingestion과 serving_sync/jobs를
-# sys.path에 얹는다. serving_sync/jobs 안의 모듈들은 `from station_risk_shared import ...`처럼
-# 서로를 bare import하므로, 패키지 루트가 아니라 jobs/ 디렉터리 자체를 얹어야 한다.
+# 새 src 패키지의 모듈을 직접 import한다.
 if PYLIB_DIR not in sys.path:
     sys.path.insert(0, PYLIB_DIR)
 if INGESTION_DIR not in sys.path:
     sys.path.insert(0, INGESTION_DIR)
-if f"{SERVING_SYNC_DIR}/jobs" not in sys.path:
-    sys.path.insert(0, f"{SERVING_SYNC_DIR}/jobs")
-
-from build_mart_bike_risk_daily import run as _run_build_mart_bike_risk_daily  # noqa: E402
-from build_mart_station_daily import run as _run_build_mart_station_daily  # noqa: E402
+from serving.build_mart_bike_risk_daily import run as _run_build_mart_bike_risk_daily  # noqa: E402
+from serving.build_mart_station_daily import run as _run_build_mart_station_daily  # noqa: E402
 
 
 def _build_mart_bike_risk_daily(snapshot_date: str) -> None:

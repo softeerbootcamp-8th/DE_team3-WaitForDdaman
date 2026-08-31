@@ -17,8 +17,8 @@ from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 
-from jobs.collect_failure_report_raw import collect_one_day
-from jobs.daily_batch_failure_report import _build_arrow_table, _process_one_day
+from bronze.collect_failure_report_raw import collect_one_day
+from bronze.daily_batch_failure_report import _build_arrow_table, _process_one_day
 
 KST = ZoneInfo("Asia/Seoul")
 

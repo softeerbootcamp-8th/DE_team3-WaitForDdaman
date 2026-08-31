@@ -1,6 +1,6 @@
 import pytest
 
-from schema.rental_history_schema import (
+from schemas.rental_history_schema import (
     SchemaValidationError,
     is_rental_history_file,
     validate_and_report,

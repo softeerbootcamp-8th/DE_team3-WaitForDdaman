@@ -12,7 +12,7 @@ gold.bike_location/station_active/fact_station_inventory/bike_last_action은
 컴팩션은 daily 배치의 SLA와 무관하고, 하루에 1~2개씩만 늘어나는 파일을 매일
 정리할 필요는 없으므로 주간 1회로 충분하다 - gold_dim_fact에 태스크를 얹으면
 daily 배치가 컴팩션 실패에 영향받게 되므로 분리했다(자세한 이유는
-pipeline/collection_priority/jobs/compact_iceberg_tables.py docstring 참고).
+src/gold/compact_iceberg_tables.py docstring 참고).
 
 ### 스케줄
 매주 일요일 03:00 KST - daily 배치(gold_dim_fact 06:00 KST)와 겹치지 않는 새벽 시간대,
@@ -26,8 +26,8 @@ from airflow.sdk import dag, task
 
 from dag_common import is_aws_env, notify_slack_on_failure, run_emr_serverless_spark_job
 
-COLLECTION_PRIORITY_DIR = "/opt/airflow/pipeline/collection_priority"
-INGESTION_DIR = "/opt/airflow/ingestion"
+COLLECTION_PRIORITY_DIR = "/opt/airflow/src/gold"
+INGESTION_DIR = "/opt/airflow/src"
 PYTHON = "python"
 
 default_args = {
@@ -41,7 +41,7 @@ def _compact_bash() -> str:
     # collection_priority 잡은 자체 common 패키지가 없다 -
     # ingestion/common(config, spark_session 등)을 그대로 재사용한다 (gold_dim_fact_dag.py와 동일 패턴).
     return (
-        f"cd {COLLECTION_PRIORITY_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
+        f"cd {COLLECTION_PRIORITY_DIR} && set -a && source /opt/airflow/.env && set +a && "
         f"PYTHONPATH={INGESTION_DIR}:$PYTHONPATH PYTHONDONTWRITEBYTECODE=1 "
         f"{PYTHON} -m jobs.compact_iceberg_tables"
     )
@@ -62,7 +62,7 @@ def iceberg_maintenance():
         @task(task_id="compact_iceberg_tables", execution_timeout=timedelta(hours=1))
         def compact_iceberg_tables_emr() -> str:
             return run_emr_serverless_spark_job(
-                entry_point="local:///opt/app/pipeline/collection_priority/jobs/compact_iceberg_tables.py",
+                entry_point="local:///opt/app/src/gold/compact_iceberg_tables.py",
                 name="iceberg-compact-tables",
                 log_group_name="/emr-serverless/iceberg-maintenance",
                 log_stream_name_prefix="compact-iceberg-tables",

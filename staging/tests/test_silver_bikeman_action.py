@@ -4,7 +4,7 @@ from datetime import date, datetime, timezone
 import pyarrow as pa
 from pyiceberg.exceptions import NoSuchTableError
 
-from jobs.silver_bikeman_action import (
+from silver.silver_bikeman_action import (
     BACKUP_TABLE,
     PARTITION_COLUMN,
     REBUILD_TABLE,

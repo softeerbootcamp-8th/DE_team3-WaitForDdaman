@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from jobs import rental_history_snapshot_policy as policy
+from bronze import rental_history_snapshot_policy as policy
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -251,7 +251,7 @@ def test_manifest_from_microsecond_cutoff_is_not_rejected_as_schema_invalid():
     자르므로, snapshot_keys()가 만든 key와 manifest에 저장된 observed_at이 실제
     프로덕션 경로 그대로도 일치해야 한다. 이 테스트는 test 전용 _cutoff 헬퍼가 아니라
     실제 parse_collection_cutoff를 통과시켜 selector까지 이어지는 전체 경로를 검증한다."""
-    from jobs import collect_rental_history_raw as raw_job
+    from bronze import collect_rental_history_raw as raw_job
 
     cutoff = raw_job.parse_collection_cutoff("2026-08-22T06:00:00.654321+09:00")
     payload_key, manifest_key = raw_job.snapshot_keys(date(2026, 8, 22), cutoff, "FINAL")

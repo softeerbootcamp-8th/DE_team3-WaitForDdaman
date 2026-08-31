@@ -77,13 +77,13 @@ generator_dag.py`와 같은 방식으로 ingestion 잡 모듈을 sys.path에 얹
 오탐이 없다.
 
 ### ingestion/.env를 여기서 직접 로드하는 이유 (2026-08-22, #145)
-`_ingestion_bash`(BashSensor 시절)는 매 poke마다 `cd ingestion && source .env`로
+`_ingestion_bash`(BashSensor 시절)는 매 poke마다 `cd ingestion && source /opt/airflow/.env`로
 서브프로세스를 띄워, 컨테이너 자체의 환경변수(루트 `.env` - "AWS 배포 시 바꾸는
 파일"로 문서화됨, 배포 시 APP_ENV=aws + 실 AWS 키가 됨)와 무관하게 ingestion 잡을
 항상 `ingestion/.env`(APP_ENV=local + LocalStack 엔드포인트) 기준으로 실행해왔다.
 PythonSensor는 서브프로세스를 띄우지 않고 이 태스크 프로세스 안에서 바로
 `is_ready()`를 호출하므로, `config.SETTINGS`가 평가되는 시점(첫 `import config`)에
-컨테이너가 물려받은 환경변수를 그대로 쓴다 - `source .env` 단계가 없으면 루트
+컨테이너가 물려받은 환경변수를 그대로 쓴다 - `source /opt/airflow/.env` 단계가 없으면 루트
 `.env`가 APP_ENV=aws인 상태에서 컨테이너가 뜬 경우 LocalStack 대신 진짜 AWS S3로
 나가버린다(#145 검증 중 AccessDenied로 실측 확인). 그래서 `jobs.check_silver_*`를
 import(=config 첫 평가)하기 전에 `ingestion/.env`를 직접 읽어 os.environ에
@@ -110,13 +110,13 @@ from dag_assets import (
 from dag_common import GOLD_POOL, notify_slack_on_failure
 
 PYLIB_DIR = "/opt/airflow/pylib"
-INGESTION_DIR = "/opt/airflow/ingestion"
-COLLECTION_PRIORITY_DIR = "/opt/airflow/pipeline/collection_priority"
+INGESTION_DIR = "/opt/airflow/src"
+COLLECTION_PRIORITY_DIR = "/opt/airflow/src/gold"
 PYTHON = "python"
 
 
 def _load_ingestion_env(env_path: str) -> None:
-    """`source .env`(BashSensor 시절)와 동일하게, ingestion/.env의 값을 컨테이너
+    """`source /opt/airflow/.env`(BashSensor 시절)와 동일하게, ingestion/.env의 값을 컨테이너
     환경변수 위에 그대로 덮어쓴다 (export 없는 단순 KEY=VALUE 라인만 있는 파일).
 
     이 파일은 docker-compose.local.yml 컨테이너에만 존재한다 - DagBag이 DAG
@@ -136,7 +136,7 @@ def _load_ingestion_env(env_path: str) -> None:
             os.environ[key.strip()] = value.strip()
 
 
-_load_ingestion_env(f"{INGESTION_DIR}/.env")
+_load_ingestion_env("/opt/airflow/.env")
 
 # PythonSensor가 Spark/서브프로세스 없이 판정 함수를 직접 호출할 수 있도록,
 # pylib(config)와 ingestion을 네임스페이스 패키지 루트로 sys.path에 얹는다
@@ -147,9 +147,9 @@ if PYLIB_DIR not in sys.path:
 if INGESTION_DIR not in sys.path:
     sys.path.insert(0, INGESTION_DIR)
 
-from jobs.check_silver_bikeman_action_watermark import is_ready as bikeman_action_ready  # noqa: E402
-from jobs.check_silver_snapshot_date import is_ready as snapshot_date_ready  # noqa: E402
-from jobs.check_silver_watermark import is_ready as watermark_ready  # noqa: E402
+from operations.check_silver_bikeman_action_watermark import is_ready as bikeman_action_ready  # noqa: E402
+from operations.check_silver_snapshot_date import is_ready as snapshot_date_ready  # noqa: E402
+from operations.check_silver_watermark import is_ready as watermark_ready  # noqa: E402
 
 SENSOR_TIMEOUT = timedelta(hours=6).total_seconds()  # 전부 Asset 트리거라 여유 있게
 POKE_INTERVAL = 300  # 5분
@@ -169,7 +169,7 @@ def _collection_priority_bash(job_module: str, extra_env: str = "") -> str:
     # collection_priority 잡은 자체 common 패키지가 없다 -
     # ingestion/common(config, spark_session, watermark 등)을 그대로 재사용한다.
     return (
-        f"cd {COLLECTION_PRIORITY_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
+        f"cd {COLLECTION_PRIORITY_DIR} && set -a && source /opt/airflow/.env && set +a && "
         f"PYTHONPATH={INGESTION_DIR}:$PYTHONPATH PYTHONDONTWRITEBYTECODE=1 "
         f"{extra_env}{PYTHON} -m jobs.{job_module}"
     )

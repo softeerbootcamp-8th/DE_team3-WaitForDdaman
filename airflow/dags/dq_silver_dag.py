@@ -32,7 +32,7 @@ from dag_assets import (
 )
 from dag_common import DEFAULT_ARGS, SILVER_POOL
 
-INGESTION_DIR = "/opt/airflow/ingestion"
+INGESTION_DIR = "/opt/airflow/src"
 PYTHON = "python"
 CONFIG_DIR = "/opt/airflow/pylib/config/dq"
 
@@ -47,7 +47,7 @@ SILVER_SOURCES = [
 
 def _bash(job_module: str, source_name: str, config_filename: str) -> str:
     return (
-        f"cd {INGESTION_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
+        f"cd {INGESTION_DIR} && set -a && source /opt/airflow/.env && set +a && "
         f"PYTHONPATH={INGESTION_DIR}:$PYTHONPATH "
         "EXECUTION_DATE='{{ ds }}' "
         f"DQ_SOURCE_NAME={source_name} "

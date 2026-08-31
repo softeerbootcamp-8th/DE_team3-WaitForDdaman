@@ -5,7 +5,7 @@ FAIL이 없으면 LLM 호출을 스킵하는 비용 절감 분기를 검증한�
 """
 from unittest.mock import MagicMock
 
-import jobs.interpret_dq_results as job
+import operations.interpret_dq_results as job
 
 
 def _pending(results):

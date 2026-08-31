@@ -4,7 +4,7 @@
 #
 # 왜 스크립트인가: 파일 권한을 반드시 640(그룹 root 읽기)으로 맞춰야 하는데,
 # Airflow 컨테이너가 uid 50000 / gid 0으로 돌면서 이 파일을
-# /opt/airflow/ingestion/.env로 마운트해 직접 source하기 때문이다.
+# /opt/airflow/.env로 마운트해 직접 source하기 때문이다.
 # 600으로 두면 컨테이너가 못 읽어서 모든 DAG 태스크가 Permission denied로
 # 죽는다(실제로 겪었음). 수동 scp로는 이 단계를 빼먹기 쉬워서 스크립트로 굳혔다.
 #
@@ -60,7 +60,7 @@ ssh -i "$SSH_KEY" "$EC2_USER@$EC2_HOST" \
 
 echo "==> 컨테이너에서 읽히는지 확인"
 ssh -i "$SSH_KEY" "$EC2_USER@$EC2_HOST" \
-  "docker exec airflow-scheduler head -1 /opt/airflow/ingestion/.env >/dev/null && echo '읽기 OK' || echo '읽기 실패'"
+  "docker exec airflow-scheduler head -1 /opt/airflow/.env >/dev/null && echo '읽기 OK' || echo '읽기 실패'"
 
 if [[ "${1:-}" == "--restart" ]]; then
   echo "==> 컨테이너 재기동 (compose environment: 블록의 값 반영)"

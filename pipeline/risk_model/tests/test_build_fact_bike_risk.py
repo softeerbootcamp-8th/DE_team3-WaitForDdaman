@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 import pyarrow as pa
 
-from jobs.build_fact_bike_risk import _dedup_by_bike_id, _exclude_collected_bikes, _latest_collected_bike_ids
+from gold.build_fact_bike_risk import _dedup_by_bike_id, _exclude_collected_bikes, _latest_collected_bike_ids
 
 
 def utc(*args) -> datetime:

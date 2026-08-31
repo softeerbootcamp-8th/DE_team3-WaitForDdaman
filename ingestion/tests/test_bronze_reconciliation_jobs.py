@@ -21,7 +21,7 @@ def s3_env(monkeypatch):
 
 def _write_marker(dataset: str, target_date: str, status: str):
     from common.s3_utils import put_json
-    from jobs.check_bronze_gap import marker_key
+    from operations.check_bronze_gap import marker_key
 
     put_json(
         "test-reconciliation-bucket",
@@ -32,7 +32,7 @@ def _write_marker(dataset: str, target_date: str, status: str):
 
 def test_gap_check_returns_only_dates_without_accepted_marker(s3_env, monkeypatch):
     from common.watermark import write_watermark
-    from jobs import check_bronze_gap
+    from operations import check_bronze_gap
 
     write_watermark(date(2026, 8, 20))
     _write_marker("rental_history", "2026-08-21", "COMPLETE")
@@ -44,7 +44,7 @@ def test_gap_check_returns_only_dates_without_accepted_marker(s3_env, monkeypatc
 
 def test_advance_watermark_stops_at_first_gap(s3_env, monkeypatch):
     from common.watermark import read_watermark, write_watermark
-    from jobs import advance_completion_watermark
+    from operations import advance_completion_watermark
 
     write_watermark(date(2026, 8, 20), watermark_key="_meta/watermark/failure_report.json")
     _write_marker("failure_report", "2026-08-21", "COMPLETE_EMPTY")
@@ -70,9 +70,9 @@ def test_promote_and_marker_still_record_failure_when_prepare_left_no_selection(
     XCom도 못 남긴 날짜에 대해서도 이 두 잡은 반드시 호출된다 - 그 계약을 검증한다.
     """
     from common.watermark import read_watermark, write_watermark
-    from jobs import advance_completion_watermark
-    from jobs import promote_rental_history_raw
-    from jobs import write_rental_history_completion_marker as marker_job
+    from operations import advance_completion_watermark
+    from bronze import promote_rental_history_raw
+    from bronze import write_rental_history_completion_marker as marker_job
 
     write_watermark(date(2026, 8, 20))
     monkeypatch.setenv("COLLECTION_CUTOFF_AT", "2026-08-21T23:59:59+09:00")
@@ -101,7 +101,7 @@ def test_promote_and_marker_still_record_failure_when_prepare_left_no_selection(
 def test_advance_watermark_updates_partial_success_before_raising(s3_env, monkeypatch):
     """중간 날짜가 실패하여 incomplete 에러를 던지더라도 성공한 날짜까지는 워터마크가 전진해야 한다."""
     from common.watermark import read_watermark, write_watermark
-    from jobs import advance_completion_watermark
+    from operations import advance_completion_watermark
 
     write_watermark(date(2026, 8, 20))
     _write_marker("rental_history", "2026-08-21", "COMPLETE")
@@ -125,8 +125,8 @@ def test_daily_batch_failure_report_writes_completion_marker(s3_env, monkeypatch
     """daily_batch_failure_report 실행 시 S3에 completion.json 마커가 정상 기록된다."""
     from common.s3_utils import get_json
     from common.watermark import write_watermark
-    from jobs.check_bronze_gap import marker_key
-    from jobs.daily_batch_failure_report import run as run_failure_report
+    from operations.check_bronze_gap import marker_key
+    from bronze.daily_batch_failure_report import run as run_failure_report
     from unittest.mock import patch
 
     write_watermark(date(2026, 8, 20), watermark_key="_meta/watermark/failure_report.json")

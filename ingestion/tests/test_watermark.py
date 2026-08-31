@@ -62,7 +62,7 @@ def test_watermark_persisted_payload_shape(s3_env):
 def test_set_watermark_job_all_datasets(s3_env):
     from common.watermark import read_watermark
     from config.watermark_keys import GOLD_DIM_BIKE, SILVER_BIKEMAN_ACTION, SILVER_RENTAL_HISTORY
-    from jobs.set_watermark import run as run_set_watermark
+    from operations.set_watermark import run as run_set_watermark
 
     # 1. rental_history
     run_set_watermark("2026-06-30", "rental_history")

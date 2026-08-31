@@ -12,7 +12,7 @@ import pytest
 from moto import mock_aws
 
 import config as config_module
-import jobs.compute_silver_rental_history_backfill_ranges as compute_ranges
+import operations.compute_silver_rental_history_backfill_ranges as compute_ranges
 from common.s3_utils import ensure_bucket
 from common.silver_rental_history_completion import (
     SILVER_RENTAL_HISTORY_CONTRACT_VERSION,

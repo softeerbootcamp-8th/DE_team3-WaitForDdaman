@@ -7,9 +7,12 @@ repo_root = Path(__file__).parent.parent.parent.parent
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
-# jobs import `common.*` (s3_utils/spark_session) which lives under ingestion/common -
-# real runs get this via PYTHONPATH=<ingestion_dir>:... (see staging/README.md), so
-# tests need the same path added.
-ingestion_dir = repo_root / "ingestion"
-if str(ingestion_dir) not in sys.path:
-    sys.path.insert(0, str(ingestion_dir))
+# Pipeline modules import `common.*` from the src source root.
+src_dir = repo_root / "src"
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
+
+# Legacy tests import serving jobs as top-level modules (e.g. build_mart_*).
+serving_dir = src_dir / "serving"
+if str(serving_dir) not in sys.path:
+    sys.path.insert(0, str(serving_dir))

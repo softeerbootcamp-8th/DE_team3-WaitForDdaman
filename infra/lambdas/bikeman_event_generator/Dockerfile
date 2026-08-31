@@ -11,11 +11,7 @@
 FROM public.ecr.aws/lambda/python:3.11
 
 # bikeman_event_generator 잡 본체 - 로컬 실행과 완전히 같은 코드를 그대로 쓴다.
-COPY pipeline/bikeman_event_generator/jobs/bikeman_db.py ${LAMBDA_TASK_ROOT}/bikeman_db.py
-COPY pipeline/bikeman_event_generator/jobs/event_builder.py ${LAMBDA_TASK_ROOT}/event_builder.py
-COPY pipeline/bikeman_event_generator/jobs/event_ids.py ${LAMBDA_TASK_ROOT}/event_ids.py
-COPY pipeline/bikeman_event_generator/jobs/generate_collect_events.py ${LAMBDA_TASK_ROOT}/generate_collect_events.py
-COPY pipeline/bikeman_event_generator/jobs/deploy_returned_bikes.py ${LAMBDA_TASK_ROOT}/deploy_returned_bikes.py
+COPY src/bronze/ ${LAMBDA_TASK_ROOT}/bronze/
 
 # Lambda 진입점(app.<모듈>.handler) - Secrets Manager에서 DB 자격증명을 채운 뒤
 # 위 잡의 run()을 그대로 부르는 얇은 래퍼.

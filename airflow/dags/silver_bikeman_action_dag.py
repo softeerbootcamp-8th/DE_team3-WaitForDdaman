@@ -36,14 +36,14 @@ from airflow.sdk import dag
 from dag_assets import BIKEMAN_ACTION_SILVER, BIKEMAN_EVENT_BRONZE
 from dag_common import COLLECTION_CUTOFF_AT_TEMPLATE, DEFAULT_ARGS, SILVER_POOL
 
-INGESTION_DIR = "/opt/airflow/ingestion"  # common, .env 출처
-STAGING_DIR = "/opt/airflow/staging"      # 잡 실행 위치
+INGESTION_DIR = "/opt/airflow/src"  # common, .env 출처
+STAGING_DIR = "/opt/airflow/src"      # 잡 실행 위치
 PYTHON_BIN = "python"
 
 
 def _staging_bash(job_module: str, extra_env_str: str = "") -> str:
     return (
-        f"cd {STAGING_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
+        f"cd {STAGING_DIR} && set -a && source /opt/airflow/.env && set +a && "
         f"PYTHONPATH={INGESTION_DIR}:{STAGING_DIR}:$PYTHONPATH "
         f"{extra_env_str}"
         f"{PYTHON_BIN} -m jobs.{job_module}"

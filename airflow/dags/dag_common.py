@@ -15,20 +15,20 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-INGESTION_DIR = "/opt/airflow/ingestion"
-STAGING_DIR = "/opt/airflow/staging"  # staging/jobs/ 잡(Silver 등) 실행 위치
+INGESTION_DIR = "/opt/airflow/src"
+STAGING_DIR = "/opt/airflow/src"  # staging/jobs/ 잡(Silver 등) 실행 위치
 INGESTION_PYTHON = "python"
 
 
 # .env가 컨테이너 안에 마운트되는 경로는 compose 파일마다 다르다.
 #   docker-compose.yml / .local.yml -> ./.env:/opt/airflow/.env
-#   docker-compose.prod.yml         -> ./.env:/opt/airflow/ingestion/.env
+#   docker-compose.prod.yml         -> ./.env:/opt/airflow/.env
 # 운영은 후자만 마운트하는데 load_env_file이 /opt/airflow/.env만 보고 있어서,
-# BashOperator(`cd ingestion && source .env`)는 키를 보는데 TaskFlow Python
+# BashOperator(`cd ingestion && source /opt/airflow/.env`)는 키를 보는데 TaskFlow Python
 # 태스크는 아무 값도 못 보는 상태였다 - 파일이 없으면 조용히 return하기 때문에
 # 운영에서만 "SEOUL_API_KEY1가 설정되지 않았습니다"로 뒤늦게 터졌다.
-# 두 경로를 모두 훑고, 이미 설정된 키는 덮어쓰지 않는다.
-ENV_FILE_CANDIDATES = ("/opt/airflow/.env", "/opt/airflow/ingestion/.env")
+# 운영·로컬 모두 동일한 경로를 사용하며, 이미 설정된 키는 덮어쓰지 않는다.
+ENV_FILE_CANDIDATES = ("/opt/airflow/.env",)
 
 
 def load_env_file(env_path: str | None = None) -> None:
@@ -361,7 +361,7 @@ def bash_job(job_module: str, extra_env: str = "") -> str:
     "EOFError: marshal data too short"로 실패하는 것을 방지한다.
     """
     return (
-        f"cd {INGESTION_DIR} && set -a && source .env && set +a && "
+        f"cd {INGESTION_DIR} && set -a && source /opt/airflow/.env && set +a && "
         f"PYTHONDONTWRITEBYTECODE=1 {extra_env}{INGESTION_PYTHON} -m jobs.{job_module}"
     )
 
@@ -373,7 +373,7 @@ def bash_staging_job(job_module: str, extra_env: str = "") -> str:
     그대로 재사용한다.
     """
     return (
-        f"cd {STAGING_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
+        f"cd {STAGING_DIR} && set -a && source /opt/airflow/.env && set +a && "
         f"PYTHONPATH={INGESTION_DIR}:{STAGING_DIR}:$PYTHONPATH "
         f"PYTHONDONTWRITEBYTECODE=1 {extra_env}{INGESTION_PYTHON} -m jobs.{job_module}"
     )

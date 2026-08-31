@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 import pyarrow as pa
 
-from jobs.build_dim_bike import _compute_new_bikes
+from gold.build_dim_bike import _compute_new_bikes
 
 RENTAL_COLUMNS = ["bike_id", "rent_dt"]
 

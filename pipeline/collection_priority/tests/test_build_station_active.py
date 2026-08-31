@@ -8,7 +8,7 @@ _latest_snapshot()은 Iceberg 카탈로그를 직접 읽으므로 여기서는 �
 """
 import pyarrow as pa
 
-from jobs.build_station_active import _dedup_by_station_id, _join_active_stations
+from gold.build_station_active import _dedup_by_station_id, _join_active_stations
 
 SNAPSHOT_DATE = "2026-08-17"
 

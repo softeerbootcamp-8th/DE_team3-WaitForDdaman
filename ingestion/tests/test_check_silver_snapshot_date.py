@@ -41,7 +41,7 @@ def _put_partition_file(namespace: str, table: str, snapshot_date: str) -> None:
 
 
 def test_get_max_snapshot_date_picks_the_max_across_partitions(s3_env):
-    from jobs.check_silver_snapshot_date import get_max_snapshot_date
+    from operations.check_silver_snapshot_date import get_max_snapshot_date
 
     _put_partition_file("silver", "station_master", "2026-08-15")
     _put_partition_file("silver", "station_master", "2026-08-17")
@@ -51,7 +51,7 @@ def test_get_max_snapshot_date_picks_the_max_across_partitions(s3_env):
 
 
 def test_get_max_snapshot_date_none_when_table_has_no_data_yet(s3_env):
-    from jobs.check_silver_snapshot_date import get_max_snapshot_date
+    from operations.check_silver_snapshot_date import get_max_snapshot_date
 
     assert get_max_snapshot_date("silver", "station_active") is None
 
@@ -71,13 +71,13 @@ def test_get_max_snapshot_date_none_when_warehouse_bucket_not_created_yet(monkey
     monkeypatch.setattr(config_module, "SETTINGS", test_settings)
 
     with mock_aws():
-        from jobs.check_silver_snapshot_date import get_max_snapshot_date
+        from operations.check_silver_snapshot_date import get_max_snapshot_date
 
         assert get_max_snapshot_date("silver", "station_master") is None
 
 
 def test_is_ready_true_when_latest_partition_covers_target(s3_env):
-    from jobs.check_silver_snapshot_date import is_ready
+    from operations.check_silver_snapshot_date import is_ready
 
     _put_partition_file("silver", "station_master", "2026-08-17")
 
@@ -85,7 +85,7 @@ def test_is_ready_true_when_latest_partition_covers_target(s3_env):
 
 
 def test_is_ready_true_when_latest_partition_is_after_target(s3_env):
-    from jobs.check_silver_snapshot_date import is_ready
+    from operations.check_silver_snapshot_date import is_ready
 
     _put_partition_file("silver", "station_master", "2026-08-18")
 
@@ -93,7 +93,7 @@ def test_is_ready_true_when_latest_partition_is_after_target(s3_env):
 
 
 def test_is_ready_false_when_no_partition_reaches_target(s3_env):
-    from jobs.check_silver_snapshot_date import is_ready
+    from operations.check_silver_snapshot_date import is_ready
 
     _put_partition_file("silver", "station_master", "2026-08-16")
 
@@ -101,6 +101,6 @@ def test_is_ready_false_when_no_partition_reaches_target(s3_env):
 
 
 def test_is_ready_false_when_table_has_no_data_yet(s3_env):
-    from jobs.check_silver_snapshot_date import is_ready
+    from operations.check_silver_snapshot_date import is_ready
 
     assert is_ready("silver.station_active", "2026-08-17") is False

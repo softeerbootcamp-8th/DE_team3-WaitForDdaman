@@ -167,7 +167,7 @@ default_args = {
     default_args=default_args,
     tags=["bronze", "manual"],
     params={
-        "rental_history_dir": f"{INGESTION_DIR}/data/rental_history",
+        "rental_history_dir": "/opt/airflow/ingestion/data/rental_history",
         "rental_history_pattern": "*",
         "rental_history_watermark_date": "2026-06-30",
         # 배치 하나 = EMR JobRun 하나 (#249). 대여이력은 대형 파일이 많으므로
@@ -178,7 +178,7 @@ default_args = {
         # 반기 단위(6개)로 묶는다. S3_STAGING_POOL 슬롯 수(2)에 맞춰 배치
         # 하나(파일 최대 700MB급 x 이 값)가 워커 메모리/네트워크를 과도하게 잡지 않게 한다.
         "rental_history_staging_batch_size": "6",
-        "failure_report_dir": f"{INGESTION_DIR}/data/failure_report",
+        "failure_report_dir": "/opt/airflow/ingestion/data/failure_report",
         "failure_report_pattern": "*",
         "failure_report_watermark_date": "2026-06-30",
         # 고장신고는 파일이 작아서 12개씩 묶어 EMR JobRun/스테이징 업로드 수를 줄인다.
@@ -306,7 +306,7 @@ def initial_load():
         )
         def initial_load_rental_history_batch_emr(input_files: list[str]) -> str:
             return run_emr_serverless_spark_job(
-                entry_point="local:///opt/app/ingestion/jobs/initial_load_rental_history.py",
+                entry_point="local:///opt/app/src/bronze/initial_load_rental_history.py",
                 name="bronze-initial-load-rental-history",
                 # entryPointArguments가 1차 전달 경로다(#255) - sparkSubmitParameters의
                 # 자체 파서가 공백에서 토큰을 잘라먹는 문제를 피한다("EMR Serverless로의
@@ -411,7 +411,7 @@ def initial_load():
         )
         def initial_load_failure_report_batch_emr(input_files: list[str]) -> str:
             return run_emr_serverless_spark_job(
-                entry_point="local:///opt/app/ingestion/jobs/initial_load_failure_report.py",
+                entry_point="local:///opt/app/src/bronze/initial_load_failure_report.py",
                 name="bronze-initial-load-failure-report",
                 # entryPointArguments가 1차 전달 경로다(#255) - rental_history와 동일한
                 # 이유("EMR Serverless로의 INPUT_FILES 전달" 문단 참고).

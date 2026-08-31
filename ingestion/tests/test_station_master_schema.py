@@ -1,6 +1,6 @@
 import pytest
 
-from schema.station_master_schema import (
+from schemas.station_master_schema import (
     OPTIONAL_STANDARD_COLUMNS,
     REQUIRED_STANDARD_COLUMNS,
     SchemaValidationError,

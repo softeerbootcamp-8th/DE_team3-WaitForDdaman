@@ -5,7 +5,7 @@ IMAGE="${1:-waitforddaman-emr-spark-prod:test}"
 
 # EMR Serverless 워커가 실제로 잡을 띄울 때와 같은 PYTHONPATH.
 # 베이스 이미지의 pyspark 경로 + Dockerfile.prod의 ENV PYTHONPATH 2분할.
-PYPATH="/usr/lib/spark/python:/usr/lib/spark/python/lib/pyspark.zip:/usr/lib/spark/python/lib/py4j-0.10.9.7-src.zip:/opt/app:/opt/app/ingestion"
+PYPATH="/usr/lib/spark/python:/usr/lib/spark/python/lib/pyspark.zip:/usr/lib/spark/python/lib/py4j-0.10.9.7-src.zip:/opt/app:/opt/app/src"
 
 echo "== jar baked-in 확인 =="
 # Iceberg / Hadoop-AWS는 베이스 이미지가 extraClassPath로 이미 제공하므로
@@ -30,8 +30,8 @@ echo "== 잡 import 스모크 테스트 =="
 #     Spark 세션을 만들기도 전에 "사용법:"을 찍고 exit 1로 깨끗하게 끝난다.
 #     즉 exit 1 + "사용법:" == 모든 import가 해결됐다는 뜻이다.
 for entry in \
-  /opt/app/ingestion/jobs/initial_load_rental_history.py \
-  /opt/app/ingestion/jobs/initial_load_failure_report.py
+  /opt/app/src/bronze/initial_load_rental_history.py \
+  /opt/app/src/bronze/initial_load_failure_report.py
 do
   set +e
   out=$(docker run --rm --entrypoint /usr/bin/python3 \
@@ -50,7 +50,7 @@ done
 # (2) samples.py / check_silver_catalog.py - argparse + main() 가드가 있어
 #     --help면 Spark 세션 없이 usage만 찍고 exit 0.
 for entry in \
-  /opt/app/pipeline/train_risk_model/samples.py \
+  /opt/app/src/ml/samples.py \
   /opt/app/airflow/scripts/check_silver_catalog.py
 do
   set +e
@@ -74,7 +74,7 @@ done
 #     실제 실행하면 카탈로그 프로시저를 호출하므로 같은 방식으로 확인한다.
 #     (수동 검증 스크립트라 실제 실행 검증은 실 환경에서 한다.)
 for entry in \
-  /opt/app/pipeline/collection_priority/jobs/compact_iceberg_tables.py \
+  /opt/app/src/gold/compact_iceberg_tables.py \
   /opt/app/airflow/scripts/check_gold_dim_fact.py \
   /opt/app/airflow/scripts/check_silver_gold.py
 do
@@ -123,7 +123,7 @@ docker run --rm --entrypoint /usr/bin/python3 \
   -e PYTHONPATH="$PYPATH" \
   "$IMAGE" -c "
 import os
-from pipeline.train_risk_model.settings import load_config
+from ml.settings import load_config
 
 # samples.py 계열은 load_config()를 인자 없이 부를 수 있다 - 컨테이너에
 # RISK_MODEL_CONFIG가 없으면 Airflow 전용 기본 경로를 보고 FileNotFoundError로

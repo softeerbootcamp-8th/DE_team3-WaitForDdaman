@@ -1,6 +1,6 @@
 """날짜 Backfill 완료 marker 잡 테스트."""
 
-from jobs import write_rental_history_completion_marker as marker_job
+from bronze import write_rental_history_completion_marker as marker_job
 
 
 def _run_with_objects(monkeypatch, manifest, promotion):

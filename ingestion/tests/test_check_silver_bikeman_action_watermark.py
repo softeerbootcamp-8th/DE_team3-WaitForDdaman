@@ -32,7 +32,7 @@ def s3_env(monkeypatch):
 def test_is_ready_true_when_watermark_covers_target(s3_env):
     from common.watermark import write_watermark
     from config.watermark_keys import SILVER_BIKEMAN_ACTION
-    from jobs.check_silver_bikeman_action_watermark import is_ready
+    from operations.check_silver_bikeman_action_watermark import is_ready
 
     write_watermark(date(2026, 8, 16), watermark_key=SILVER_BIKEMAN_ACTION)
 
@@ -42,7 +42,7 @@ def test_is_ready_true_when_watermark_covers_target(s3_env):
 def test_is_ready_false_when_watermark_behind_target(s3_env):
     from common.watermark import write_watermark
     from config.watermark_keys import SILVER_BIKEMAN_ACTION
-    from jobs.check_silver_bikeman_action_watermark import is_ready
+    from operations.check_silver_bikeman_action_watermark import is_ready
 
     write_watermark(date(2026, 8, 15), watermark_key=SILVER_BIKEMAN_ACTION)
 

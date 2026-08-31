@@ -23,7 +23,7 @@ bronze_daily_batch_all_sources DAG의 daily_batch_station_active 태스크가 �
 이 DAG는 그 갱신을 스케줄 트리거로 사용한다.
 
 ### PYTHONPATH
-staging/에는 자체 common/이 없어 ingestion/common/(iceberg_catalog, iceberg_io 등)을
+Silver에는 자체 common/이 없어 src/common/(iceberg_catalog, iceberg_io 등)을
 재사용하고, config는 레포 최상위 config 패키지를 쓴다(/opt/airflow/pylib/config로
 마운트됨).
 """
@@ -37,8 +37,8 @@ from dag_assets import STATION_ACTIVE_BRONZE, STATION_ACTIVE_SILVER
 from dag_common import DEFAULT_ARGS, SILVER_POOL
 
 PYLIB_DIR = "/opt/airflow/pylib"          # config 패키지 (docker-compose가 ./config를 마운트)
-INGESTION_DIR = "/opt/airflow/ingestion"  # common/(iceberg_catalog, iceberg_io 등), .env 출처
-STAGING_DIR = "/opt/airflow/staging"      # 잡 실행 위치
+INGESTION_DIR = "/opt/airflow/src"  # common/(iceberg_catalog, iceberg_io 등), .env 출처
+STAGING_DIR = "/opt/airflow/src"      # 잡 실행 위치
 PYTHON_BIN = "python"
 
 SILVER_MODULE = "silver_station_active"
@@ -47,7 +47,7 @@ SILVER_MODULE = "silver_station_active"
 def _staging_bash(job_module: str, extra_env: str = "") -> str:
     """staging/ 잡 실행 커맨드. 설정값은 ingestion/.env를 그대로 source한다."""
     return (
-        f"cd {STAGING_DIR} && set -a && source {INGESTION_DIR}/.env && set +a && "
+        f"cd {STAGING_DIR} && set -a && source /opt/airflow/.env && set +a && "
         f"PYTHONPATH={PYLIB_DIR}:{INGESTION_DIR}:{STAGING_DIR} "
         f"{extra_env}{PYTHON_BIN} -m jobs.{job_module}"
     )

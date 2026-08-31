@@ -4,7 +4,7 @@ from datetime import date, datetime
 
 import pytest
 
-from jobs import collect_rental_history_raw as raw_job
+from bronze import collect_rental_history_raw as raw_job
 
 
 VALID_ROW = {

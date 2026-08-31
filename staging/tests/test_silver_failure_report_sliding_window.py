@@ -17,8 +17,8 @@ from datetime import date, datetime, timezone
 import pyarrow as pa
 import pytest
 
-import jobs.silver_failure_report as mod
-from jobs.silver_failure_report import (
+import silver.silver_failure_report as mod
+from silver.silver_failure_report import (
     BRONZE_LOOKBACK_DAYS,
     DECLARED_COLUMN,
     PARTITION_COLUMN,

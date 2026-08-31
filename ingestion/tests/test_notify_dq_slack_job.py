@@ -1,7 +1,7 @@
 """
 jobs/notify_dq_slack.py 단위 테스트 (#217)
 """
-import jobs.notify_dq_slack as job
+import operations.notify_dq_slack as job
 
 
 def test_skips_when_no_github_issues_file(monkeypatch):

@@ -29,7 +29,7 @@ import os
 import sys
 from datetime import timedelta
 
-# /opt/airflow/pipeline 은 PYTHONPATH 에 없으므로 부모 경로를 넣어준다.
+# 소스는 /opt/airflow/src에 있으므로 공통 PYTHONPATH 설정을 사용한다.
 PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "/opt/airflow")
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -48,7 +48,7 @@ if PYLIB_DIR not in sys.path:
 # 넘겨준 실 값이 DAG 파싱/태스크 실행 때마다 도로 지워진다(#실측). 그래서 여기서는
 # 이미 채워진 값(compose environment: 블록이 준 값)은 덮지 않는다 - ingestion/.env는
 # compose가 안 채워준 나머지 로컬 전용 기본값만 보충하는 용도로 남긴다.
-INGESTION_DIR = os.environ.get("INGESTION_DIR", "/opt/airflow/ingestion")
+INGESTION_DIR = os.environ.get("INGESTION_DIR", "/opt/airflow/src")
 
 
 def _load_ingestion_env(env_path: str) -> None:
@@ -66,7 +66,7 @@ def _load_ingestion_env(env_path: str) -> None:
             os.environ[key] = value.strip()
 
 
-_load_ingestion_env(f"{INGESTION_DIR}/.env")
+_load_ingestion_env("/opt/airflow/.env")
 if INGESTION_DIR not in sys.path:
     sys.path.insert(0, INGESTION_DIR)
 
@@ -128,11 +128,11 @@ def risk_model_train_local():
     @task
     def resolve_anchors() -> dict:
         """원천 최신일에서 as_of_end 를 도출하고 학습/홀드아웃 앵커를 확정한다."""
-        from pipeline.train_risk_model.samples import (
+        from ml.samples import (
             detect_label_ready_max,
             resolve_anchors as _resolve,
         )
-        from pipeline.train_risk_model.settings import load_config
+        from ml.settings import load_config
 
         params = _params()
         cfg = load_config()
@@ -208,7 +208,7 @@ def risk_model_train_local():
         가볍다 - 무거운 건 아래 assert_train_table/train_and_evaluate 쪽이고,
         그건 이 DAG을 트리거한 로컬 Airflow 워커(당신 컴퓨터)에서 돈다.
         """
-        from pipeline.train_risk_model.settings import load_config
+        from ml.settings import load_config
 
         cfg = load_config()
         app_env = os.getenv("APP_ENV", "local")
@@ -216,7 +216,7 @@ def risk_model_train_local():
         if app_env == "aws":
             emr_plan = {k: v for k, v in plan.items() if k != "source_probe"}
             run_emr_serverless_spark_job(
-                entry_point="local:///opt/app/pipeline/train_risk_model/samples.py",
+                entry_point="local:///opt/app/src/ml/samples.py",
                 entry_point_arguments=[
                     "--anchor-plan-json",
                     json.dumps(emr_plan, ensure_ascii=False, separators=(",", ":")),
@@ -243,7 +243,7 @@ def risk_model_train_local():
         if app_env != "local":
             raise ValueError(f"지원하지 않는 APP_ENV={app_env!r} 입니다. local 또는 aws만 허용합니다.")
 
-        from pipeline.train_risk_model.samples import get_spark, write_samples
+        from ml.samples import get_spark, write_samples
 
         spark = get_spark(cfg, f"risk-model-samples-{plan['run_key']}")
         try:
@@ -256,8 +256,8 @@ def risk_model_train_local():
     @task
     def assert_train_table(plan: dict, stats: dict) -> dict:
         """행수·앵커수·양성비율·결측률 게이트. pandas 로 로컬 머신 메모리에서 실행된다."""
-        from pipeline.train_risk_model.settings import load_config
-        from pipeline.train_risk_model.train import assert_quality, load_samples
+        from ml.settings import load_config
+        from ml.train import assert_quality, load_samples
 
         cfg = load_config()
         df = load_samples(stats["sample_path"], "train", plan["train_anchors"])
@@ -278,10 +278,10 @@ def risk_model_train_local():
         risk_model_train_dag.py의 동명 태스크와 완전히 동일한 로직 - sklearn/lightgbm
         학습이 여기서 실제로 로컬 머신 CPU/메모리를 쓴다(prod EC2 아님).
         """
-        from pipeline.train_risk_model import registry
-        from pipeline.train_risk_model.evaluate import apply_gate, select_best, walk_forward
-        from pipeline.train_risk_model.settings import load_config
-        from pipeline.train_risk_model.train import (
+        from ml import registry
+        from ml.evaluate import apply_gate, select_best, walk_forward
+        from ml.settings import load_config
+        from ml.train import (
             feature_importance,
             load_pos_new,
             load_samples,
