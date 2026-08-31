@@ -1,6 +1,8 @@
 """Compatibility shim; canonical implementation is bronze.promote_rental_history_catchup_batch."""
 import runpy as _runpy
+import sys as _sys
 from bronze import promote_rental_history_catchup_batch as _canonical
+_sys.modules[__name__] = _canonical
 globals().update({k: v for k, v in vars(_canonical).items() if k != "__name__"})
 
 if __name__ == "__main__":
