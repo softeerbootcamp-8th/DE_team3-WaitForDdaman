@@ -34,7 +34,7 @@ jobs:
       - id: check
         run: |
           has_python=false
-          if [ -f ingestion/requirements.txt ] && [ -f airflow/requirements.txt ]; then
+          if [ -d src ] && [ -f ingestion/requirements.txt ] && [ -f airflow/requirements.txt ]; then
             has_python=true
           fi
 
